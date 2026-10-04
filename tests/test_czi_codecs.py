@@ -63,6 +63,20 @@ def chunked_payload(stored: bytes, chunk: int, method: int, hilo: bool, sizes_fo
     return header + _varint(0) + b"".join(comp)
 
 
+#: JPEG XR pixel formats (GUIDs as stored): imagecodecs encodes RGB as
+#: 24bppRGB; Zeiss stores Bgr24 tiles as 24bppBGR, which libCZI 6 requires
+_PIXEL_FORMAT_24BPP_RGB = bytes.fromhex("24C3DD6F034EFE4BB1853D77768DC90D")
+_PIXEL_FORMAT_24BPP_BGR = _PIXEL_FORMAT_24BPP_RGB[:-1] + b""
+
+
+def _bgr_pixel_format(encoded: bytes) -> bytes:
+    """A JPEG XR stream of colour pixels labelled 24bppBGR, as Zeiss writes
+    it: the coded image is the same, decoders give the samples in B, G, R
+    order (imagecodecs returns R, G, B either way)."""
+    assert encoded.count(_PIXEL_FORMAT_24BPP_RGB) == 1
+    return encoded.replace(_PIXEL_FORMAT_24BPP_RGB, _PIXEL_FORMAT_24BPP_BGR)
+
+
 def _case(name):
     """-> (tiles for write_czi, expected pixels as micro-reader returns them,
     tolerance vs expected)."""
@@ -84,7 +98,7 @@ def _case(name):
     if name == "jpegxr_gray16":
         return imagecodecs.jpegxr_encode(gray16, level=1.0), "u2", 1, 4, gray16, 0
     if name == "jpegxr_rgb":
-        return imagecodecs.jpegxr_encode(rgb, level=1.0), "u1", 3, 4, rgb, 0
+        return _bgr_pixel_format(imagecodecs.jpegxr_encode(rgb, level=1.0)), "u1", 3, 4, rgb, 0
     if name == "jpegxl_gray16":
         return imagecodecs.jpegxl_encode(gray16, lossless=True), "u2", 1, 8, gray16, 0
     if name == "jpegxl_rgb":
