@@ -10,9 +10,13 @@
 #      already on PyPI (codecs unchanged);
 #   4. then micro-reader, which depends on it.
 #
-# One-time setup: on PyPI, a trusted publisher per project (micro-reader,
-# micro-reader-codecs) for workflow release.yml, environment pypi; on GitHub,
-# the environment pypi.
+# One-time setup: on PyPI, a trusted publisher per project for workflow
+# release.yml -- micro-reader with environment pypi, micro-reader-codecs with
+# environment pypi-codecs; on GitHub, both environments.  The environments
+# must differ: a PyPI pending publisher (one that creates its project on the
+# first upload) is matched by repository, workflow and environment only, so
+# two identical ones are indistinguishable and the second project's upload
+# is refused ("Non-user identities cannot create new projects").
 name: Release
 
 on:
@@ -53,7 +57,7 @@ jobs:
     name: publish micro-reader-codecs
     needs: ci
     runs-on: ubuntu-latest
-    environment: pypi
+    environment: pypi-codecs               # its own: see the setup note above
     permissions:
       id-token: write
     steps:
