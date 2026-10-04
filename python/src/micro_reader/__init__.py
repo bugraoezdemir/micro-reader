@@ -1,0 +1,23 @@
+"""micro-reader: read exactly the rectangle you ask for.
+
+>>> import micro_reader
+>>> with micro_reader.open("image.mrc") as f:
+...     block = f.images[0].read(z=0, y=slice(0, 512))
+"""
+from ._base import INDEX_NAMES, SAMPLED_INDICES, File, Image, ReadStats
+from ._metadata import Channel, Metadata, Quantity
+from ._errors import CorruptFileError, MicroReaderError, UnsupportedFormatError
+from ._memory import MemoryLimitError, memory_limit, set_memory_limit
+from ._pool import decode_threads, set_decode_threads
+from ._registry import BACKENDS, open  # noqa: A004 - the public entry point
+from .backends.czi import DamagedFileWarning
+
+__version__ = "0.0.1"
+
+__all__ = [
+    "open", "File", "Image", "INDEX_NAMES", "SAMPLED_INDICES", "ReadStats", "BACKENDS",
+    "Metadata", "Channel", "Quantity",
+    "decode_threads", "set_decode_threads", "memory_limit", "set_memory_limit",
+    "MicroReaderError", "UnsupportedFormatError", "CorruptFileError", "MemoryLimitError", "DamagedFileWarning",
+    "__version__",
+]

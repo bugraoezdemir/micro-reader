@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "micro-reader-codecs"
+dynamic = ["version"]              # from Cargo.toml: one place for the version
+description = "Native (Rust) image decoders for micro-reader: zstd, LZ4, LZW, deflate, PackBits, JPEG (incl. lossless), JPEG 2000, JPEG XL, PNG, WebP, packed bits, EER."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_LICENSES.txt"]
+authors = [{ name = "Bugra Oezdemir", email = "bugraa.ozdemir@gmail.com" }]
+keywords = ["microscopy", "codecs", "zstd", "lz4", "lzw", "deflate", "jpeg", "jpeg2000", "jpegxl",
+            "png", "webp", "eer"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+# no Python dependencies: a compiled module only
+
+[project.urls]
+Homepage = "https://github.com/bugraoezdemir/micro-reader"
+Source = "https://github.com/bugraoezdemir/micro-reader"
+Issues = "https://github.com/bugraoezdemir/micro-reader/issues"
+
+[tool.maturin]
+module-name = "micro_reader_codecs"
+# the C build settings for MSVC (SSE2 defines) must reach source builds too
+include = [{ path = ".cargo/config.toml", format = "sdist" }]

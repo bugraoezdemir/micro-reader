@@ -1,0 +1,51 @@
+[build-system]
+# Pure Python: the native decoders are the separate package
+# micro-reader-codecs (Rust, ../micro-reader-codecs), a direct dependency.
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "micro-reader"
+version = "0.0.1"
+description = "Low-level, memory-bounded pixel reading for microscopy formats: read exactly the rectangle you ask for."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Bugra Oezdemir", email = "bugraa.ozdemir@gmail.com" }]
+keywords = ["microscopy", "bioimage", "image-io", "memory-bounded", "tiff", "ome-tiff", "czi", "nd2",
+            "lif", "leica", "oir", "imaris", "ims", "mrc", "lsm", "eer", "cryo-em"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+# numpy, our own native decoders (PLAN.md, "Dependency policy") and tifffile:
+# TIFF covers most microscopy images, so it is not an extra (Bugra,
+# 2026-10-01) until micro-reader parses TIFF itself (post-0.0.1). The floor
+# matches eubi-bridge's (tifffile>=2025.5.21), so both install together.
+dependencies = ["numpy>=1.24", "micro-reader-codecs>=0.0.1,<0.1", "tifffile>=2025.5.21"]
+
+[project.urls]
+Homepage = "https://github.com/bugraoezdemir/micro-reader"
+Source = "https://github.com/bugraoezdemir/micro-reader"
+Issues = "https://github.com/bugraoezdemir/micro-reader/issues"
+
+[project.optional-dependencies]
+ims = ["h5py>=3.11"]          # first h5py for numpy 2; chunk offsets checked against user blocks
+codecs = ["imagecodecs"]
+all = ["micro-reader[ims,codecs]"]
+# the reference readers and encoders the tests compare with: never shipped
+# (readlif is GPL-3, pylibCZIrw LGPL-3: test-only, PLAN.md "Dependency policy")
+test = ["pytest", "pillow", "h5py>=3.11", "imagecodecs", "zstandard", "nd2", "readlif", "liffile",
+        # no wheels for 3.14 yet (building it needs CMake); its tests skip without it
+        "pylibCZIrw; python_version < '3.14'"]
+dev = ["micro-reader[test]"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/micro_reader"]
