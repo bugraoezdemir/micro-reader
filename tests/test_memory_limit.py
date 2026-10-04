@@ -10,6 +10,7 @@ docs/PLAN.md).
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import tracemalloc
 
@@ -56,6 +57,18 @@ def _plane(rows=1200, cols=2400, dtype="u2"):   # 5.8 MB: above the 4 MB budget
     return data.astype(dtype)
 
 
+def _imwrite(path, data, **kwargs) -> None:
+    """``tifffile.imwrite``, skipping where tifffile needs imagecodecs to
+    encode the file (LZW, PackBits, zstd, the floating-point predictor) and
+    it is not installed, as in CI's oldest-dependencies job."""
+    try:
+        tifffile.imwrite(path, data, **kwargs)
+    except (KeyError, ImportError) as exc:
+        if importlib.util.find_spec("imagecodecs") is not None:
+            raise
+        pytest.skip(f"tifffile cannot write this test file without imagecodecs: {exc}")
+
+
 CODECS = [("zlib", None), ("zlib", "horizontal"), ("lzw", None), ("lzw", "horizontal"),
           ("zstd", None), ("packbits", None), ("lzma", None)]
 
@@ -67,7 +80,7 @@ def test_one_strip_planes_are_streamed(tmp_path, small_budget, compression, pred
     data = _plane()
     path = str(tmp_path / "strip.tif")
     kwargs = {"predictor": predictor} if predictor else {}
-    tifffile.imwrite(path, data, compression=compression, rowsperstrip=data.shape[0], **kwargs)
+    _imwrite(path, data, compression=compression, rowsperstrip=data.shape[0], **kwargs)
     assert data.nbytes > small_budget
     if not _stream.streamable(compression):
         with micro_reader.open(path) as f, pytest.raises(MemoryLimitError, match="decoded whole"):
@@ -83,8 +96,8 @@ def test_one_strip_planes_are_streamed(tmp_path, small_budget, compression, pred
 def test_float_predictor_is_streamed(tmp_path, small_budget):
     data = RNG.normal(size=(1100, 1200)).astype("f4")
     path = str(tmp_path / "float.tif")
-    tifffile.imwrite(path, data, compression="zlib", predictor="floatingpoint",
-                     rowsperstrip=data.shape[0])
+    _imwrite(path, data, compression="zlib", predictor="floatingpoint",
+             rowsperstrip=data.shape[0])
     with micro_reader.open(path) as f:
         np.testing.assert_array_equal(f.images[0][300:310, 50:950], data[300:310, 50:950])
 
