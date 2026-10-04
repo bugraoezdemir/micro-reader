@@ -1,0 +1,104 @@
+"""Backend selection: content first, file extension only as a fallback."""
+from __future__ import annotations
+
+import builtins
+import os
+from typing import Optional
+
+from ._base import SAMPLED_INDICES, File
+from ._errors import UnsupportedFormatError
+from .backends import czi, ims, lif, mrc, nd2, oir, raster, tiff
+
+#: Tried in order: magic numbers before MRC, which may also match by
+#: extension alone.  Each backend module provides ``NAME``,
+#: ``sniff(head: bytes, path: str) -> bool`` and
+#: ``open(path, tiles="separate", resolutions="base") -> File``.
+BACKENDS = [tiff, czi, ims, nd2, oir, lif, raster, mrc]
+
+#: Bytes read from the start of the file for sniffing.
+HEAD_BYTES = 1024
+
+#: mosaic tiles as separate images (default) or composed, where the format
+#: defines how (CZI); see docs/AXES.md
+TILE_POLICIES = ("separate", "stitched")
+
+#: resolution levels: full resolution only (default), or every level as its
+#: own image indexed by "resolution" (image.resolutions gives a pyramid either way)
+RESOLUTION_POLICIES = ("base", "all")
+
+
+def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noqa: A001
+         resolutions: str = "base", rename: Optional[dict] = None,
+         axes: Optional[str] = None, samples: str = "keep", squeeze: bool = False) -> File:
+    """Open *path* with the backend that recognises it (or the one named).
+
+    Each image of the file is one spatial frame with axes ``t c z y x`` (+ ``s``),
+    and an index saying which: scene, tile, rotation, view, and the
+    dimensions sampled at the same points (illumination, phase, block,
+    emission, excitation, lifetime, sequence).  *tiles*: ``"separate"`` gives
+    each mosaic tile as its own image; ``"stitched"`` composes a scene's
+    tiles, for formats that define how (CZI), and is an error for tiled files
+    of other formats.
+
+    *rename* makes an index an array axis, for files that do not say what a
+    dimension is: ``rename={"sequence": "z"}`` reads a plain multi-page TIFF
+    as one z-stack.  The target is ``t``, ``c`` or ``z``; a format that
+    cannot do it for that index raises.
+
+    *axes* (``"canonical"``, or letters such as ``"tczyx"``), *samples* and
+    *squeeze* present every image as ``Image.as_axes`` does.  Each image's
+    ``.source`` is then its native image."""
+    if tiles not in TILE_POLICIES:
+        raise ValueError(f"tiles={tiles!r}: one of {TILE_POLICIES}")
+    if resolutions not in RESOLUTION_POLICIES:
+        raise ValueError(f"resolutions={resolutions!r}: one of {RESOLUTION_POLICIES}")
+    rename = _check_rename(rename)
+    image = _open(os.fspath(path), backend, tiles, resolutions, rename)
+    left = sorted({name for index in image.indices for name in index if name in rename})
+    if left:
+        image.close()
+        raise UnsupportedFormatError(
+            f"rename: {path!r}: the {image.backend} backend cannot make {left} an axis")
+    if axes is not None or samples != "keep" or squeeze:
+        from ._axes import AxesImage
+        try:
+            image.images = [AxesImage(s, axes, samples=samples, squeeze=squeeze)
+                            for s in image.images]
+        except BaseException:
+            image.close()
+            raise
+    return image
+
+
+def _check_rename(rename: Optional[dict]) -> dict:
+    rename = {str(k).lower(): str(v).lower() for k, v in (rename or {}).items()}
+    for name, axis in rename.items():
+        if name not in SAMPLED_INDICES:
+            raise ValueError(f"rename: {name!r} is not an index that can become an axis "
+                             f"(those are {SAMPLED_INDICES})")
+        if axis not in ("t", "c", "z"):
+            raise ValueError(f"rename {name!r}: {axis!r} is not 't', 'c' or 'z'")
+    if len(set(rename.values())) != len(rename):
+        raise ValueError(f"rename {rename}: two indices onto one axis")
+    return rename
+
+
+def _open(path: str, backend: Optional[str], tiles: str, resolutions: str,
+          rename: dict) -> File:
+    def call(module):
+        if rename and getattr(module, "RENAMES", False):
+            return module.open(path, tiles, resolutions, rename=rename)
+        return module.open(path, tiles, resolutions)
+
+    if backend is not None:
+        for module in BACKENDS:
+            if module.NAME == backend:
+                return call(module)
+        raise UnsupportedFormatError(
+            f"unknown backend {backend!r}; available: {[m.NAME for m in BACKENDS]}")
+    with builtins.open(path, "rb") as fh:
+        head = fh.read(HEAD_BYTES)
+    for module in BACKENDS:
+        if module.sniff(head, path):
+            return call(module)
+    raise UnsupportedFormatError(f"no micro-reader backend recognises {path!r}")

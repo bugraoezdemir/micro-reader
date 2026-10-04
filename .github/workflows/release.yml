@@ -1,0 +1,85 @@
+# Publish to PyPI when a GitHub release is published (trusted publishing, no
+# API tokens).  One release, tag vX.Y.Z, publishes both packages:
+#
+#   1. the full CI runs on the release's commit (ci.yml); nothing is published
+#      unless it passes;
+#   2. the tag must equal micro-reader's version (python/pyproject.toml), and
+#      if codecs/ changed since the previous release its version
+#      (codecs/Cargo.toml) must have been bumped;
+#   3. micro-reader-codecs is published -- skipped when that version is
+#      already on PyPI (codecs unchanged);
+#   4. then micro-reader, which depends on it.
+#
+# One-time setup: on PyPI, a trusted publisher per project (micro-reader,
+# micro-reader-codecs) for workflow release.yml, environment pypi; on GitHub,
+# the environment pypi.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: tag and versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                  # every tag: the previous release
+      - name: tag matches python/pyproject.toml
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('python/pyproject.toml', 'rb'))['project']['version'])")
+          test "v$version" = "${{ github.event.release.tag_name }}" \
+            || { echo "::error::release tag ${{ github.event.release.tag_name }} != v$version (python/pyproject.toml)"; exit 1; }
+      - name: codecs version bumped if codecs changed since the previous release
+        run: |
+          previous=$(git tag --list 'v*' --sort=-v:refname | grep -vx "${{ github.event.release.tag_name }}" | head -n1)
+          if [ -z "$previous" ]; then echo "first release: nothing to compare"; exit 0; fi
+          if git diff --quiet "$previous" HEAD -- codecs/; then echo "codecs unchanged since $previous"; exit 0; fi
+          now=$(python3 -c "import tomllib; print(tomllib.load(open('codecs/Cargo.toml', 'rb'))['package']['version'])")
+          before=$(git show "$previous:codecs/Cargo.toml" | python3 -c "import sys, tomllib; print(tomllib.loads(sys.stdin.read())['package']['version'])")
+          test "$now" != "$before" \
+            || { echo "::error::codecs/ changed since $previous but its version is still $now: bump codecs/Cargo.toml"; exit 1; }
+
+  ci:
+    needs: checks
+    uses: ./.github/workflows/ci.yml        # also builds the codecs wheels and sdist
+
+  publish-codecs:
+    name: publish micro-reader-codecs
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: codecs-*                 # every wheel and the sdist
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true               # unchanged codecs: already on PyPI
+
+  publish-python:
+    name: publish micro-reader
+    needs: publish-codecs
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build sdist and wheel
+        run: |
+          python -m pip install build
+          python -m build python --outdir dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
