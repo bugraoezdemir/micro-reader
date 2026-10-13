@@ -12,6 +12,7 @@ import pytest
 
 import micro_reader
 from micro_reader import MicroReaderError, UnsupportedFormatError
+from micro_reader.backends import nd2 as nd2_backend
 
 from _nd2_writer import write_nd2
 
@@ -143,7 +144,9 @@ def test_writer_agrees_with_nd2_library(tmp_path, name):
         np.testing.assert_array_equal(a.transpose(order), ref)
 
 
-def test_uncompressed_reads_only_the_rows_asked_for(tmp_path):
+def test_uncompressed_reads_only_the_rows_asked_for(tmp_path, monkeypatch):
+    # the exact path: no skipped columns are read (see test_*_spans for merged rows)
+    monkeypatch.setattr(nd2_backend, "SEPARATE_READ_BYTES", 0)
     path, expected = _write(tmp_path, "z_rgb_padded")
     with micro_reader.open(path) as img:
         scene = img.images[0]
@@ -211,3 +214,13 @@ def test_concurrent_reads(tmp_path, decode_threads):
         for t in threads:
             t.join()
     assert errors == []
+
+
+def test_uncompressed_narrow_reads_merge_rows(tmp_path):
+    """Narrow columns: the few skipped bytes per row cost less than one read per row,
+    so whole rows are read (as in LIF); pixels stay exact."""
+    path, expected = _write(tmp_path, "z_rgb_padded")
+    with micro_reader.open(path) as img:
+        scene = img.images[0]
+        np.testing.assert_array_equal(scene[0, 0, 2, 10:14, 5:9], expected[0][0, 0, 2, 10:14, 5:9])
+        assert scene.stats.pixels_read == 4 * 53 * 3                 # 4 whole rows

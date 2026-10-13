@@ -10,6 +10,7 @@ import pytest
 
 import micro_reader
 from micro_reader import CorruptFileError, UnsupportedFormatError
+from micro_reader.backends import mrc as mrc_backend
 
 MODE_OF = {"i1": 0, "i2": 1, "f4": 2, "c8": 4, "u2": 6, "f2": 12}
 
@@ -73,7 +74,9 @@ def test_every_mode_and_byte_order_reads_back(tmp_path, dtype, order):
     (3, 36, 52), (slice(None), slice(10, 11)), (Ellipsis, slice(40, 53)),
     (2, slice(0, 37, 5), slice(1, 53, 7)),
 ])
-def test_exact_rectangles_and_no_over_read(tmp_path, key):
+def test_exact_rectangles_and_no_over_read(tmp_path, key, monkeypatch):
+    # the exact path: no skipped columns are read (see test_*_spans for merged rows)
+    monkeypatch.setattr(mrc_backend, "SEPARATE_READ_BYTES", 0)
     data = _data("u2")
     with micro_reader.open(write_mrc(tmp_path / "a.mrc", data)) as img:
         scene = img.images[0]
@@ -190,7 +193,9 @@ def test_results_are_copies_not_views(tmp_path):
         np.testing.assert_array_equal(img.images[0][0], data[0])
 
 
-def test_concurrent_reads(tmp_path):
+def test_concurrent_reads(tmp_path, monkeypatch):
+    # the exact path: no skipped columns are read (see test_*_spans for merged rows)
+    monkeypatch.setattr(mrc_backend, "SEPARATE_READ_BYTES", 0)
     data = _data("u2", shape=(8, 256, 300))
     with micro_reader.open(write_mrc(tmp_path / "a.mrc", data)) as img:
         scene, errors = img.images[0], []
@@ -211,3 +216,14 @@ def test_concurrent_reads(tmp_path):
             t.join()
         assert errors == []
         assert scene.stats.reads == 64 and scene.stats.over_read == 1.0
+
+
+def test_narrow_reads_merge_rows(tmp_path):
+    """Part of the columns of many rows: one read per run of rows, the skipped bytes
+    included (they cost less than one more read per row); rows still bottom-up."""
+    data = _data("u2", shape=(3, 64, 300))
+    with micro_reader.open(write_mrc(tmp_path / "a.mrc", data)) as img:
+        scene = img.images[0]
+        np.testing.assert_array_equal(scene[1, 10:42, 50:250], data[1, 10:42, 50:250])
+        assert scene.stats.pixels_read == 31 * 300 + 200
+        np.testing.assert_array_equal(scene[:, 0:1, 7:9], data[:, 0:1, 7:9])     # one row

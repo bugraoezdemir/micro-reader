@@ -548,6 +548,20 @@ class _CziImage(Image):
             fh.seek(base + (y0 - sy0) * s.width * item)
             if fh.readinto(memoryview(buf).cast("B")) != buf.nbytes:
                 raise CorruptFileError(f"{self._czi.path!r}: subblock data ends early")
+        elif y1 - y0 > 1 and (s.width - width) * item <= SEPARATE_READ_BYTES:
+            # a few skipped bytes per row cost less than one more read per row: the span
+            # from the first row's columns to the last row's, in one read
+            rows, row = y1 - y0, s.width * self._samples
+            span = (rows - 1) * row + width * self._samples
+            flat = np.empty(span, self._file_dtype)
+            fh.seek(base + ((y0 - sy0) * s.width + (x0 - sx0)) * item)
+            if fh.readinto(memoryview(flat).cast("B")) != flat.nbytes:
+                raise CorruptFileError(f"{self._czi.path!r}: subblock data ends early")
+            buf = np.lib.stride_tricks.as_strided(
+                flat, shape=(rows, width * self._samples),
+                strides=(row * flat.itemsize, flat.itemsize))
+            self._place(buf, target, rows, width)
+            return span
         else:
             buf = np.empty((y1 - y0, width * self._samples), self._file_dtype)
             for i in range(y1 - y0):

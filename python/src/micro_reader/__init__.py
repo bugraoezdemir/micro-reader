@@ -8,6 +8,7 @@ from ._base import INDEX_NAMES, SAMPLED_INDICES, File, Image, ReadStats
 from ._metadata import Channel, Metadata, Quantity
 from ._errors import CorruptFileError, MicroReaderError, UnsupportedFormatError
 from ._memory import MemoryLimitError, memory_limit, set_memory_limit
+from ._io import cache_limit, cached_bytes, set_cache_limit
 from ._pool import decode_threads, set_decode_threads
 from ._registry import BACKENDS, open  # noqa: A004 - the public entry point
 from .backends.czi import DamagedFileWarning
@@ -18,6 +19,7 @@ __all__ = [
     "open", "File", "Image", "INDEX_NAMES", "SAMPLED_INDICES", "ReadStats", "BACKENDS",
     "Metadata", "Channel", "Quantity",
     "decode_threads", "set_decode_threads", "memory_limit", "set_memory_limit",
+    "cache_limit", "set_cache_limit", "cached_bytes",
     "MicroReaderError", "UnsupportedFormatError", "CorruptFileError", "MemoryLimitError", "DamagedFileWarning",
     "__version__",
 ]

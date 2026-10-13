@@ -54,6 +54,7 @@ NAME = "tiff"
 MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")   # classic and BigTIFF
 CHUNK_BYTES = 4 << 20            # buffered raw rows are read this many bytes at a time
 RAW_TASK_BYTES = 8 << 20         # uncompressed strip runs are split into pool tasks of this size
+SEPARATE_READ_BYTES = 32 << 10   # bytes worth skipping rather than issuing one more read
 DECODE_CACHE_BYTES = 64 << 20    # decoded segments kept per scene
 STREAM_PIECE_BYTES = 8 << 20     # rows of a streamed segment decoded at a time (reserved)
 #: image codecs that decode a rectangle alone (``_area_into``)
@@ -467,6 +468,25 @@ class _TiffImage(Image):
             fh.seek(offset + rows[0] * row_len * item)
             _readinto(fh, dst, self._path)
             return dst.size
+        width = cols[1] - cols[0]
+        if (cols != (0, stride) and rows[1] - rows[0] > 1
+                and (stride - width) * nc * item <= SEPARATE_READ_BYTES):
+            # a few skipped bytes per row cost less than one more read per row (as in
+            # LIF): read the span from the first row's columns to the last row's, in
+            # chunks, and keep the columns asked for
+            per_chunk = max(1, CHUNK_BYTES // (row_len * item))
+            flat = np.empty(min(per_chunk, rows[1] - rows[0]) * row_len, self._file_dtype)
+            read = 0
+            for a in range(rows[0], rows[1], per_chunk):
+                n = min(per_chunk, rows[1] - a)
+                span = (n - 1) * row_len + width * nc
+                fh.seek(offset + (a * stride + cols[0]) * nc * item)
+                _readinto(fh, flat[:span], self._path)
+                rows_view = np.lib.stride_tricks.as_strided(
+                    flat, shape=(n, width, nc), strides=(row_len * item, nc * item, item))
+                dst[a - rows[0]:a - rows[0] + n] = rows_view[..., cs]
+                read += span
+            return read
         if cols != (0, stride) and direct and dst[0].flags.c_contiguous:
             width = cols[1] - cols[0]
             for r in range(rows[0], rows[1]):
