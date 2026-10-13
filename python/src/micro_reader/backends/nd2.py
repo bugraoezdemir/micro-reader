@@ -36,6 +36,7 @@ from . import _nd2_structure as structure
 NAME = "nd2"
 DECODE_CACHE_BYTES = 64 << 20
 RAW_TASK_BYTES = 8 << 20          # uncompressed frames are read in row pieces of this size
+SEPARATE_READ_BYTES = 32 << 10    # bytes worth skipping rather than issuing one more read
 STREAM_PIECE_BYTES = 8 << 20      # rows of a streamed "lossless" frame decoded at a time
 TIMESTAMP_BYTES = 8               # each frame chunk starts with a float64 timestamp
 
@@ -168,7 +169,10 @@ class _Nd2Image(Image):
     def _raw_tasks(self, start, dst, cs, ys, xs, ss):
         f, a = self._f, self._f.attrs
         per_task = max(1, RAW_TASK_BYTES // a.width_bytes)
-        whole_rows = (xs.stop - xs.start) * 2 >= a.width     # else: only the needed bytes per row
+        # whole rows when the columns skipped per row are few: fewer bytes than another read
+        # call costs (as in LIF), or at most half the row; else only the needed bytes per row
+        skipped = a.width_bytes - (xs.stop - xs.start) * f.pixel_bytes
+        whole_rows = (xs.stop - xs.start) * 2 >= a.width or skipped <= SEPARATE_READ_BYTES
         for y0 in range(ys.start, ys.stop, per_task):
             y1 = min(ys.stop, y0 + per_task)
             part = dst[:, y0 - ys.start:y1 - ys.start]

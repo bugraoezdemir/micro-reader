@@ -625,7 +625,23 @@ You can also set it through the environment:
 export MICRO_READER_MEMORY_LIMIT=8GB
 ```
 
-For uncompressed data, only the requested rows and columns are read.
+The limit covers the blocks being decoded at once. Decoded blocks are also kept for reuse,
+so a block shared by neighbouring reads is not decoded twice. All open files share one
+cache limit, 256 MB by default:
+
+```python
+micro_reader.set_cache_limit("512MB")
+micro_reader.cache_limit()
+micro_reader.cached_bytes()     # what the caches hold now
+```
+
+or `export MICRO_READER_CACHE_LIMIT=512MB`. The process then uses at most the memory
+limit plus the cache limit for decoding, however many files are open. One exception: a
+single picture (PNG, JPEG, ... up to 256 MB) is kept decoded by its own open file.
+
+For uncompressed data, only the requested rows are read. When you ask for part of
+each row, the rest of the row is read along with it if that is faster than reading the
+rows one by one.
 
 Compressed data is stored in blocks such as TIFF strips or tiles, CZI subblocks, and ND2 frames. Small blocks are decoded as a whole. Blocks larger than 16 MB are read in parts where the codec allows it.
 

@@ -11,6 +11,7 @@ tifffile = pytest.importorskip("tifffile")
 
 import micro_reader  # noqa: E402
 from micro_reader import UnsupportedFormatError  # noqa: E402
+from micro_reader.backends import tiff as tiff_backend  # noqa: E402
 
 try:
     import imagecodecs  # noqa: F401
@@ -132,8 +133,10 @@ def test_matches_tifffile(files, name, decode_threads):
 
 @pytest.mark.parametrize("name", ["single_strip", "strips_37", "strips_1", "big_endian",
                                   "float32", "imagej_tzcyx"])
-def test_uncompressed_strips_read_exactly(files, name):
+def test_uncompressed_strips_read_exactly(files, name, monkeypatch):
     """No over-read, however the rows are split into strips."""
+    # the exact path: no skipped columns are read (see test_*_spans for merged rows)
+    monkeypatch.setattr(tiff_backend, "SEPARATE_READ_BYTES", 0)
     ref, _ = _reference(files[name])
     with micro_reader.open(files[name]) as img:
         scene = img.images[0]
@@ -143,8 +146,10 @@ def test_uncompressed_strips_read_exactly(files, name):
         assert scene.stats.over_read == 1.0
 
 
-def test_uncompressed_single_strip_reads_only_the_rectangle(tmp_path):
+def test_uncompressed_single_strip_reads_only_the_rectangle(tmp_path, monkeypatch):
     """The case aszarr handles worst: one strip per plane."""
+    # the exact path: no skipped columns are read (see test_*_spans for merged rows)
+    monkeypatch.setattr(tiff_backend, "SEPARATE_READ_BYTES", 0)
     data = _data((2000, 3000))
     path = str(tmp_path / "a.tif")
     tifffile.imwrite(path, data)
@@ -163,6 +168,7 @@ def test_uncompressed_runs_split_into_pool_tasks(files, name, decode_threads, mo
     rows, on direct (native) and buffered (big endian, sample subset) reads."""
     from micro_reader.backends import tiff
     monkeypatch.setattr(tiff, "RAW_TASK_BYTES", 3000)
+    monkeypatch.setattr(tiff, "SEPARATE_READ_BYTES", 0)   # the exact path
     ref, _ = _reference(files[name])
     with micro_reader.open(files[name]) as img:
         scene = img.images[0]
@@ -320,3 +326,33 @@ def test_concurrent_reads(files, name, decode_threads):
         for t in threads:
             t.join()
         assert errors == []
+
+
+@pytest.mark.parametrize("name", ["single_strip", "strips_37", "big_endian", "rgb_contig",
+                                  "rgb_separate", "imagej_tzcyx", "float32"])
+def test_uncompressed_narrow_reads_merge_rows(files, name):
+    """Part of the columns of many rows: the skipped bytes per row cost less than one
+    more read per row, so a run of rows is one read (as in LIF); pixels stay exact."""
+    ref, _ = _reference(files[name])
+    with micro_reader.open(files[name]) as img:
+        scene = img.images[0]
+        for key in _keys(ref.shape, seed=11):
+            np.testing.assert_array_equal(scene[key], ref[key], err_msg=f"{name} {key}")
+
+
+def test_uncompressed_single_strip_merged_span(tmp_path):
+    """One read for the 64 rows: from the first row's columns to the last row's (the
+    case that made a 768-column tile of a 2916-wide plane 8x slower, one read per row)."""
+    data = _data((2000, 3000))
+    path = str(tmp_path / "a.tif")
+    tifffile.imwrite(path, data)
+    with micro_reader.open(path) as img:
+        scene = img.images[0]
+        np.testing.assert_array_equal(scene[1000:1064, 1500:1564], data[1000:1064, 1500:1564])
+        assert scene.stats.pixels_read == 63 * 3000 + 64
+    big = _data((64, 40000))                                    # 80 KB skipped per row
+    tifffile.imwrite(path, big)
+    with micro_reader.open(path) as img:
+        scene = img.images[0]
+        np.testing.assert_array_equal(scene[:, 100:164], big[:, 100:164])
+        assert scene.stats.pixels_read == 64 * 64              # rows read separately

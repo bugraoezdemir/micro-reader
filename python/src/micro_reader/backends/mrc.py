@@ -31,6 +31,7 @@ from .._metadata import Channel, Metadata, quantity
 NAME = "mrc"
 HEADER_BYTES = 1024
 CHUNK_BYTES = 4 << 20        # full-width rows are read this many bytes at a time
+SEPARATE_READ_BYTES = 32 << 10  # bytes worth skipping rather than issuing one more read
 EXTENSIONS = {".mrc", ".mrcs", ".map", ".st", ".ali", ".rec"}
 
 #: MRC2014 mode -> numpy dtype.  Mode 0 is *signed* int8 in MRC2014; older
@@ -93,9 +94,13 @@ class _MrcImage(Image):
         # bottom of the image.  Rows are returned top-down, as Bio-Formats
         # (and so eubi-bridge, Fiji, OME-Zarr viewers) presents them: display
         # row y is file row ny-1-y.
+        read = out.size
         with builtins.open(self._path, "rb", buffering=0) as fh:
             if xs.stop - xs.start == nx:
                 self._read_full_rows(fh, zs, ys, out)
+            elif (ys.stop - ys.start > 1
+                  and (nx - (xs.stop - xs.start)) * item <= SEPARATE_READ_BYTES):
+                read = self._read_row_spans(fh, zs, ys, xs, out)
             else:
                 length = out.shape[2] * item
                 for i, z in enumerate(range(zs.start, zs.stop)):
@@ -107,7 +112,33 @@ class _MrcImage(Image):
                                 f"{self._path!r}: short read at section {z}")
         if not self._file_dtype.isnative:
             out = out.byteswap(inplace=True).view(self.dtype)
-        return out, out.size
+        return out, read
+
+    def _read_row_spans(self, fh, zs, ys, xs, out) -> int:
+        """Part of each row, when the columns skipped per row are few: they cost less
+        than one more read per row (as in LIF). Each chunk of rows is one read, from the
+        first row's columns to the last row's, reversed into place (bottom-up rows).
+        Returns the values read."""
+        nz, ny, nx = self.shape
+        item = self._file_dtype.itemsize
+        width = xs.stop - xs.start
+        per_chunk = max(1, CHUNK_BYTES // (nx * item))
+        flat = np.empty(min(per_chunk, ys.stop - ys.start) * nx, dtype=self._file_dtype)
+        first, stop = ny - ys.stop, ny - ys.start          # file rows, bottom-up
+        read = 0
+        for i, z in enumerate(range(zs.start, zs.stop)):
+            for f in range(first, stop, per_chunk):
+                n = min(per_chunk, stop - f)
+                span = (n - 1) * nx + width
+                fh.seek(self._offset + ((z * ny + f) * nx + xs.start) * item)
+                if fh.readinto(memoryview(flat[:span]).cast("B")) != span * item:
+                    raise CorruptFileError(f"{self._path!r}: short read at section {z}")
+                rows = np.lib.stride_tricks.as_strided(flat, shape=(n, width),
+                                                       strides=(nx * item, item))
+                top = ny - f - n - ys.start                   # display row of file row f+n-1
+                out[i, top:top + n] = rows[::-1]
+                read += span
+        return read
 
     def _read_full_rows(self, fh, zs, ys, out):
         """Full-width rows of a section are contiguous in the file: read them
