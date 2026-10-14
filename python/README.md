@@ -522,13 +522,13 @@ pip install "micro-reader[codecs]"
 
 ### OME companion files
 
-An OME companion file (`.companion.ome`) describes images whose planes are stored in separate OME-TIFF files. Opening the companion reads each of its images as one `t c z y x` image:
+An OME companion file (`.companion.ome`) describes images stored in separate TIFF files. Opening the companion reads all those images and groups them together as one `t c z y x` image:
 
 ```python
 f = micro_reader.open("data.companion.ome")
 ```
 
-Opening one of the OME-TIFF files on its own reads only that file, with its pixel sizes, channels and position taken from the companion. If the companion is missing, the file is read without pixel sizes, with a `CompanionWarning`.
+Opening one of the TIFF files on its own reads only that file, with its pixel sizes, channels and position taken from the companion. If the companion is missing, the file is read without pixel sizes, with a `CompanionWarning`.
 
 ### CZI
 

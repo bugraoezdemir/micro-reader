@@ -2,6 +2,7 @@
 (``Index.idx.xml``, HarmonyV4 / V5) with one small TIFF per plane."""
 from __future__ import annotations
 
+import io
 import os
 import threading
 import warnings
@@ -16,6 +17,19 @@ from micro_reader import _fileset
 tifffile = pytest.importorskip("tifffile")
 RNG = np.random.default_rng(21)
 Y, X = 12, 16
+
+
+def _lzw_or_zlib() -> str:
+    """LZW, as Harmony writes its TIFFs, when this tifffile can encode it (its
+    oldest supported version needs imagecodecs for that); zlib otherwise."""
+    try:
+        tifffile.imwrite(io.BytesIO(), np.zeros((2, 2), "u2"), compression="lzw")
+        return "lzw"
+    except (KeyError, ImportError, AttributeError, ValueError):
+        return "zlib"
+
+
+COMPRESSION = _lzw_or_zlib()
 
 
 def _write_harmony(folder, wells=((1, 1), (2, 3)), fields=2, channels=2, planes=1,
@@ -39,7 +53,7 @@ def _write_harmony(folder, wells=((1, 1), (2, 3)), fields=2, channels=2, planes=
                             if key not in missing and key not in empty:
                                 a = RNG.integers(0, 4000, (Y, X)).astype("u2")
                                 tifffile.imwrite(os.path.join(images_dir, url), a,
-                                                 compression="lzw" if compress else None)
+                                                 compression=COMPRESSION if compress else None)
                                 data[key] = a
                             ident = f"{r:02d}{c:02d}K{t + 1}F{f}P{p}R{ch}"
                             refs.append(f'<Image id="{ident}" />')
