@@ -1,6 +1,7 @@
 """Metadata of TIFF-family images (docs/METADATA.md), from what tifffile
 parses: OME-XML, then Zeiss LSM's CZ_LSMINFO, then the ImageJ description,
-then the plain resolution tags.  The first of them a file has is used.
+then MetaMorph STK's calibration, then the plain resolution tags.  The first
+of them a file has is used.
 
 OME ``Plane`` PositionX / PositionY are taken as the centre of the image (as
 Bio-Formats writes them) and moved to the first pixel's centre; without a
@@ -21,9 +22,11 @@ OME_DEFAULT_WAVELENGTH = "nm"
 RESOLUTION_UNITS = {2: "inch", 3: "centimeter"}
 
 
-def tiff_metadata(image, n_channels: int, cache: dict):
+def tiff_metadata(image, n_channels: int, cache: dict, resolution_tags: bool = True):
     """The ``Metadata`` of TIFF *image* (a _TiffImage of series
-    ``image._series_index``); *cache* holds what is parsed once per file."""
+    ``image._series_index``); *cache* holds what is parsed once per file.
+    *resolution_tags* False: real metadata only, never the bare resolution tags
+    (a companion's members fill its gaps this way, docs/COMPANION.md)."""
     tif = image._tif
     if tif.is_ome and tif.ome_metadata:
         meta = _ome(image, n_channels, cache)
@@ -33,10 +36,29 @@ def tiff_metadata(image, n_channels: int, cache: dict):
         return _lsm(tif.lsm_metadata, n_channels)
     if tif.is_imagej and tif.imagej_metadata is not None:
         return _imagej(tif, image._key, n_channels)
-    sizes = _resolution_tags(image._key)
+    if tif.is_stk and tif.stk_metadata:
+        meta = _stk(tif.stk_metadata, n_channels)
+        if meta is not None:
+            return meta
+    # a BinaryOnly stub keeps its metadata in another file (an OME companion):
+    # its resolution tags are no pixel size (a 96 dpi display default gave 264.6 um)
+    stub = bool(tif.is_ome and "BinaryOnly" in (tif.ome_metadata or ""))
+    sizes = _resolution_tags(image._key) if resolution_tags and not stub else {}
     if sizes:
         return Metadata(pixel_sizes=sizes, channels=_unknown_channels(n_channels))
     return None
+
+
+def _stk(md: dict, n_channels: int):
+    """MetaMorph STK (also MetaXpress plates): the spatial calibration of its
+    UIC tags (``XCalibration`` / ``YCalibration`` in ``CalibrationUnits``).
+    Their resolution tags are a meaningless 72 dpi.  None without one."""
+    unit = md.get("CalibrationUnits") or None
+    sizes = {axis: quantity(md.get(f"{axis.upper()}Calibration"), unit) for axis in "xy"}
+    sizes = {a: q for a, q in sizes.items() if q}
+    if not sizes:
+        return None
+    return Metadata(pixel_sizes=sizes, channels=_unknown_channels(n_channels))
 
 
 def _unknown_channels(n: int) -> tuple:
@@ -102,6 +124,35 @@ def _ome(image, n_channels: int, cache: dict):
     element = _ome_image(image, cache)
     if element is None:
         return None
+
+    def annotations():
+        if "annotations" not in cache:
+            try:
+                root = ET.fromstring(image._tif.ome_metadata)
+            except ET.ParseError:
+                root = None
+            cache["annotations"] = ome_annotations(root)
+        return cache["annotations"]
+
+    return ome_image_metadata(element, dict(zip(image.axes, image.shape)), n_channels,
+                              image.index, annotations)
+
+
+def ome_annotations(root) -> dict:
+    """{ID: XMLAnnotation element} of an OME root element (None: {})."""
+    return {e.get("ID"): e for e in (root.iter() if root is not None else [])
+            if _local(e.tag) == "XMLAnnotation"}
+
+
+def ome_image_metadata(element, shape: dict, n_channels: int, index: dict, annotations):
+    """The ``Metadata`` an OME ``Image`` element gives, or None without
+    ``Pixels``: pixel sizes, time increment, channels, the first plane's stage
+    position, Modulo index values.  Shared by OME-TIFF and companion files.
+
+    *shape*: axis -> size of the image it describes (positions are moved from
+    the field's centre to the first pixel); *index*: that image's index;
+    *annotations*: a callable giving {ID: XMLAnnotation element}, called only
+    when the image refers to an annotation."""
     pixels = _children(element, "Pixels")
     if not pixels:
         return None
@@ -129,50 +180,51 @@ def _ome(image, n_channels: int, cache: dict):
         # the first plane (TheZ = TheT = TheC = 0 when listed)
         first = min(planes, key=lambda e: (int(e.get("TheT", 0)), int(e.get("TheZ", 0)),
                                            int(e.get("TheC", 0))))
-        shape = dict(zip(image.axes, image.shape))
-        for axis, attr in (("x", "PositionX"), ("y", "PositionY")):
-            # no unit: OME's "reference frame", which is not a length
-            q = quantity(first.get(attr), first.get(attr + "Unit"), positive=False)
-            size = sizes.get(axis)
-            if q and size and axis in shape:
-                # Bio-Formats writes the field's centre (checked: an OME-TIFF
-                # it converted from a CZI gives the CZI's first pixel this way)
-                step = size.to(q.unit).value
-                position[axis] = Quantity(q.value - (shape[axis] / 2 - 0.5) * step, q.unit)
+        position = ome_plane_position(first, sizes, shape)
     return Metadata(pixel_sizes=sizes, position=position,
                     channels=_channels(channels, n_channels),
-                    index_values=_ome_index_values(image, element, cache))
+                    index_values=_ome_index_values(element, index, annotations))
+
+
+def ome_plane_position(plane, sizes: dict, shape: dict) -> dict:
+    """The stage position of an OME ``Plane`` element's first pixel: x / y
+    from its PositionX / Y, which Bio-Formats writes as the field's centre
+    (checked: an OME-TIFF it converted from a CZI gives the CZI's first pixel
+    this way); unknown without a pixel size or a length unit (OME's
+    "reference frame")."""
+    position = {}
+    for axis, attr in (("x", "PositionX"), ("y", "PositionY")):
+        q = quantity(plane.get(attr), plane.get(attr + "Unit"), positive=False)
+        size = sizes.get(axis)
+        if q and size and axis in shape:
+            step = size.to(q.unit).value
+            position[axis] = Quantity(q.value - (shape[axis] / 2 - 0.5) * step, q.unit)
+    return position
 
 
 #: OME Modulo types with a physical value per index (D5) -> micro-reader axis
 MODULO_INDICES = {"lambda": "emission", "lifetime": "lifetime"}
 
 
-def _ome_index_values(image, element, cache: dict) -> dict:
+def _ome_index_values(element, index: dict, annotations) -> dict:
     """This image's value of the indices an OME ``Modulo`` annotation adds
     (D5: only those with a physical meaning: lambda, lifetime), from Start /
-    Step and Unit and the image's index; labels and unit-less values are not
+    Step and Unit and the image's *index*; labels and unit-less values are not
     physical values."""
     refs = {e.get("ID") for e in element if _local(e.tag) == "AnnotationRef"}
     if not refs:
         return {}
-    if "annotations" not in cache:
-        try:
-            root = ET.fromstring(image._tif.ome_metadata)
-        except ET.ParseError:
-            root = None
-        cache["annotations"] = {e.get("ID"): e for e in (root.iter() if root is not None else [])
-                                if _local(e.tag) == "XMLAnnotation"}
+    found = annotations()
     out = {}
     for ref in refs:
-        annotation = cache["annotations"].get(ref)
+        annotation = found.get(ref)
         if annotation is None:
             continue
         for along in annotation.iter():
             if not _local(along.tag).startswith("ModuloAlong"):
                 continue
             name = MODULO_INDICES.get(along.get("Type", ""))
-            k = image.index.get(name) if name else None
+            k = index.get(name) if name else None
             if k is None or "Start" not in along.attrib:
                 continue
             try:

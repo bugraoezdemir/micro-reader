@@ -65,9 +65,12 @@ class Image:
         self.name = name if name is not None else f"image{position}"
         #: which image of the file: {"scene": .., "tile": .., "rotation": ..,
         #: "view": .., "resolution": ..} -- only the indices the file has
-        #: ("resolution" only when opened with resolutions="all")
+        #: (plates: "well", "field", ... instead of "scene"; see INDEX_NAMES)
         self.index = dict(index) if index is not None else {"scene": self._position}
         self._resolutions: Optional[list] = None
+        #: a ragged image's rectangular parts / a part's whole (see ``parts``)
+        self._parts: Optional[list] = None
+        self._whole: Optional["Image"] = None
         self._metadata = None           # backends set a _metadata.Metadata
         #: None: any rectangle is read exactly.  Otherwise the smallest block
         #: the backend reads at once (e.g. a compressed tile or strip).
@@ -107,6 +110,55 @@ class Image:
         """Whether the file stores lower resolution levels of this image
         (``resolutions`` holds more than the image itself)."""
         return len(self.resolutions) > 1
+
+    # An image is either a pyramid (the logical image: level 0, also when the
+    # file stores no lower levels) or a lower resolution level of one.
+
+    @property
+    def is_pyramid(self) -> bool:
+        """Whether this image is a pyramid, the image itself at full
+        resolution, rather than a lower resolution level of one.  True for
+        every image without lower levels too."""
+        return self.pyramid is self
+
+    @property
+    def level(self) -> int:
+        """This image's resolution level in its pyramid: 0 for the pyramid
+        itself (full resolution), 1, 2, ... for lower levels."""
+        for n, member in enumerate(self.resolutions):
+            if member is self:
+                return n
+        raise RuntimeError(f"{self.name!r} is not in its own pyramid")
+
+    @property
+    def pyramid(self) -> "Image":
+        """The pyramid this image belongs to: itself at level 0, the
+        full-resolution image for a lower level."""
+        return self.resolutions[0]
+
+    # A ragged image: its channels do not share one sampling (e.g. one channel
+    # a z-stack, the others single planes; docs/AXES.md).  It is a whole made of
+    # rectangular parts, each an ordinary lazy Image with its own z / t and
+    # metadata.  The whole reads as one array, padded with zeros, when the
+    # parts lie on a common grid; otherwise reading it raises.
+
+    @property
+    def parts(self) -> list:
+        """This image's rectangular parts, channel groups that share one
+        sampling: several for a ragged image, just this image otherwise."""
+        return list(self._parts) if self._parts else [self]
+
+    @property
+    def is_ragged(self) -> bool:
+        """Whether this image's channels do not share one sampling
+        (``parts`` holds more than one part)."""
+        return len(self.parts) > 1
+
+    @property
+    def whole(self) -> "Image":
+        """The image this part belongs to: itself for a whole (or an image
+        that is not ragged)."""
+        return self._whole if self._whole is not None else self
 
     @property
     def resolutions(self) -> list:
@@ -177,12 +229,18 @@ class Image:
 
 #: the indices that say which image of a file an image is, outermost first.
 #: Arrays have only t c z y x (+ s); every other dimension is an index:
-#: illumination (light-sheet sides), phase, block (CZI), emission / excitation
-#: (spectral scans; the wavelength in the image's metadata), lifetime (FLIM
-#: bins) and sequence (a dimension the file does not name; open(...,
+#: plate, acquisition (imaging run), well and field for plates (docs/HCS.md;
+#: on a plate, well and field take the place of scene), illumination
+#: (light-sheet sides), phase, block (CZI), emission / excitation (spectral
+#: scans; the wavelength in the image's metadata), lifetime (FLIM bins) and
+#: sequence (a dimension the file does not name; open(...,
 #: rename={"sequence": "z"}) makes it an axis)
-INDEX_NAMES = ("scene", "tile", "rotation", "view", "illumination", "phase", "block",
-               "emission", "excitation", "lifetime", "sequence", "resolution")
+INDEX_NAMES = ("plate", "acquisition", "well", "field",
+               "scene", "tile", "rotation", "view", "illumination", "phase", "block",
+               "emission", "excitation", "lifetime", "sequence", "part", "resolution")
+#: the indices of plates (docs/HCS.md), on every image of a plate;
+#: ``plate`` and ``acquisition`` are 0 when a file holds one of each
+PLATE_INDICES = ("plate", "acquisition", "well", "field")
 #: the indices that are not frames of the image but dimensions sampled at the
 #: same points (what other readers keep as array axes)
 SAMPLED_INDICES = ("illumination", "phase", "block", "emission", "excitation", "lifetime",
@@ -198,13 +256,24 @@ class File:
 
     backend: str = "base"
 
-    def __init__(self, path: str, images: Sequence[Image]):
+    def __init__(self, path: str, images: Sequence[Image], plates: Sequence = ()):
         self.path = str(path)
         self.images = list(images)
+        #: the plates the images belong to (``_plate.Plate``), like ``images``
+        #: a list; empty for a file that is not a plate (docs/HCS.md)
+        self.plates = list(plates)
         if not getattr(self, "format", None):
             #: the format variant; the backend's name unless it reads several
             self.format = self.backend
         self._index_resolutions()
+        self._bind_plates()
+
+    def _bind_plates(self) -> None:
+        """Fill in each plate's wells -> fields -> images from ``images``
+        (again whenever ``images`` is replaced, e.g. by ``open(axes=...)``)."""
+        if self.plates:
+            from ._plate import navigate
+            self.plates = navigate(self.plates, self.images)
 
     def _index_resolutions(self) -> None:
         """``resolution`` is in every index when the file stores a pyramid of
@@ -235,9 +304,10 @@ class File:
         values it takes, e.g. ``{"scene": 2, "tile": 5}``.  Not a total and
         not a shape: with 3 tiles in scene 0 and 5 in scene 1, tile indices
         run 0-2 and 0-4, so the range is 5 (not 8, and scene 0 has only 3).
-        Tile, rotation and view indices count from 0, so the values are
-        ``range(n)``; scene indices are the file's own (a CZI's may skip
-        numbers), so for scenes it is the number of distinct values."""
+        Tile, rotation, view, well and field indices count from 0, so the
+        values are ``range(n)``; scene indices are the file's own (a CZI's
+        may skip numbers), so for scenes it is the number of distinct
+        values.  A well index is a place in ``plates[p].wells``."""
         counts = {}
         for name in INDEX_NAMES:
             values = {image.index[name] for image in self.images if name in image.index}
@@ -263,6 +333,28 @@ class File:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def __repr__(self) -> str:
+    def outline(self) -> str:
+        """The file's structure (docs/AXES.md): its plates, wells and fields,
+        or its scenes, each with its tiles, the orthogonal indices that vary
+        in it (``x view 2``), the image shape and the pyramid levels."""
+        from ._outline import outline_lines
+        return "\n".join([self._header()] + ["  " + line for line in outline_lines(self)])
+
+    def _header(self) -> str:
+        plates = f" plates={len(self.plates)}" if self.plates else ""
         return (f"<micro_reader.File {self.path!r} backend={self.backend!r} "
-                f"format={self.format!r} images={len(self.images)}>")
+                f"format={self.format!r} images={len(self.images)}{plates}>")
+
+    #: outline lines shown by ``repr``; ``outline()`` shows all
+    REPR_LINES = 6
+
+    def __repr__(self) -> str:
+        from ._outline import outline_lines
+        try:
+            lines = outline_lines(self)
+        except Exception:                               # a repr never fails
+            return self._header()
+        shown = lines[:self.REPR_LINES]
+        if len(lines) > len(shown):
+            shown.append(f"... {len(lines) - len(shown)} more lines: .outline()")
+        return "\n".join([self._header()] + ["  " + line for line in shown])
