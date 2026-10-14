@@ -45,8 +45,12 @@ from .. import _codecs, _jpeg_restarts, _memory, _pool, _stream
 from .._base import File, Image
 from .._errors import CorruptFileError, UnsupportedFormatError
 from .._io import DecodeCache, ThreadHandles
+from .._plate import Plate, Well, row_label
 
 NAME = "czi"
+#: reads a plate's layout and indexes its images by well and field
+#: (open(..., plates=True); docs/HCS.md)
+PLATES = True
 MAGIC = b"ZISRAWFILE"
 RAW_TASK_BYTES = 8 << 20            # scenes are read in row bands of this size
 #: bytes worth skipping in one contiguous read rather than issuing one more
@@ -802,7 +806,8 @@ class _CziImage(Image):
 class _CziFile(File):
     backend = NAME
 
-    def __init__(self, path: str, tiles: str = "separate", resolutions: str = "base"):
+    def __init__(self, path: str, tiles: str = "separate", resolutions: str = "base",
+                 plates: bool = False):
         if tiles not in TILE_POLICIES:
             raise ValueError(f"tiles={tiles!r}: one of {TILE_POLICIES}")
         self.path = path
@@ -859,10 +864,22 @@ class _CziFile(File):
         # carry no tile index), and not trusted in a repaired directory
         with_levels = "tile" not in self._levels and pyramid and not self.damage
         listed = resolutions == "all"
+        # a plate (opt-in): scenes become wells and fields, in well order
+        well_field, plate = self._plate_map(groups) if plates else (None, None)
+        order = sorted(groups, key=(lambda v: (well_field[v[0]], v[1:]))
+                       if well_field else None)
         images = []
-        for values in sorted(groups):
-            key = dict(zip(["scene"] + self._levels, values))
-            name = base + " " + " ".join(f"{k} {v}" for k, v in key.items())
+        for values in order:
+            if well_field:
+                well, field = well_field[values[0]]
+                key = {"plate": 0, "acquisition": 0, "well": well, "field": field,
+                       **dict(zip(self._levels, values[1:]))}
+                # one plate, one acquisition: names show well and field only
+                shown = {k: v for k, v in key.items() if k not in ("plate", "acquisition")}
+                shown["well"] = plate.wells[well].name
+            else:
+                key = shown = dict(zip(["scene"] + self._levels, values))
+            name = base + " " + " ".join(f"{k} {v}" for k, v in shown.items())
             if listed:
                 key["resolution"] = 0
             image = _CziImage(self, len(images), groups[values], name, key)
@@ -877,7 +894,37 @@ class _CziFile(File):
                         images.extend(levels)
         for n, image in enumerate(images):
             image._position = n
-        super().__init__(path, images)
+        super().__init__(path, images, plates=[plate] if plate else [])
+
+    def _plate_map(self, groups: dict) -> tuple:
+        """``({scene: (well, field)}, Plate)`` when the file is a plate
+        (``_czi_metadata.plate_layout``), else ``(None, None)``.  Wells are
+        the ones that hold scenes, in row then column order; the scenes of a
+        well are its fields, in scene order."""
+        from ._czi_metadata import plate_layout
+        layout = plate_layout(self._xml_root)
+        if layout is None:
+            return None, None
+        scenes = sorted({values[0] for values in groups})
+        if any(s not in layout["scenes"] for s in scenes):
+            return None, None
+        places = {s: layout["scenes"][s][:2] for s in scenes}
+        names: dict = {}
+        for s in scenes:
+            row, column, name = layout["scenes"][s]
+            names.setdefault((row, column), name or f"{row_label(row)}{column + 1}")
+        wells = sorted(set(places.values()))
+        number = {place: n for n, place in enumerate(wells)}
+        well_field, fields = {}, {}
+        for s in scenes:
+            place = places[s]
+            well_field[s] = (number[place], fields.get(place, 0))
+            fields[place] = fields.get(place, 0) + 1
+        plate = Plate(name="",
+                      rows=tuple(row_label(r) for r in range(layout["rows"])),
+                      columns=tuple(str(c + 1) for c in range(layout["columns"])),
+                      wells=tuple(Well(r, c, names[(r, c)]) for r, c in wells))
+        return well_field, plate
 
     def _resolution_levels(self, image: "_CziImage", pyramid: list, values: tuple, name: str,
                            key: dict) -> list:
@@ -958,5 +1005,6 @@ class _CziFile(File):
         _stream.forget(self.path)
 
 
-def open(path: str, tiles: str = "separate", resolutions: str = "base") -> _CziFile:  # noqa: A001 - backend protocol
-    return _CziFile(path, tiles, resolutions)
+def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa: A001 - backend protocol
+         plates: bool = False) -> _CziFile:
+    return _CziFile(path, tiles, resolutions, plates)

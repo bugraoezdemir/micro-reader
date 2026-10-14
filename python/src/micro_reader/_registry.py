@@ -7,13 +7,18 @@ from typing import Optional
 
 from ._base import SAMPLED_INDICES, File
 from ._errors import UnsupportedFormatError
-from .backends import czi, ims, lif, mrc, nd2, oir, raster, tiff
+from .backends import (companion, czi, cv7000, harmony, ims, incell, lif, metaxpress, mrc,
+                       nd2, oir, raster, tiff)
 
 #: Tried in order: magic numbers before MRC, which may also match by
-#: extension alone.  Each backend module provides ``NAME``,
+#: extension alone; index files of plates (harmony) by their XML namespace;
+#: OME companion files by their extension and root element.
+#: Each backend module provides ``NAME``,
 #: ``sniff(head: bytes, path: str) -> bool`` and
-#: ``open(path, tiles="separate", resolutions="base") -> File``.
-BACKENDS = [tiff, czi, ims, nd2, oir, lif, raster, mrc]
+#: ``open(path, tiles="separate", resolutions="base") -> File``; a backend
+#: that declares ``RENAMES`` / ``PLATES`` also takes ``rename=`` / ``plates=``.
+BACKENDS = [tiff, czi, ims, nd2, oir, lif, harmony, metaxpress, incell, cv7000, companion,
+            raster, mrc]
 
 #: Bytes read from the start of the file for sniffing.
 HEAD_BYTES = 1024
@@ -28,7 +33,7 @@ RESOLUTION_POLICIES = ("base", "all")
 
 
 def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noqa: A001
-         resolutions: str = "base", rename: Optional[dict] = None,
+         resolutions: str = "base", rename: Optional[dict] = None, plates: bool = False,
          axes: Optional[str] = None, samples: str = "keep", squeeze: bool = False) -> File:
     """Open *path* with the backend that recognises it (or the one named).
 
@@ -45,6 +50,11 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
     as one z-stack.  The target is ``t``, ``c`` or ``z``; a format that
     cannot do it for that index raises.
 
+    *plates* (opt-in for now, docs/HCS.md): ``True`` reads a file that is a
+    plate as one: ``File.plates`` describes it, and its images are indexed by
+    well and field instead of scene.  For a file that is not a plate (or a
+    format without plates) it changes nothing: ``File.plates`` stays empty.
+
     *axes* (``"canonical"``, or letters such as ``"tczyx"``), *samples* and
     *squeeze* present every image as ``Image.as_axes`` does.  Each image's
     ``.source`` is then its native image."""
@@ -53,7 +63,7 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
     if resolutions not in RESOLUTION_POLICIES:
         raise ValueError(f"resolutions={resolutions!r}: one of {RESOLUTION_POLICIES}")
     rename = _check_rename(rename)
-    image = _open(os.fspath(path), backend, tiles, resolutions, rename)
+    image = _open(os.fspath(path), backend, tiles, resolutions, rename, bool(plates))
     left = sorted({name for index in image.indices for name in index if name in rename})
     if left:
         image.close()
@@ -64,6 +74,7 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
         try:
             image.images = [AxesImage(s, axes, samples=samples, squeeze=squeeze)
                             for s in image.images]
+            image._bind_plates()            # plate navigation reaches the new images
         except BaseException:
             image.close()
             raise
@@ -84,11 +95,14 @@ def _check_rename(rename: Optional[dict]) -> dict:
 
 
 def _open(path: str, backend: Optional[str], tiles: str, resolutions: str,
-          rename: dict) -> File:
+          rename: dict, plates: bool = False) -> File:
     def call(module):
+        options = {}
         if rename and getattr(module, "RENAMES", False):
-            return module.open(path, tiles, resolutions, rename=rename)
-        return module.open(path, tiles, resolutions)
+            options["rename"] = rename
+        if plates and getattr(module, "PLATES", False):
+            options["plates"] = True
+        return module.open(path, tiles, resolutions, **options)
 
     if backend is not None:
         for module in BACKENDS:

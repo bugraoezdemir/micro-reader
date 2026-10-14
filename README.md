@@ -140,6 +140,10 @@ This returns the images matching the requested indices. For example, if a file c
 `micro-reader` uses these index names when a format provides the corresponding dimensions:
 
 ```text
+plate
+acquisition
+well
+field
 scene
 tile
 rotation
@@ -151,6 +155,7 @@ emission
 excitation
 lifetime
 sequence
+part
 resolution
 ```
 
@@ -373,6 +378,37 @@ The tiles are composed according to the format's stitching information.
 
 Currently, stitching is supported for **CZI only**.
 
+## Plates
+
+High-content screening plates are opened through their index file, for example `Index.idx.xml` for Harmony. Each field is one image, indexed by `plate`, `acquisition`, `well` and `field`.
+
+The plate layout is available through:
+
+```python
+plate = f.plates[0]
+plate.wells[0].name
+# "B2"
+```
+
+Images can be reached through the wells, or selected by well:
+
+```python
+image = plate.wells[0].fields[0].image
+f.select(well=plate.well_index("B2"))
+```
+
+`f.outline()` shows the plates, wells and fields of a file.
+
+Zeiss CZI plates are read as plates with `plates=True`, and as scenes otherwise:
+
+```python
+f = micro_reader.open("plate.czi", plates=True)
+```
+
+Missing plane files are read as zeros, with a `MissingImagesWarning`. A field without any of its files is left out.
+
+When the channels of a field have different z sampling, `image.parts` gives one image per group of channels that share it.
+
 ## Metadata
 
 Pixel and channel metadata are available through:
@@ -437,12 +473,14 @@ The position is omitted when it cannot be determined reliably.
 | Format               | Notes                                                 |
 | -------------------- | ----------------------------------------------------- |
 | **TIFF / BigTIFF**   | TIFF, OME-TIFF, ImageJ, LSM, STK and TIFF pyramids    |
+| **OME companion**    | `.companion.ome` sets of OME-TIFF files               |
 | **CZI**              | Zeiss CZI, including mosaic tiles and stitched scenes |
 | **ND2**              | Nikon ND2, including legacy JPEG 2000 ND2             |
 | **Leica**            | LIF, LOF, LIFEXT, XLIF, XLEF, XLCF                    |
 | **OIR**              | Olympus / Evident FluoView                            |
 | **Imaris**           | `.ims`, with the `[ims]` extra                        |
 | **MRC**              | Common MRC modes and extended headers                 |
+| **Plates (HCS)**     | Harmony, MetaXpress, IN Cell and CellVoyager plates   |
 | **JPEG / PNG / BMP** | Common raster image formats                           |
 
 All formats use the same `File`, `Image`, axes, indexing, metadata, and reading interface wherever possible.
@@ -481,6 +519,16 @@ Additional codecs such as JPEG XR and LERC are available with:
 ```bash
 pip install "micro-reader[codecs]"
 ```
+
+### OME companion files
+
+An OME companion file (`.companion.ome`) describes images stored in separate TIFF files. Opening the companion reads all those images and groups them together as one `t c z y x` image:
+
+```python
+f = micro_reader.open("data.companion.ome")
+```
+
+Opening one of the TIFF files on its own reads only that file, with its pixel sizes, channels and position taken from the companion. If the companion is missing, the file is read without pixel sizes, with a `CompanionWarning`.
 
 ### CZI
 

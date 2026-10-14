@@ -134,6 +134,51 @@ def scene_position(root, scene: int) -> dict:
     return {}
 
 
+def plate_layout(root):
+    """The plate a CZI was acquired on (docs/HCS.md), or None when it is not
+    a plate: ``{"rows": n, "columns": m, "scenes": {scene: (row, column,
+    name)}}`` with 0-based rows and columns.
+
+    - The plate: the sample-holder template of the acquisition
+      (``.../SampleHolder/Template`` with ``ShapeRows`` / ``ShapeColumns``;
+      e.g. ``Name="Multichamber 96"``, 8 x 12).
+    - Each scene's well: ``Dimensions/S/Scenes/Scene`` has a ``Shape`` with
+      1-based ``RowIndex`` / ``ColumnIndex`` and the well's ``Name`` ("B2").
+      Several scenes can lie in one well.
+    It is a plate only when the template gives the layout and every scene
+    names its well inside it."""
+    if root is None:
+        return None
+    template = root.find(".//SampleHolder/Template")
+    if template is None:
+        return None
+    try:
+        rows = int(template.findtext("ShapeRows") or 0)
+        columns = int(template.findtext("ShapeColumns") or 0)
+    except ValueError:
+        return None
+    if rows < 1 or columns < 1:
+        return None
+    scenes = {}
+    for e in root.findall("Metadata/Information/Image/Dimensions/S/Scenes/Scene"):
+        shape = e.find("Shape")
+        if shape is None:
+            return None
+        try:
+            index = int(e.get("Index"))
+            row = int(shape.findtext("RowIndex")) - 1
+            column = int(shape.findtext("ColumnIndex")) - 1
+        except (TypeError, ValueError):
+            return None
+        if not (0 <= row < rows and 0 <= column < columns):
+            return None
+        name = shape.get("Name") or e.get("Name") or ""
+        scenes[index] = (row, column, name)
+    if not scenes:
+        return None
+    return {"rows": rows, "columns": columns, "scenes": scenes}
+
+
 def position_from_tags(tags: dict) -> dict:
     out = {}
     for axis in ("x", "y"):

@@ -377,24 +377,36 @@ class _TiffImage(Image):
 
     def _read_series(self, block):
         """Read *block* over all axes of the series."""
+        out = np.empty(tuple(s.stop - s.start for s in block), dtype=self.dtype)
+        # every page's uncompressed pieces and compressed segments, on all cores
+        return out, _pool.run(self._tasks(*self._plan_series(block, out)))
+
+    def _plan_series(self, block, out) -> tuple:
+        """(raws, decodes) that fill *out* (shaped like *block*, over all axes
+        of the series) once their ``_tasks`` run; parts with nothing to read
+        are filled now. Planned apart from running so that a file set can run
+        the plans of many member pages in one batch (``_fileset``)."""
+        if self._closed:
+            raise ValueError("this TIFF image has been closed: its file was closed "
+                             "(File.close() or the end of a with block)")
         nlead = len(self._lead_shape)
         lead, inner = block[:nlead], block[nlead:]
         # the page part of the request as (separate sample, y, x, contig sample)
         norm = {0: slice(0, self._sep), 4: slice(0, self._contig)}
         norm.update(zip(self._page_pos, inner))
         ss, ys, xs, cs = norm[0], norm[2], norm[3], norm[4]
-
-        out = np.empty(tuple(s.stop - s.start for s in block), dtype=self.dtype)
         raws, decodes = [], []
         for idx in itertools.product(*(range(s.start, s.stop) for s in lead)):
             p = int(np.ravel_multi_index(idx, self._lead_shape)) if nlead else 0
             dest = self._as_normalised(out[tuple(i - s.start for i, s in zip(idx, lead))])
             self._plan_page(p, ss, ys, xs, cs, dest, raws, decodes)
-        # every page's uncompressed pieces and compressed segments, on all cores
-        tasks = itertools.chain(
+        return raws, decodes
+
+    def _tasks(self, raws, decodes):
+        """The pool tasks of a plan (``_plan_series``)."""
+        return itertools.chain(
             (lambda job=job: self._read_rect(self._handles.get(), *job) for job in raws),
             self._decode_tasks(decodes))
-        return out, _pool.run(tasks)
 
     def _plan_page(self, p, ss, ys, xs, cs, dest, raws, decodes) -> None:
         """What page *p* contributes: empty parts are filled here; uncompressed
@@ -851,8 +863,57 @@ def _ravel(fixed: dict, positions: list, shape) -> int:
                                     [shape[p] for p in positions]))
 
 
+#: tifffile's own readings of a file's metadata, switched off to read it as plain
+#: pages (its OME-XML may even list planes in other files: tifffile would open them)
+PLAIN_PAGES = {"is_ome": False, "is_imagej": False, "is_shaped": False}
+
+
+def open_pages(path: str) -> _TiffFile:
+    """*path* as plain pages, whatever its own metadata says: for the members of
+    a file set whose index file says what each page is (an OME companion,
+    docs/COMPANION.md). One image per run of same-shaped pages, axes ``zyx``
+    (``yx`` for a single page); ``File.pages``: IFD -> (image, page in it)."""
+    try:
+        import tifffile
+    except ImportError as exc:
+        raise MicroReaderError(
+            "reading TIFF needs tifffile, a dependency of micro-reader: pip install tifffile") from exc
+    try:
+        tif = tifffile.TiffFile(path, **PLAIN_PAGES)
+    except tifffile.TiffFileError as exc:
+        raise CorruptFileError(f"{path!r}: {exc}") from exc
+    return pages_file(tif, path)
+
+
+def plain_pages(tif) -> bool:
+    """Whether tifffile already reads *tif* as plain pages (an OME ``BinaryOnly``
+    stub has no image of its own, so tifffile lists its pages as they are)."""
+    return all(getattr(s, "kind", "") in ("generic", "uniform") for s in tif.series)
+
+
+def pages_file(tif, path: str) -> _TiffFile:
+    """``open_pages`` of an already open *tif* whose series are plain pages
+    (``plain_pages``); *tif* is closed on error."""
+    try:
+        series = list(tif.series)
+        if not series:
+            raise CorruptFileError(f"{path!r} contains no image series")
+        images = _images(tif, series, path, "separate", "base", {"sequence": "z"})
+        pages = {}
+        for image in images:
+            for k, page in enumerate(image._series.pages):
+                if page is not None:
+                    pages[page.index] = (image, k)
+    except BaseException:
+        tif.close()
+        raise
+    file = _TiffFile(path, images, tif)
+    file.pages = pages
+    return file
+
+
 def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa: A001 - backend protocol
-         rename: dict = None) -> _TiffFile:
+         rename: dict = None, companion: bool = True) -> _TiffFile:
     try:
         import tifffile
     except ImportError as exc:
@@ -863,6 +924,13 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa:
     except tifffile.TiffFileError as exc:
         raise CorruptFileError(f"{path!r}: {exc}") from exc
     try:
+        if companion and tif.is_ome:
+            # a BinaryOnly stub: its metadata is in an OME companion (docs/COMPANION.md,
+            # CO-2); companion=False (internal: file sets, whose index file decides) skips it
+            from . import companion
+            view = companion.member_view(path, tif)    # takes over *tif* when it is one
+            if view is not None:
+                return view
         series = list(tif.series)
         if tif.is_lsm:
             # Zeiss LSM stores a small RGB preview of every plane (reduced
