@@ -81,9 +81,11 @@ def select(tif, series: list) -> list:
     for s in series:
         name = s.name or ""
         if variant == "bif":
-            if name == "Label":                 # IFD 0: the whole slide, label included
+            # tifffile's names: up to 2025.12 Label / Thumbnail, from 2026.10.15
+            # Overview / Probability
+            if name in ("Label", "Overview"):           # IFD 0: the whole slide, label included
                 s.name = "macro"
-            elif name == "Thumbnail":           # IFD 1: tissue probability (tifffile: Thumbnail)
+            elif name in ("Thumbnail", "Probability"):  # IFD 1: tissue probability
                 s.name = "probability"
         elif name in ASSOCIATED:
             if name == "Thumbnail" and variant in DROP_THUMBNAIL:
