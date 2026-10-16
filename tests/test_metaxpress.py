@@ -119,6 +119,38 @@ def test_missing_files_follow_the_file_set_rule(tmp_path):
         assert not a1s2[0, 1, 0].any()
 
 
+@pytest.mark.parametrize("wrong", ["larger", "smaller", "float", "rgb"])
+def test_a_member_that_does_not_fit_raises(tmp_path, wrong):
+    """A plane file of another size or type than the index's planes raises
+    (it was cropped or cast without a word); the other planes still read.
+    The checks are shared by every file-set backend (_fileset.PlaneImage)."""
+    htd, data = _write(str(tmp_path), wells=[(0, 0)], sites=[[True, True]])
+    tifffile.imwrite(os.path.join(str(tmp_path), f"{STEM}_A01_s2_w2.TIF"),
+                     {"larger": np.zeros((2 * Y, X), "u2"), "smaller": np.zeros((Y // 2, X), "u2"),
+                      "float": np.full((Y, X), 70000.5, "f4"),
+                      "rgb": np.zeros((Y, X, 3), "u1")}[wrong])
+    with micro_reader.open(htd) as f:
+        good, bad = f.images
+        np.testing.assert_array_equal(good[0, 1, 0], data[(0, 0, 1, 2, 1)])
+        np.testing.assert_array_equal(bad[0, 0, 0], data[(0, 0, 2, 1, 1)])
+        with pytest.raises(micro_reader.CorruptFileError, match=r"_A01_s2_w2\.TIF.*expects one"):
+            bad[0, 1, 0]
+        with pytest.raises(micro_reader.CorruptFileError, match=r"1 of 4 member files"):
+            f.check_members()
+
+
+def test_check_members(tmp_path):
+    htd, _ = _write(str(tmp_path), wells=[(0, 0), (1, 2)], sites=[[True, True]])
+    with micro_reader.open(htd) as f:
+        assert f.check_members() == 8
+    with micro_reader.open(htd, axes="canonical", squeeze=True) as f:    # wrapped images
+        assert f.check_members() == 8
+    plain = os.path.join(str(tmp_path), "plain.tif")
+    tifffile.imwrite(plain, np.zeros((Y, X), "u2"))
+    with micro_reader.open(plain) as f:
+        assert f.check_members() == 0                            # not a file set
+
+
 def test_refused(tmp_path):
     htd, _ = _write(str(tmp_path / "z"), wells=[(0, 0)], extra='"ZSteps", 4')
     with pytest.raises(micro_reader.UnsupportedFormatError, match="ZSteps"):

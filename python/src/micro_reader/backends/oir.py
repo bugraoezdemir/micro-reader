@@ -55,13 +55,14 @@ import os
 import re
 import struct
 import sys
+import warnings
 from xml.etree import ElementTree
 
 import numpy as np
 
-from .. import _pool
+from .. import _parts, _pool
 from .._base import File, Image
-from .._errors import CorruptFileError, UnsupportedFormatError
+from .._errors import CorruptFileError, MissingImagesWarning, UnsupportedFormatError
 from .._metadata import Channel, Metadata, color_hex, quantity
 from .._io import ThreadHandles
 
@@ -108,6 +109,56 @@ OIR_UNITS = {"MICRO_METER": "micrometer", "NANO_METER": "nanometer", "MILLI_METE
 
 def sniff(head: bytes, path: str) -> bool:
     return head[:16] == MAGIC
+
+
+#: a continuation file: <stem>_00001, <stem>_00002, ... (five digits, no extension)
+CONTINUATION = re.compile(r"^(?P<stem>.+)_(?P<n>\d{5})$")
+
+
+def may_own(folder: str, name: str, folders) -> bool:
+    """``group_files``' cheap test (reads nothing): ``<stem>_NNNNN`` may be a
+    continuation."""
+    return CONTINUATION.match(name) is not None
+
+
+def owner(path: str, head):
+    """A continuation file opens its main file ``<stem>.oir``
+    (docs/COMPOSITE.md); it is no image on its own."""
+    if head is None or head[:16] != MAGIC:
+        return None
+    match = CONTINUATION.match(os.path.basename(path))
+    if match is None:
+        return None
+    name = match.group("stem") + ".oir"
+    folder = os.path.dirname(path)
+    return _parts.Part(_parts.find(folder, name), os.path.join(folder, name))
+
+
+def _continuations(path: str) -> list:
+    """The continuation files of main file *path* (``<stem>_00001``, ...,
+    any letter case), in number order.  A gap -- ``_00002`` missing while
+    ``_00003`` exists -- warns (``MissingImagesWarning``): the frames the
+    missing file held are not read; the files after it still are (every
+    frame says where it belongs)."""
+    folder, stem = os.path.dirname(path), os.path.splitext(os.path.basename(path))[0]
+    try:
+        names = os.listdir(folder or ".")
+    except OSError:
+        return []
+    numbered = {}
+    for name in sorted(names):
+        match = CONTINUATION.match(name)
+        if match is not None and match["stem"].lower() == stem.lower() and int(match["n"]) > 0:
+            numbered.setdefault(int(match["n"]), os.path.join(folder, name))
+    missing = [n for n in range(1, max(numbered, default=0) + 1) if n not in numbered]
+    if missing:
+        shown = ", ".join(f"{stem}_{n:05d}" for n in missing[:5]) + \
+            (f", ... ({len(missing)} in all)" if len(missing) > 5 else "")
+        warnings.warn(MissingImagesWarning(
+            f"{path!r}: continuation file{'s' if len(missing) > 1 else ''} {shown} "
+            f"{'are' if len(missing) > 1 else 'is'} missing: the frames {'they' if len(missing) > 1 else 'it'} "
+            f"held are not read; the {len(numbered)} other continuation files are"), stacklevel=4)
+    return [numbered[n] for n in sorted(numbered)]
 
 
 def _local(tag: str) -> str:
@@ -181,12 +232,11 @@ class _OirImage(Image):
         pairs, frames, lsm, self._luts = _scan(path, 0)
         if not frames or not pairs:
             raise UnsupportedFormatError(f"{path!r}: OIR file without image data")
-        # companion files: <name>_00001, <name>_00002, ... (no extension)
+        # continuation files: <name>_00001, <name>_00002, ... (no extension)
         self._paths = [path]
-        prefix = os.path.splitext(path)[0]
-        while os.path.exists(f"{prefix}_{len(self._paths):05d}"):
-            more, _, _, _ = _scan(f"{prefix}_{len(self._paths):05d}", len(self._paths))
-            self._paths.append(f"{prefix}_{len(self._paths):05d}")
+        for more_path in _continuations(path):
+            more, _, _, _ = _scan(more_path, len(self._paths))
+            self._paths.append(more_path)
             pairs.extend(more)
 
         frame = ElementTree.fromstring(frames[0])

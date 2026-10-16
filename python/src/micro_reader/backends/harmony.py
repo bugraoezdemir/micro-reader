@@ -20,12 +20,18 @@ the index file: micro-reader reads the plate it describes.
   ``PositionZ``, t from ``MeasurementTimeOffset``), channel names and
   main excitation / emission wavelengths, and the position of the field's
   first pixel RELATIVE TO ITS WELL'S CENTRE (``_HarmonyImage._field_position``).
+
+The measurement folder is also a composite (docs/COMPOSITE.md): next to
+``Images/`` it holds ``Assaylayout/`` (the plate map) and ``FFC_Profile/`` (the
+flat-field model); their files, those two folders and the measurement folder
+itself are parts of ``Images/Index.idx.xml`` and open it.
 """
 from __future__ import annotations
 
 import os
 import xml.etree.ElementTree as ET
 
+from .. import _parts
 from .._base import File
 from .._errors import CorruptFileError, UnsupportedFormatError
 from .._fileset import Members, PlaneImage, keep_fields
@@ -33,6 +39,49 @@ from .._metadata import Channel, Metadata, quantity
 from .._plate import Plate, Well, row_label
 
 NAME = "harmony"
+#: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
+SET_INDEX = True
+
+
+#: where a measurement folder keeps its index, and its side folders (lower case)
+INDEX_NAMES = (os.path.join("Images", "Index.idx.xml"), os.path.join("Images", "Index.xml"))
+SIDE_FOLDERS = ("assaylayout", "ffc_profile")
+
+
+def _measurement_index(measurement: str):
+    """The index file of the measurement folder *measurement*, or None
+    (exact names: no folder listing)."""
+    for name in INDEX_NAMES:
+        path = os.path.join(measurement, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def may_own(folder: str, name: str, folders) -> bool:
+    """``group_files``' cheap test (reads nothing): a file in an
+    ``Assaylayout`` or ``FFC_Profile`` folder may be a part."""
+    return folders.base(folder).lower() in SIDE_FOLDERS
+
+
+def owner(path: str, head):
+    """The side folders of a measurement, their files and the measurement
+    folder itself are parts of its index (module docstring)."""
+    path = os.path.abspath(path)
+    if os.path.isdir(path):
+        if os.path.basename(path).lower() in SIDE_FOLDERS:
+            path = os.path.dirname(path)
+        index = _measurement_index(path)
+    elif os.path.basename(os.path.dirname(path)).lower() in SIDE_FOLDERS:
+        index = _measurement_index(os.path.dirname(os.path.dirname(path)))
+    else:
+        return None
+    return _parts.Part(index, index) if index is not None else None
+
+
+def may_index(name: str) -> bool:
+    """``group_files``' cheap test (reads nothing): an index is an XML file (``Index.idx.xml``, ``Index.xml``)."""
+    return name.lower().endswith(('.xml',))
 
 
 def sniff(head: bytes, path: str) -> bool:

@@ -19,6 +19,12 @@ class MissingImagesWarning(UserWarning):
     (docs/HCS.md)."""
 
 
+class CompositeWarning(UserWarning):
+    """A part of a composite format was read on its own because its main file
+    is missing, or a part could not be told apart from another file
+    (docs/COMPOSITE.md)."""
+
+
 class CompanionWarning(UserWarning):
     """An OME companion set's metadata came from somewhere other than the file
     opened, or a member path had to be resolved differently than written
