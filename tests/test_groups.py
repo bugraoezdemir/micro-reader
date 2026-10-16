@@ -69,11 +69,12 @@ def test_a_folder_groups_into_images(mixed):
     assert _names(groups["nd/data_NDTiffStack.tif"].parts, mixed) == \
         ["nd/NDTiff.index", "nd/data_NDTiffStack_1.tif"]
     plate = groups["plate/Plate7.HTD"]
-    assert (plate.kind, plate.format, plate.parts, plate.notes) == ("index", "metaxpress", (), ())
+    assert (plate.kind, plate.format, plate.notes) == ("index", "metaxpress", ())
     assert len(plate.members) == 4 and all(os.path.isfile(m) for m in plate.members)
-    # the plate's thumbnails are not named by the index: plain files
-    assert _names(g.singles, mixed) == ["notes.txt", "plain.tif"] + sorted(
+    # the plate's thumbnails are not named by the index, but are its parts
+    assert _names(plate.parts, mixed) == sorted(
         f"plate/Plate7_A01_s{s}_w{w}_thumb.TIF" for s in (1, 2) for w in (1, 2))
+    assert _names(g.singles, mixed) == ["notes.txt", "plain.tif"]
 
 
 def test_every_file_is_in_one_place(mixed):
@@ -85,6 +86,43 @@ def test_every_file_is_in_one_place(mixed):
     assert len(keys) == len(set(keys))
     walked = {os.path.normcase(os.path.join(r, n)) for r, _, files in os.walk(mixed) for n in files}
     assert set(keys) == walked
+
+
+def test_a_metaxpress_preview_opens_its_plate(tmp_path):
+    htd, _ = test_metaxpress._write(str(tmp_path), wells=[(0, 0)], sites=[[True]])
+    thumb = os.path.join(str(tmp_path), "Plate7_A01_s1_w1_thumb.TIF")
+    with micro_reader.open(thumb) as f:
+        assert f.backend == "metaxpress" and os.path.samefile(f.path, htd)
+    os.remove(htd)                                               # no .HTD: just a TIFF
+    lone = os.path.join(str(tmp_path), "Plate7_A01_s1_w2_thumb.TIF")
+    with micro_reader.open(lone) as f:
+        assert f.backend == "tiff"
+
+
+def test_harmony_side_folders_open_the_measurement(tmp_path):
+    import test_harmony
+    index = test_harmony._write_harmony(str(tmp_path / "Measurement 1"))[0]
+    images = tmp_path / "Measurement 1" / "Images"
+    for side, name in (("Assaylayout", "layout.xml"), ("FFC_Profile", "FFC_Profile_Measurement 1.xml")):
+        os.makedirs(images.parent / side)
+        (images.parent / side / name).write_text("<Results/>")
+    for target in (images.parent, images.parent / "Assaylayout", images.parent / "FFC_Profile" /
+                   "FFC_Profile_Measurement 1.xml"):
+        with micro_reader.open(str(target)) as f:
+            assert f.backend == "harmony" and os.path.samefile(f.path, index)
+    (group,) = micro_reader.group_files(str(tmp_path)).groups
+    assert _names(group.parts, images.parent) == ["Assaylayout/layout.xml",
+                                                  "FFC_Profile/FFC_Profile_Measurement 1.xml"]
+
+
+def test_opening_a_plate_folder_reads_only_its_index(tmp_path, monkeypatch):
+    htd, _ = test_metaxpress._write(str(tmp_path), wells=[(0, 0), (0, 1)], sites=[[True, True]])
+    reads = []
+    real = _parts.read_head
+    monkeypatch.setattr(_parts, "read_head", lambda p: reads.append(os.path.basename(p)) or real(p))
+    with micro_reader.open(str(tmp_path)) as f:
+        assert os.path.samefile(f.path, htd)
+    assert reads == ["Plate7.HTD"]
 
 
 def test_plain_files_are_never_read(tmp_path, monkeypatch):

@@ -36,7 +36,8 @@ RESOLUTION_POLICIES = ("base", "all")
 
 def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noqa: A001
          resolutions: str = "base", rename: Optional[dict] = None, plates: bool = False,
-         axes: Optional[str] = None, samples: str = "keep", squeeze: bool = False) -> File:
+         multifile: bool = True, axes: Optional[str] = None, samples: str = "keep",
+         squeeze: bool = False) -> File:
     """Open *path* with the backend that recognises it (or the one named).
 
     Each image of the file is one spatial frame with axes ``t c z y x`` (+ ``s``),
@@ -57,6 +58,15 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
     well and field instead of scene.  For a file that is not a plate (or a
     format without plates) it changes nothing: ``File.plates`` stays empty.
 
+    *multifile*: a multi-file OME-TIFF -- one whose OME-XML lists planes in
+    other files -- opens as the whole set (``True``, the default), or with
+    only the planes stored in it (``False``), as the block of the set's
+    image they form, its metadata from its own XML.  Not affected: parts of
+    composite formats (an OIR continuation, an OIF plane, a VSI ``.ets``:
+    pieces of one image, docs/COMPOSITE.md); Micro-Manager stacks, though
+    OME-TIFFs, because they split their files by size, mid-timepoint, so a
+    file is no block of the image; single-file OME-TIFFs.
+
     *axes* (``"canonical"``, or letters such as ``"tczyx"``), *samples* and
     *squeeze* present every image as ``Image.as_axes`` does.  Each image's
     ``.source`` is then its native image.
@@ -73,7 +83,7 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
     rename = _check_rename(rename)
     opened = os.fspath(path)
     main = opened if backend is not None else _parts.main_file(opened, BACKENDS)
-    image = _open(main, backend, tiles, resolutions, rename, bool(plates))
+    image = _open(main, backend, tiles, resolutions, rename, bool(plates), bool(multifile))
     image.opened = opened
     left = sorted({name for index in image.indices for name in index if name in rename})
     if left:
@@ -106,13 +116,15 @@ def _check_rename(rename: Optional[dict]) -> dict:
 
 
 def _open(path: str, backend: Optional[str], tiles: str, resolutions: str,
-          rename: dict, plates: bool = False) -> File:
+          rename: dict, plates: bool = False, multifile: bool = True) -> File:
     def call(module):
         options = {}
         if rename and getattr(module, "RENAMES", False):
             options["rename"] = rename
         if plates and getattr(module, "PLATES", False):
             options["plates"] = True
+        if not multifile and getattr(module, "MULTIFILE", False):
+            options["multifile"] = False
         return module.open(path, tiles, resolutions, **options)
 
     if backend is not None:

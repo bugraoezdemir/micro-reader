@@ -363,6 +363,26 @@ def test_ndtiff_positions_are_scenes(tmp_path, per_file):
             np.testing.assert_array_equal(a[1:3, 1:, :, 5:20, 7:33], whole[1:3, 1:, :, 5:20, 7:33])
 
 
+def test_ndtiff_channel_names_and_pixel_size(tmp_path):
+    """Channel names are the index's channel values (as tifffile numbers
+    them: in order of first appearance); the pixel size is the frames'
+    PixelSizeUm."""
+    frames = [({"time": t, "channel": name, "z": 0}, _plane(0, t, c, 0))
+              for t in range(2) for c, name in enumerate(("Cy5", "DAPI", "GFP"))]
+    paths = write_ndtiff(str(tmp_path / "acq"), frames, frame_metadata={"PixelSizeUm": 0.65})
+    with micro_reader.open(paths[0]) as f:
+        im = f.images[0]
+        md = im.metadata
+        assert [c.name for c in md.channels] == ["Cy5", "DAPI", "GFP"]
+        assert md.pixel_sizes["x"].value == pytest.approx(0.65)
+        assert md.pixel_sizes["x"].unit == "micrometer"
+        np.testing.assert_array_equal(im.as_axes("tczyx")[1, 2, 0], _plane(0, 1, 2, 0))
+    plain = write_ndtiff(str(tmp_path / "plain"), [({"time": 0}, _plane(0, 0, 0, 0))])
+    with micro_reader.open(plain[0]) as f:                      # nothing recorded: unknown
+        assert not f.images[0].metadata.pixel_sizes
+        assert [c.name for c in f.images[0].metadata.channels] == [None]
+
+
 def test_ndtiff_missing_plane_is_zeros_with_a_warning(tmp_path):
     frames = [({"position": 0, "time": t, "z": z}, _plane(0, t, 0, z))
               for t in range(2) for z in range(3) if (t, z) != (1, 2)]

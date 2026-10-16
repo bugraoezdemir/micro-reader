@@ -163,7 +163,7 @@ Only dimensions actually present in a file appear in an image's index.
 
 ### Files made of several files
 
-Some formats always come as several files: an OIR file with its continuation files (`name_00001`), a Micro-Manager stack split over `..._MMStack_Pos0.ome.tif`, `..._MMStack_Pos0_1.ome.tif`, an NDTiff folder, an Olympus OIF with its `.oif.files` folder, an Olympus VSI with its `_name_` folder, a DeltaVision image with its softWoRx `.log`. Opening any of these files opens the whole image:
+Some formats always come as several files: an OIR file with its continuation files (`name_00001`), a Micro-Manager stack split over `..._MMStack_Pos0.ome.tif`, `..._MMStack_Pos0_1.ome.tif`, an NDTiff folder, an Olympus OIF with its `.oif.files` folder, an Olympus VSI with its `_name_` folder, a DeltaVision image with its softWoRx `.log`, a plate's side files (Harmony `Assaylayout/` and `FFC_Profile/`, CellVoyager settings files, MetaXpress `_thumb` previews). Opening any of these files opens the whole image:
 
 ```python
 f = micro_reader.open("cells_R3D.dv.log")
@@ -171,7 +171,7 @@ f.path     # the main file: "cells_R3D.dv"
 f.opened   # what was opened: "cells_R3D.dv.log"
 ```
 
-You can also open the folder. A folder opens the image it belongs to (an NDTiff dataset folder), or the one image it holds. A folder with several images raises an error that lists them.
+You can also open the folder. A folder opens the image it belongs to (an NDTiff dataset folder, a Harmony or CellVoyager measurement folder), or the one image it holds. A folder with several images raises an error that lists them.
 
 To sort many files at once, for example everything under a folder you want to convert, `group_files` says which files make one image:
 
@@ -534,7 +534,7 @@ Supported TIFF formats include:
 * Micro-Manager stacks (MMStack and NDTiff), also when one acquisition is spread over several files
 * Whole-slide TIFFs: Aperio SVS, Hamamatsu NDPI, Leica SCN, Ventana BIF, PerkinElmer / Akoya QPTIFF and Philips
 
-Micro-Manager stage positions are scenes.
+Micro-Manager stage positions are scenes. NDTiff channel names and pixel sizes come from the dataset's index and frame metadata.
 
 A whole-slide file gives the slide first, then the other pictures it stores as further scenes, as Bio-Formats lists them: `label` and `macro` (overview), and for some formats `thumbnail` (QPTIFF) or `probability` (BIF tissue map). Pixel sizes, positions and channel names come from each vendor's own metadata.
 
@@ -570,7 +570,15 @@ An OME companion file (`.companion.ome`) describes images stored in separate TIF
 f = micro_reader.open("data.companion.ome")
 ```
 
-Opening one of the TIFF files on its own reads only that file, with its pixel sizes, channels and position taken from the companion. If the companion is missing, the file is read without pixel sizes, with a `CompanionWarning`.
+Opening one of the TIFF files on its own reads only that file, with its pixel sizes, channels and position taken from the companion. If the companion is missing, the file is read without pixel sizes, with a `CompanionWarning`. A TIFF whose metadata lives in another OME-TIFF (instead of a `.companion.ome`) takes it from that file in the same way.
+
+Some OME-TIFF sets keep the full OME-XML in their TIFF files instead of a companion. Opening one of those files reads the whole set. To read only the planes stored in that file, with the set's metadata:
+
+```python
+f = micro_reader.open("set_t001.ome.tif", multifile=False)
+```
+
+Micro-Manager stacks always open whole, also with `multifile=False`: they split their files by size, so one file does not hold a complete part of the image.
 
 ### CZI
 

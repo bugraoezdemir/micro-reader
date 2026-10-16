@@ -32,6 +32,7 @@ separate images (docs/COMPANION.md, "A").
 """
 from __future__ import annotations
 
+import builtins
 import math
 import os
 import threading
@@ -153,7 +154,7 @@ class Core:
     def __init__(self, path: str):
         self.path = path
         try:
-            self.root = ET.parse(path).getroot()
+            self.root = _ome_root(path)
         except ET.ParseError as exc:
             raise CorruptFileError(f"{path!r}: not readable XML ({exc})") from None
         except OSError as exc:
@@ -282,6 +283,29 @@ class Core:
                     f"{path!r} page {ifd}: {image.shape[-2]} x {image.shape[-1]} "
                     f"{image.dtype}, the companion {self.path!r} expects {want[0]} x {want[1]} "
                     f"{series.dtype}")
+
+
+#: the first bytes of a TIFF / BigTIFF, either byte order
+TIFF_MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
+
+
+def _ome_root(path: str):
+    """The OME-XML root of *path*: a companion file's own XML, or -- when a
+    ``BinaryOnly`` stub's ``MetadataFile`` is an OME-TIFF holding the full
+    XML -- the XML of that TIFF's first page."""
+    with builtins.open(path, "rb") as fh:
+        magic = fh.read(4)
+    if magic not in TIFF_MAGIC:
+        return ET.parse(path).getroot()
+    import tifffile
+    try:
+        with tifffile.TiffFile(path, **PLAIN_PAGES) as tif:
+            text = tif.pages.first.description or ""
+    except tifffile.TiffFileError as exc:
+        raise CorruptFileError(f"{path!r}: {exc}") from None
+    if "<OME" not in text:
+        raise CorruptFileError(f"{path!r}: a TIFF without OME-XML in its first page")
+    return ET.fromstring(text)
 
 
 def _page_count(path: str) -> int:
@@ -577,15 +601,57 @@ def member_view(path: str, tif):
     checks = [None if not (a and b) else a == b for a, b in ((own, listed), (points_to, core.uuid))]
     if False in checks and True not in checks:
         return refuse("describes another set (its UUIDs do not match)")
+    misfit = _misfit(tif, core, key)
+    if misfit:
+        return refuse(misfit)
+    return _member_file(path, tif, core, key, where)
+
+
+def _misfit(tif, core: Core, key: str):
+    """Why member *key*'s pages (in the open *tif*) do not fit what *core*
+    says of them, or None."""
     for s, _plane, ifd in core.member_pages[key]:
         page = tif.pages[ifd] if ifd < len(tif.pages) else None
         if page is None:
-            return refuse(f"lists its page {ifd}, which it does not have")
+            return f"lists its page {ifd}, which it does not have"
         if ((page.imagelength, page.imagewidth) != (s.sizes["y"], s.sizes["x"])
                 or page.samplesperpixel != 1
                 or (s.dtype is not None and np.dtype(page.dtype) != s.dtype)):
-            return refuse("describes it with another size or pixel type")
+            return "describes it with another size or pixel type"
+    return None
 
+
+def single_file_view(path: str, tif):
+    """``open(..., multifile=False)``: an OME-TIFF whose own OME-XML lists
+    planes in other files, opened with only the planes it holds -- as the
+    block of its image they form, with the metadata of that XML (as a
+    companion's member opens, CO-2).  None when its XML lists no other file
+    (it opens as it is).  Its pages must fit the XML and form one block, else
+    ``CorruptFileError`` / ``UnsupportedFormatError``."""
+    try:
+        core = load(path)
+    except (CorruptFileError, UnsupportedFormatError):
+        return None                                   # no usable XML: it opens as it is
+    me = os.path.normcase(os.path.abspath(path))
+    if all(os.path.normcase(p) == me for p in core.member_pages):
+        return None                                   # a single-file OME-TIFF
+    key = core.by_path.get(me)
+    if key is None:
+        root_uuid = core.root.get("UUID")
+        key = core.by_uuid.get(root_uuid) if root_uuid else None
+    if key is None:
+        raise CorruptFileError(f"{path!r}: its OME-XML lists planes in other files but none "
+                               "in this one")
+    misfit = _misfit(tif, core, key)
+    if misfit:
+        raise CorruptFileError(f"{path!r}: its own OME-XML {misfit}")
+    return _member_file(path, tif, core, key, path)
+
+
+def _member_file(path: str, tif, core: Core, key: str, where: str):
+    """Member *key* of *core* (the file *path*, open as *tif*) as its own
+    file: the block of its image its planes form, metadata from *core*
+    (*where*: the file the metadata came from).  Takes over *tif*."""
     from . import tiff
     members = Members(limit=4, pages=True)
     if tiff.plain_pages(tif):
@@ -604,8 +670,8 @@ def member_view(path: str, tif):
             spans = [range(v[0], v[-1] + 1) for v in (ts, cs, zs)]
             if len(mine) != len(spans[0]) * len(spans[1]) * len(spans[2]):
                 raise UnsupportedFormatError(
-                    f"{path!r}: its pages are not one block of {s.name!r} in its companion "
-                    f"{where!r}; open the companion to read the set")
+                    f"{path!r}: its pages are not one block of {s.name!r} in the OME-XML of "
+                    f"{where!r}; open that file to read the set")
             start = (ts[0], cs[0], zs[0])
             planes = {(t - ts[0], c - cs[0], z - zs[0]): (path, ifd)
                       for (t, c, z), ifd in mine.items()}

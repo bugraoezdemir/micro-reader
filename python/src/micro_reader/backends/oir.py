@@ -55,13 +55,14 @@ import os
 import re
 import struct
 import sys
+import warnings
 from xml.etree import ElementTree
 
 import numpy as np
 
 from .. import _parts, _pool
 from .._base import File, Image
-from .._errors import CorruptFileError, UnsupportedFormatError
+from .._errors import CorruptFileError, MissingImagesWarning, UnsupportedFormatError
 from .._metadata import Channel, Metadata, color_hex, quantity
 from .._io import ThreadHandles
 
@@ -134,15 +135,30 @@ def owner(path: str, head):
 
 
 def _continuations(path: str) -> list:
-    """The continuation files of main file *path*, in order: consecutive
-    numbers from 00001 to the first one missing."""
+    """The continuation files of main file *path* (``<stem>_00001``, ...,
+    any letter case), in number order.  A gap -- ``_00002`` missing while
+    ``_00003`` exists -- warns (``MissingImagesWarning``): the frames the
+    missing file held are not read; the files after it still are (every
+    frame says where it belongs)."""
     folder, stem = os.path.dirname(path), os.path.splitext(os.path.basename(path))[0]
-    found = []
-    while True:
-        more = _parts.find(folder, f"{stem}_{len(found) + 1:05d}")
-        if more is None:
-            return found
-        found.append(more)
+    try:
+        names = os.listdir(folder or ".")
+    except OSError:
+        return []
+    numbered = {}
+    for name in sorted(names):
+        match = CONTINUATION.match(name)
+        if match is not None and match["stem"].lower() == stem.lower() and int(match["n"]) > 0:
+            numbered.setdefault(int(match["n"]), os.path.join(folder, name))
+    missing = [n for n in range(1, max(numbered, default=0) + 1) if n not in numbered]
+    if missing:
+        shown = ", ".join(f"{stem}_{n:05d}" for n in missing[:5]) + \
+            (f", ... ({len(missing)} in all)" if len(missing) > 5 else "")
+        warnings.warn(MissingImagesWarning(
+            f"{path!r}: continuation file{'s' if len(missing) > 1 else ''} {shown} "
+            f"{'are' if len(missing) > 1 else 'is'} missing: the frames {'they' if len(missing) > 1 else 'it'} "
+            f"held are not read; the {len(numbered)} other continuation files are"), stacklevel=4)
+    return [numbered[n] for n in sorted(numbered)]
 
 
 def _local(tag: str) -> str:

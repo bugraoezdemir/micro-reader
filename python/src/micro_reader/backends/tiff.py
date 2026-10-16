@@ -205,6 +205,8 @@ INDEX_LETTERS = {"A": "view", "R": "tile", "M": "tile", "J": "tile", "K": "tile"
 OTHER_INDICES = tuple(n for n in INDEX_NAMES if n not in ("scene", "resolution"))
 #: this backend can make an index an axis (open(..., rename=...))
 RENAMES = True
+#: this backend can open one file of a multi-file OME-TIFF alone (open(..., multifile=False))
+MULTIFILE = True
 
 
 #: series kinds whose ``R`` is a stage position (a scene, as Bio-Formats lists
@@ -282,7 +284,11 @@ def owner(path: str, head):
     ``<prefix>_MMStack*.tif`` -- one acquisition, by tifffile's rule --
     are parts of the first in natural order (``Pos0`` before ``Pos0_1``,
     ``Pos1``).  tifffile reads the whole series from any of them; the owner
-    makes a folder of them one image."""
+    makes a folder of them one image.  The files are split by size, in the
+    middle of a timepoint (checked 2026-10-16 on the 4.7 GB OME sample: one
+    timepoint's 63 planes are 61 in ``Pos0``, 2 in ``Pos0_1``), so a file is
+    no image on its own, though each carries the full OME-XML:
+    ``open(..., multifile=False)`` does not apply to them."""
     name = os.path.basename(path)
     lower = name.lower()
     stack_file = lower.endswith((".tif", ".tiff")) and head is not None and head[:4] in MAGIC
@@ -1129,7 +1135,7 @@ def pages_file(tif, path: str) -> _TiffFile:
 
 
 def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa: A001 - backend protocol
-         rename: dict = None, companion: bool = True) -> _TiffFile:
+         rename: dict = None, companion: bool = True, multifile: bool = True) -> _TiffFile:
     try:
         import tifffile
     except ImportError as exc:
@@ -1145,6 +1151,10 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa:
             # CO-2); companion=False (internal: file sets, whose index file decides) skips it
             from . import companion
             view = companion.member_view(path, tif)    # takes over *tif* when it is one
+            if view is None and not multifile and not tif.is_micromanager:
+                # a multi-file OME-TIFF: only the planes this file holds (not a
+                # Micro-Manager stack: its files are split by size, see owner)
+                view = companion.single_file_view(path, tif)
             if view is not None:
                 return view
         series = list(tif.series)

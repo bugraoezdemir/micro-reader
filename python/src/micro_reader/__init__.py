@@ -16,7 +16,7 @@ from ._registry import BACKENDS, open  # noqa: A004 - the public entry point
 from ._groups import FileGroup, Grouping, group_files
 from .backends.czi import DamagedFileWarning
 
-__version__ = "0.0.3"
+__version__ = "0.0.4"
 
 __all__ = [
     "open", "group_files", "FileGroup", "Grouping", "File", "Image", "INDEX_NAMES", "PLATE_INDICES", "SAMPLED_INDICES", "ReadStats",

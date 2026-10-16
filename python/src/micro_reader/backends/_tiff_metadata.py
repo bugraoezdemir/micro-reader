@@ -44,6 +44,10 @@ def tiff_metadata(image, n_channels: int, cache: dict, resolution_tags: bool = T
         meta = _stk(tif.stk_metadata, n_channels)
         if meta is not None:
             return meta
+    if getattr(tif, "is_ndtiff", False):
+        meta = _ndtiff(image, n_channels, cache)
+        if meta is not None:
+            return meta
     for flag, read in SLIDE_READERS:
         if getattr(tif, flag, False):
             meta = read(image, n_channels, cache)
@@ -69,6 +73,56 @@ def _stk(md: dict, n_channels: int):
     if not sizes:
         return None
     return Metadata(pixel_sizes=sizes, channels=_unknown_channels(n_channels))
+
+
+def _ndtiff(image, n_channels: int, cache: dict):
+    """Micro-Manager NDTiff: channel names from ``NDTiff.index`` -- the
+    string values of its ``channel`` axis, in order of first appearance, as
+    tifffile numbers the channels -- and the pixel size from the first
+    frame's own metadata (``PixelSizeUm``, um).  None without either."""
+    if "ndtiff" not in cache:
+        cache["ndtiff"] = _ndtiff_record(image._tif)
+    names, size = cache["ndtiff"]
+    sizes = {}
+    q = quantity(size, "micrometer") if size else None
+    if q:
+        sizes = {"x": q, "y": q}
+    if not sizes and not names:
+        return None
+    channels = [Channel(name=n) for n in names] if "c" in image.axes or len(names) == 1 else []
+    return Metadata(pixel_sizes=sizes, channels=_channels(channels, n_channels))
+
+
+def _ndtiff_record(tif) -> tuple:
+    """(channel names, PixelSizeUm or None) of the dataset *tif* belongs to;
+    ([], None) when its index cannot be read."""
+    import json
+    import struct
+
+    import tifffile
+    folder = tif.filehandle.dirname
+    names, first = [], None
+    try:
+        for (axes, filename, _offset, _width, _height, _type, _compression, meta_at, meta_bytes,
+             meta_compression) in tifffile.read_ndtiff_index(os.path.join(folder, "NDTiff.index")):
+            value = axes.get("channel")
+            if isinstance(value, str) and value not in names:
+                names.append(value)
+            if first is None and meta_bytes > 0 and meta_compression == 0:
+                first = (filename, meta_at, meta_bytes)
+    except (OSError, ValueError, struct.error):
+        return [], None
+    size = None
+    if first is not None:
+        try:
+            with open(os.path.join(folder, first[0]), "rb") as fh:
+                fh.seek(first[1])
+                frame = json.loads(fh.read(first[2]).rstrip(b"\x00").decode("utf-8"))
+            value = frame.get("PixelSizeUm") if isinstance(frame, dict) else None
+            size = float(value) if isinstance(value, (int, float)) and value > 0 else None
+        except (OSError, ValueError, UnicodeDecodeError):
+            size = None
+    return names, size
 
 
 def _unknown_channels(n: int) -> tuple:

@@ -15,9 +15,10 @@ SUMMARY_HEADER = 2355492
 MICROMANAGER_TAG = 51123
 
 
-def _tiff_file(path, frames, summary: dict) -> list:
-    """*frames*: (height, width) uint16 arrays -> one TIFF; returns each
-    frame's data offset."""
+def _tiff_file(path, frames, summary: dict, metadata=None) -> list:
+    """*frames*: (height, width) uint16 arrays -> one TIFF; *metadata*: one
+    JSON dict per frame (default {}).  Returns each frame's (data offset,
+    metadata offset, metadata length)."""
     summary_json = json.dumps(summary).encode()
     out = bytearray(b"II*\x00" + struct.pack("<I", 0))
     # NDTiff v3 header at offset 8: major version, minor version + summary
@@ -26,13 +27,13 @@ def _tiff_file(path, frames, summary: dict) -> list:
     if len(out) % 2:
         out += b"\x00"
     link_at, offsets = 4, []
-    for frame in frames:
+    for k, frame in enumerate(frames):
         height, width = frame.shape
         data_at = len(out)
-        offsets.append(data_at)
         out += frame.astype("<u2").tobytes()
-        md = b"{}\x00"
+        md = json.dumps(metadata[k] if metadata else {}).encode() + b"\x00"
         md_at = len(out)
+        offsets.append((data_at, md_at, len(md)))
         out += md
         if len(out) % 2:
             out += b"\x00"
@@ -54,10 +55,13 @@ def _tiff_file(path, frames, summary: dict) -> list:
     return offsets
 
 
-def write_ndtiff(directory, frames: list, *, per_file: int = None, prefix="data_NDTiffStack"):
+def write_ndtiff(directory, frames: list, *, per_file: int = None, prefix="data_NDTiffStack",
+                 frame_metadata=None):
     """*frames*: (axes dict, e.g. {"position": 0, "time": 1, "channel": "DAPI",
     "z": 2}; (height, width) uint16) pairs -> TIFF files of *per_file* frames
-    each (all in one by default) and ``NDTiff.index``.  Returns the TIFF paths."""
+    each (all in one by default) and ``NDTiff.index``; *frame_metadata*: the
+    JSON dict written for every frame (e.g. {"PixelSizeUm": 0.65}), its offset
+    and length in the index.  Returns the TIFF paths."""
     os.makedirs(directory, exist_ok=True)
     items = list(frames)
     per_file = per_file or len(items)
@@ -67,15 +71,16 @@ def write_ndtiff(directory, frames: list, *, per_file: int = None, prefix="data_
         chunk = items[start:start + per_file]
         name = f"{prefix}.tif" if n == 0 else f"{prefix}_{n}.tif"
         path = os.path.join(directory, name)
-        offsets = _tiff_file(path, [np.asarray(f) for _, f in chunk], summary)
+        metadata = [frame_metadata or {} for _ in chunk]
+        offsets = _tiff_file(path, [np.asarray(f) for _, f in chunk], summary, metadata)
         paths.append(path)
-        for (axes, frame), offset in zip(chunk, offsets):
+        for (axes, frame), (offset, md_at, md_len) in zip(chunk, offsets):
             axes_json = json.dumps(axes).encode()
             filename = name.encode()
             height, width = np.asarray(frame).shape
             index += struct.pack("<i", len(axes_json)) + axes_json
             index += struct.pack("<i", len(filename)) + filename
-            index += struct.pack("<IiiiiIii", offset, width, height, 1, 0, 0, 0, 0)
+            index += struct.pack("<IiiiiIii", offset, width, height, 1, 0, md_at, md_len, 0)
     with open(os.path.join(directory, "NDTiff.index"), "wb") as fh:
         fh.write(index)
     return paths

@@ -142,27 +142,40 @@ def main_file(path: str, backends) -> str:
     raise CorruptFileError(f"{path!r} is a part of {part.expected!r}, which is missing")
 
 
+def _sniffed(paths, backends) -> tuple:
+    """(index files, images) among *paths*: each file's head read, parts
+    left out (their main file is listed itself)."""
+    indices, images = [], []
+    for path in paths:
+        try:
+            head = read_head(path)
+        except OSError:
+            continue
+        if part_of(path, head, backends) is not None:
+            continue
+        module = next((m for m in backends if m.sniff(head, path)), None)
+        if module is None:
+            continue
+        (indices if getattr(module, "SET_INDEX", False) else images).append(path)
+    return indices, images
+
+
 def _folder_image(folder: str, backends) -> str:
     part = part_of(folder, None, backends)
     if part is not None:
         if part.main is None:
             raise CorruptFileError(f"{folder!r} is a part of {part.expected!r}, which is missing")
         return part.main
-    indices, images = [], []
-    for name in sorted(os.listdir(folder)):
-        path = os.path.join(folder, name)
-        if not os.path.isfile(path):
-            continue
-        try:
-            head = read_head(path)
-        except OSError:
-            continue
-        if part_of(path, head, backends) is not None:
-            continue                                 # a part: its main file is listed itself
-        module = next((m for m in backends if m.sniff(head, path)), None)
-        if module is None:
-            continue
-        (indices if getattr(module, "SET_INDEX", False) else images).append(path)
+    with os.scandir(folder) as entries:              # the listing says file / folder: no stat
+        files = sorted(e.path for e in entries if e.is_file())
+    # A plate folder holds every plane: look for index files by name first and
+    # read only those; every file is sniffed only when there is none.
+    named = [p for p in files if any(getattr(m, "SET_INDEX", False) and
+                                     getattr(m, "may_index", lambda _n: False)(os.path.basename(p))
+                                     for m in backends)]
+    indices, images = _sniffed(named, backends)
+    if not indices:
+        indices, images = _sniffed(files, backends)
     found = indices or images
     if len(found) == 1:
         return found[0]

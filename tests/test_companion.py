@@ -368,6 +368,76 @@ def test_a_member_is_recognised_when_a_check_passes(tmp_path, own, points_to, re
         assert bool(refused) is (recognised is False)
 
 
+def test_a_stub_may_point_to_an_ome_tiff(tmp_path):
+    """The full OME-XML in another member's first page (no .companion.ome):
+    a stub pointing to that OME-TIFF takes its metadata from it."""
+    path, data = _write(str(tmp_path), metadata_file="img0_part000.tif")
+    xml = open(path, encoding="utf-8").read()
+    os.remove(path)
+    tifffile.imwrite(_member(str(tmp_path), 0), data[(0, 0, 0, 0)],
+                     description=xml.encode("utf-8"), metadata=None)   # the master: XML + plane 0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", micro_reader.CompanionWarning)
+        f = micro_reader.open(_member(str(tmp_path), 1))
+    with f:
+        assert os.path.samefile(f.companion, _member(str(tmp_path), 0))
+        im = f.images[0]
+        assert im.metadata.pixel_sizes["x"].value == pytest.approx(0.5)
+        np.testing.assert_array_equal(np.asarray(im[...]).reshape(Y, X), data[(0, 0, 0, 1)])
+
+
+def _xml_in_every_file(folder, T=3):
+    """A multi-file OME-TIFF: one file per timepoint, the full OME-XML in
+    every file's first page, no companion.  -> (paths, data)."""
+    path, data = _write(folder, layout="stacks", T=T)
+    xml = open(path, encoding="utf-8").read().encode("utf-8")
+    os.remove(path)
+    paths = [_member(folder, g) for g in range(T)]
+    for p in paths:
+        with tifffile.TiffFile(p) as tif:
+            pages = [page.asarray() for page in tif.pages]
+        with tifffile.TiffWriter(p) as w:
+            for k, a in enumerate(pages):
+                w.write(a, description=xml if k == 0 else None, metadata=None)
+    return paths, data
+
+
+def test_multifile_false_opens_one_file_of_a_multi_file_ome_tiff(tmp_path):
+    paths, data = _xml_in_every_file(str(tmp_path))
+    with micro_reader.open(paths[1]) as f:                       # default: the whole set
+        assert f.images[0].shape[0] == 3
+    with micro_reader.open(paths[1], multifile=False) as f:      # only its own timepoint
+        (im,) = f.images
+        assert im.shape[:3] == (1, 2, 3)
+        got = im[...]
+        for c in range(2):
+            for z in range(3):
+                np.testing.assert_array_equal(got[0, c, z], data[(0, 1, c, z)])
+        assert im.metadata.pixel_sizes["x"].value == pytest.approx(0.5)
+        assert [ch.name for ch in im.metadata.channels] == ["ch0", "ch1"]
+
+
+def test_multifile_false_leaves_micro_manager_stacks_whole(tmp_path, monkeypatch):
+    """Micro-Manager splits its files by size, mid-timepoint (61 / 2 planes
+    of one timepoint on the OME 4.7 GB sample): a file is no block of the
+    image, so multifile=False opens the whole stack, as by default."""
+    paths, _data = _xml_in_every_file(str(tmp_path))
+    # tifffile takes the file's flags from its first page
+    monkeypatch.setattr(tifffile.TiffPage, "is_micromanager", property(lambda self: True))
+    with micro_reader.open(paths[1], multifile=False) as f:
+        assert f.images[0].shape[0] == 3
+
+
+def test_multifile_false_leaves_single_file_ome_tiffs_and_others_alone(tmp_path):
+    single = str(tmp_path / "single.ome.tif")
+    tifffile.imwrite(single, np.zeros((2, Y, X), "u2"), metadata={"axes": "ZYX"})
+    plain = str(tmp_path / "plain.tif")
+    tifffile.imwrite(plain, np.zeros((Y, X), "u2"))
+    for p in (single, plain):
+        with micro_reader.open(p) as a, micro_reader.open(p, multifile=False) as b:
+            assert [im.shape for im in a.images] == [im.shape for im in b.images]
+
+
 def test_a_renamed_member_is_found_by_its_uuid(tmp_path):
     path, data = _write(str(tmp_path), own="listed", points_to="this")
     renamed = os.path.join(str(tmp_path), "renamed.tif")

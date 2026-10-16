@@ -14,7 +14,8 @@ does not list the images; it gives:
 
 The files are named ``<plate>_<well>[_s<site>][_w<wave>]<anything>.TIF``
 (``_s`` / ``_w`` only when the plate has sites / waves; some versions add a
-GUID; ``_thumb`` files are previews and skipped).
+GUID; ``_thumb`` files are previews and skipped).  The previews are parts of
+the ``.HTD`` (docs/COMPOSITE.md): opening one opens the plate.
 
 - One micro-reader image per site, axes ``t c z y x`` (z = 1).
 - Indices: ``plate`` 0, ``acquisition`` 0, ``well`` (row then column),
@@ -30,6 +31,7 @@ import io
 import os
 import re
 
+from .. import _parts
 from .._base import File
 from .._errors import CorruptFileError, UnsupportedFormatError
 from .._fileset import Members, PlaneImage, keep_fields
@@ -43,6 +45,35 @@ MAGIC = b'"HTSInfoFile"'
 NAME_RE = re.compile(r"^(?P<base>.+?)_(?P<well>[A-Za-z]{1,2})(?P<col>\d{1,3})"
                      r"(?:_s(?P<site>\d+))?(?:_w(?P<wave>\d+))?(?P<rest>[^.]*)\.tiff?$",
                      re.IGNORECASE)
+
+
+TIMEPOINT_FOLDER = re.compile(r"^TimePoint_\d+$", re.IGNORECASE)
+
+
+def may_own(folder: str, name: str, folders) -> bool:
+    """``group_files``' cheap test (reads nothing): a ``_thumb`` TIFF may be
+    a plate's preview."""
+    lower = name.lower()
+    return "thumb" in lower and lower.endswith((".tif", ".tiff"))
+
+
+def owner(path: str, head):
+    """A plate's ``_thumb`` previews are parts of its ``.HTD`` -- only when
+    that file exists (exact names: no folder listing), so a lone file named
+    like one is not taken for a part."""
+    match = NAME_RE.match(os.path.basename(path))
+    if match is None or "thumb" not in match["rest"].lower() or os.path.isdir(path):
+        return None
+    folder = os.path.dirname(os.path.abspath(path))
+    places = [folder]
+    if TIMEPOINT_FOLDER.match(os.path.basename(folder)):
+        places.append(os.path.dirname(folder))
+    for place in places:
+        for ext in (".HTD", ".htd"):
+            htd = os.path.join(place, match["base"] + ext)
+            if os.path.isfile(htd):
+                return _parts.Part(htd, htd, standalone=True)
+    return None
 
 
 def may_index(name: str) -> bool:
