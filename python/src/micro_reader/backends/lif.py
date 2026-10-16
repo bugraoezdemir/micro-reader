@@ -69,13 +69,13 @@ import re
 import struct
 import threading
 import xml.etree.ElementTree as ET
-from urllib.parse import unquote
 
 import numpy as np
 
 from .. import _codecs, _pool
 from .._base import File, Image
 from .._errors import CorruptFileError, UnsupportedFormatError
+from .. import _parts
 from .._io import DecodeCache, ThreadHandles
 from . import raster
 
@@ -109,6 +109,11 @@ def _xml_codec(head: bytes):
         if head.startswith(prefix):
             return codec
     return None
+
+
+def may_index(name: str) -> bool:
+    """``group_files``' cheap test (reads nothing): XLEF, XLCF and XLIF files name the files their images come from."""
+    return name.lower().endswith(('.xlef', '.xlcf', '.xlif'))
 
 
 def sniff(head: bytes, path: str) -> bool:
@@ -163,23 +168,8 @@ def _memory_blocks(fh, version: int, path: str) -> dict:
         fh.seek(size, 1)
 
 
-def _resolve(dirname: str, ref: str, where: str) -> str:
-    """A file referenced from an XLIF / XLEF / XLCF: relative, URL-quoted,
-    possibly with backslashes and another letter case (written on Windows)."""
-    rel = os.path.normpath(unquote(ref).replace("\\", "/"))
-    path = os.path.join(dirname, rel)
-    if os.path.exists(path):
-        return path
-    current = dirname
-    for part in rel.split(os.sep):
-        try:
-            match = [e for e in os.listdir(current or ".") if e.lower() == part.lower()]
-        except OSError:
-            match = []
-        if not match:
-            raise CorruptFileError(f"{where}: referenced file {ref!r} not found")
-        current = os.path.join(current, match[0])
-    return current
+#: a file referenced from an XLIF / XLEF / XLCF (relative, URL-quoted, any letter case)
+_resolve = _parts.resolve
 
 
 # -- memory blocks ------------------------------------------------------------------
@@ -481,9 +471,10 @@ class _LifFile(File):
 
     def __init__(self, path: str, tiles: str = "separate"):
         self.path = path
-        self._handles: dict = {}            # binary file -> ThreadHandles
+        self._handles = _parts.Handles()     # binary file -> ThreadHandles
         self._tiffs: list = []              # TIFF frame files opened
         self._lofs: dict = {}               # LOF frame file -> its _FileBlock
+        self._sources: list = []            # every file the images come from
         self.format = None                  # of the file opened: lif, lof, lifext, xlif, ...
         try:
             entries = self._collect(path, frozenset())
@@ -523,6 +514,7 @@ class _LifFile(File):
         if real in seen:
             raise CorruptFileError(f"{path!r}: files reference each other in a cycle")
         seen = seen | {real}
+        self._sources.append(path)
         with builtins.open(path, "rb") as fh:
             head = fh.read(13)
             if len(head) == 13 and struct.unpack_from("<iiB", head)[::2] == (MAGIC, STAR):
@@ -536,9 +528,7 @@ class _LifFile(File):
             self.format = name.lower()
 
     def _handles_for(self, path: str) -> ThreadHandles:
-        if path not in self._handles:
-            self._handles[path] = ThreadHandles(path)
-        return self._handles[path]
+        return self._handles.get(path)
 
     def _binary(self, path: str, fh) -> list:
         """LIF, LOF or LIFEXT."""
@@ -617,6 +607,7 @@ class _LifFile(File):
             frames = [(_resolve(dirname, f.get("File"), where), int(f.get("Offset", 0)),
                        int(f.get("Size", 0))) for f in memory if "File" in f.attrib]
             size = int(memory.get("Size", 0))
+            self._sources.extend(p for p, _offset, _size in frames)
             if not frames or not size:
                 return []
             block = _FrameBlock(self, frames, size, where)
@@ -694,12 +685,15 @@ class _LifFile(File):
             return "image", _image_reader(path, where)
         raise UnsupportedFormatError(f"{where}: frame file type {ext!r} ({path!r})")
 
+    def _member_files(self) -> set:
+        """The referenced files (XLEF / XLCF / XLIF) and frame files the images
+        come from (``group_files``)."""
+        return set(self._sources) - {self.path}
+
     # -- closing --------------------------------------------------------------------
 
     def _close_files(self) -> None:
-        for handles in self._handles.values():
-            handles.close()
-        self._handles.clear()
+        self._handles.close()
         for img in self._tiffs:
             img.close()
         self._tiffs.clear()

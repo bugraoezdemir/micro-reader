@@ -30,6 +30,13 @@ micro-reader reads the measurement in that folder.
 - Actions with different z (a 3-D action next to 2-D ones): a RAGGED image
   (docs/AXES.md, ``_fileset.ragged_field``), placed by each record's ``Z``.
 
+The measurement folder is also a composite (docs/COMPOSITE.md): its main
+file is ``<plate>.wpi`` (else ``MeasurementDetail.mrf``, else
+``MeasurementData.mlf``); the other entry files, the instrument's own
+Harmony-format export (``Index.idx.xml``) and the settings files (``.wpp``,
+``.mes``, ``.ppp``, ``.ppf``, ``.icr``, ``*_parameter.xml``) are its parts and
+open it.  The plane TIFFs are the index's members (they open alone).
+
 Missing files: as for every file set (``_fileset.keep_fields``).  Refused:
 several timelines, channels imaged at different timepoints, channels with
 different pixel sizes or image sizes.
@@ -41,6 +48,7 @@ import warnings
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
+from .. import _parts
 from .._base import File
 from .._errors import CorruptFileError, UnsupportedFormatError
 from .._fileset import (Members, PlaneImage, check_times, keep_fields, ragged_field,
@@ -49,10 +57,69 @@ from .._metadata import Channel, Metadata, color_hex, quantity
 from .._plate import Plate, Well, row_label
 
 NAME = "cv7000"
+#: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
+SET_INDEX = True
 BTS = "{http://www.yokogawa.co.jp/BTS/BTSSchema/1.0}"
 DETAIL, DATA = "MeasurementDetail.mrf", "MeasurementData.mlf"
 #: the root elements of the files that open a measurement (not .wpp / .mes)
 ENTRY_ROOTS = (b"bts:WellPlate ", b"bts:MeasurementDetail ", b"bts:MeasurementData ")
+
+
+#: files of a measurement folder that are parts of its main file (lower case)
+SIDE_EXTENSIONS = (".wpi", ".mrf", ".mlf", ".wpp", ".mes", ".ppp", ".ppf", ".icr", ".xml")
+
+
+#: folder -> (its modification time, its main entry): a measurement folder
+#: holds every plane, so it is listed once (again only when it changes)
+_ENTRIES: dict = {}
+
+
+def _main_entry(folder: str):
+    """The measurement's main file: ``<plate>.wpi``, else ``.mrf``, else ``.mlf``."""
+    try:
+        stamp = os.stat(folder or ".").st_mtime_ns
+    except OSError:
+        return None
+    cached = _ENTRIES.get(folder)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    try:
+        names = os.listdir(folder or ".")
+    except OSError:
+        return None
+    wpi = sorted(e for e in names if e.lower().endswith(".wpi"))
+    lower = {e.lower(): e for e in names}
+    main = os.path.join(folder, wpi[0]) if len(wpi) == 1 else next(
+        (os.path.join(folder, lower[n.lower()]) for n in (DETAIL, DATA) if n.lower() in lower), None)
+    if len(_ENTRIES) > 256:
+        _ENTRIES.clear()
+    _ENTRIES[folder] = (stamp, main)
+    return main
+
+
+def may_own(folder: str, name: str, folders) -> bool:
+    """``group_files``' cheap test (reads nothing but the folder listing
+    *folders* caches): a settings or entry file next to a ``.mlf``."""
+    return name.lower().endswith(SIDE_EXTENSIONS) and DATA.lower() in folders.names(folder)
+
+
+def owner(path: str, head):
+    """The entry, export and settings files of a measurement folder are
+    parts of its main file (module docstring)."""
+    if os.path.isdir(path) or not path.lower().endswith(SIDE_EXTENSIONS):
+        return None
+    folder = os.path.dirname(path)
+    if not os.path.isfile(os.path.join(folder, DATA)):     # exact name: no folder listing
+        return None
+    main = _main_entry(folder)
+    if main is None or os.path.normcase(os.path.abspath(main)) ==             os.path.normcase(os.path.abspath(path)):
+        return None
+    return _parts.Part(main, main)
+
+
+def may_index(name: str) -> bool:
+    """``group_files``' cheap test (reads nothing): a measurement is entered by its ``.wpi``, ``.mrf`` or ``.mlf``."""
+    return name.lower().endswith(('.wpi', '.mrf', '.mlf'))
 
 
 def sniff(head: bytes, path: str) -> bool:

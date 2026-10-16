@@ -160,6 +160,18 @@ def test_lambda_scan_is_one_image_per_emission_band(tmp_path):
             assert meta.pixel_sizes["t"] == (1500.0, "millisecond")
 
 
+def test_a_missing_continuation_in_the_middle_warns(tmp_path):
+    """_00001 missing, _00002 present: a warning names _00001, and the frames
+    in _00002 are still read (each frame says where it belongs)."""
+    path, expected = _write(tmp_path, "companion_file")
+    stem = os.path.splitext(path)[0]
+    os.rename(stem + "_00001", stem + "_00002")
+    with pytest.warns(micro_reader.MissingImagesWarning, match=r"companion_file_00001 is missing"):
+        f = micro_reader.open(path)
+    with f:
+        np.testing.assert_array_equal(f.images[0][...], expected)
+
+
 def test_close_releases_every_file(tmp_path, decode_threads):
     path, _ = _write(tmp_path, "companion_file")
     img = micro_reader.open(path)

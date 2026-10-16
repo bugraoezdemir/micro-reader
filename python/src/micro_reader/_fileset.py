@@ -185,7 +185,9 @@ class PlaneImage(Image):
                     entry = self._members.acquire(path)
                     try:
                         if ifd is None:
-                            plane, n = entry[0].images[0]._read_block((ys, xs))
+                            image = entry[0].images[0]
+                            self._fits(path, image)
+                            plane, n = image._read_block((ys, xs))
                         else:
                             plane, n = _read_page(entry[0], ifd, ys, xs, path)
                     finally:
@@ -214,6 +216,7 @@ class PlaneImage(Image):
                         entry = self._members.acquire(path)
                         entries.append(entry)
                         image, k = _page(entry[0], ifd, path)
+                        self._fits(path, image, ifd)
                         if image.axes == "yx":
                             plan = image._plan_series((ys, xs), dest)
                         else:
@@ -224,6 +227,51 @@ class PlaneImage(Image):
         finally:
             for entry in entries:
                 self._members.release(entry)
+
+    def _fits(self, path: str, image, ifd=None) -> None:
+        """Raise unless member *path* (its first image, or page *ifd*) is one
+        plane of this image's size and type: the index decides what a plane
+        is, a file that differs would be cropped or cast without a word.  Run
+        on every read (a comparison; the member is open anyway)."""
+        y, x = self.shape[-2:]
+        if ifd is not None:
+            fits = tuple(image.shape[-2:]) == (y, x)
+        else:
+            fits = image.axes == "yx" and tuple(image.shape) == (y, x)
+        if fits and image.dtype == self.dtype:
+            return
+        what = f"page {ifd}: " if ifd is not None else ""
+        raise CorruptFileError(f"{path!r}: {what}a {image.axes} {tuple(image.shape)} "
+                               f"{image.dtype} image, {self.name!r} expects one {y} x {x} "
+                               f"{self.dtype} plane")
+
+    def _member_paths(self) -> set:
+        """The member files this image reads (``File._member_files``)."""
+        return {m[0] if isinstance(m, tuple) else m for m in self._planes.values()}
+
+    def _check_members(self, seen: set):
+        """Tasks checking each member not in *seen* (see ``File.check_members``);
+        each returns 1, or the error text of a member that does not fit."""
+        for member in self._planes.values():
+            path, ifd = member if isinstance(member, tuple) else (member, None)
+            key = (path, ifd)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield lambda path=path, ifd=ifd: self._check_one(path, ifd)
+
+    def _check_one(self, path: str, ifd):
+        entry = self._members.acquire(path)
+        try:
+            if ifd is None:
+                self._fits(path, entry[0].images[0])
+            else:
+                self._fits(path, _page(entry[0], ifd, path)[0], ifd)
+        except (CorruptFileError, UnsupportedFormatError) as exc:
+            return str(exc)
+        finally:
+            self._members.release(entry)
+        return 1
 
     def close(self) -> None:
         pass                                    # the file closes the members

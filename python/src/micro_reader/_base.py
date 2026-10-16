@@ -247,9 +247,17 @@ SAMPLED_INDICES = ("illumination", "phase", "block", "emission", "excitation", "
                    "sequence")
 
 
+def _counted(result, bad: list) -> int:
+    """One member checked (``File.check_members``): *result* is 1, or the
+    text saying why it does not fit (kept in *bad*)."""
+    if result != 1:
+        bad.append(result)
+    return 1
+
+
 class File:
     """An opened file: its images, the backend that reads them (``backend``:
-    "tiff", "czi", "nd2", "lif", "oir", "ims", "mrc", "raster") and the
+    "tiff", "czi", "nd2", "lif", "oir", "oif", "vsi", "ims", "dv", "mrc", "raster") and the
     format variant it is (``format``: e.g. "ome-tiff", "imagej", "lsm",
     "nd2-legacy", "lof", "xlef", "png").  Every format opens as a File; a
     backend's own class is an implementation detail."""
@@ -257,7 +265,10 @@ class File:
     backend: str = "base"
 
     def __init__(self, path: str, images: Sequence[Image], plates: Sequence = ()):
+        #: the file read: for a composite format its main file (docs/COMPOSITE.md)
         self.path = str(path)
+        #: the path ``open()`` was given: a part of a composite, a folder, or ``path``
+        self.opened = self.path
         self.images = list(images)
         #: the plates the images belong to (``_plate.Plate``), like ``images``
         #: a list; empty for a file that is not a plate (docs/HCS.md)
@@ -322,6 +333,46 @@ class File:
             raise KeyError(f"unknown indices {sorted(unknown)}; the indices are {INDEX_NAMES}")
         return [image for image in self.images
                 if all(image.index.get(name) == value for name, value in index.items())]
+
+    def _member_files(self) -> set:
+        """The other files this file's images are read from -- a file set's
+        members -- for ``group_files``.  Empty for a file that reads only itself."""
+        out = set()
+        for image in self.images:
+            image = getattr(image, "source", image)
+            for each in [image] + [p for p in image.parts if p is not image]:
+                paths = getattr(each, "_member_paths", None)
+                if paths is not None:
+                    out.update(paths())
+        out.discard(self.path)
+        return out
+
+    def check_members(self) -> int:
+        """For a file set (a plate, an OME companion set): open every member
+        file once and check that it is the plane its index describes (size,
+        type, one plane).  Reading makes the same check plane by plane, at no
+        cost; this finds a file that does not fit before anything is read, at
+        the cost of opening every member.  Returns the number of members
+        checked (0 for a file that is not a file set); raises
+        ``CorruptFileError`` naming the members that do not fit."""
+        from . import _pool
+        from ._errors import CorruptFileError
+        seen, bad = set(), []
+
+        def tasks():                        # lazy: a plate may have millions of members
+            for image in self.images:
+                image = getattr(image, "source", image)        # open(axes=...) wraps it
+                for each in [image] + [p for p in image.parts if p is not image]:
+                    check = getattr(each, "_check_members", None)
+                    if check is not None:
+                        for task in check(seen):
+                            yield lambda task=task: _counted(task(), bad)
+        checked = _pool.run(tasks())
+        if bad:
+            shown = "; ".join(bad[:5]) + (f"; ... ({len(bad)} in all)" if len(bad) > 5 else "")
+            raise CorruptFileError(f"{self.path!r}: {len(bad)} of {checked} member files do "
+                                   f"not fit the index: {shown}")
+        return checked
 
     def close(self) -> None:
         for image in self.images:
