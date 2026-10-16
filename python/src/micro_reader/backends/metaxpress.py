@@ -37,10 +37,17 @@ from .._metadata import Channel, Metadata
 from .._plate import Plate, Well, row_label
 
 NAME = "metaxpress"
+#: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
+SET_INDEX = True
 MAGIC = b'"HTSInfoFile"'
 NAME_RE = re.compile(r"^(?P<base>.+?)_(?P<well>[A-Za-z]{1,2})(?P<col>\d{1,3})"
                      r"(?:_s(?P<site>\d+))?(?:_w(?P<wave>\d+))?(?P<rest>[^.]*)\.tiff?$",
                      re.IGNORECASE)
+
+
+def may_index(name: str) -> bool:
+    """``group_files``' cheap test (reads nothing): the plate is an ``.HTD`` file."""
+    return name.lower().endswith(('.htd',))
 
 
 def sniff(head: bytes, path: str) -> bool:

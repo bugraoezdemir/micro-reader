@@ -34,6 +34,13 @@ from .._metadata import Channel, Metadata, quantity
 from .._plate import Plate, Well, row_label
 
 NAME = "incell"
+#: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
+SET_INDEX = True
+
+
+def may_index(name: str) -> bool:
+    """``group_files``' cheap test (reads nothing): the plate is an ``.xdce`` file."""
+    return name.lower().endswith(('.xdce',))
 
 
 def sniff(head: bytes, path: str) -> bool:

@@ -2,7 +2,7 @@
 
 **Memory-bounded pixel reader for microscopy images.**
 
-`micro-reader` reads regions of large microscopy files without loading the entire image into memory. It provides a common interface across TIFF, CZI, ND2, Leica, OIR, Imaris, MRC, and common raster formats.
+`micro-reader` reads regions of large microscopy files without loading the entire image into memory. It provides a common interface across TIFF, CZI, ND2, Leica, OIR, OIB / OIF, Olympus VSI, Imaris, DeltaVision, MRC, common raster formats, OME companion file sets, and high-content screening plates (Harmony, MetaXpress, IN Cell, CellVoyager).
 
 > **Status: pre-alpha (0.0.x)**
 >
@@ -160,6 +160,31 @@ resolution
 ```
 
 Only dimensions actually present in a file appear in an image's index.
+
+### Files made of several files
+
+Some formats always come as several files: an OIR file with its continuation files (`name_00001`), a Micro-Manager stack split over `..._MMStack_Pos0.ome.tif`, `..._MMStack_Pos0_1.ome.tif`, an NDTiff folder, an Olympus OIF with its `.oif.files` folder, an Olympus VSI with its `_name_` folder, a DeltaVision image with its softWoRx `.log`. Opening any of these files opens the whole image:
+
+```python
+f = micro_reader.open("cells_R3D.dv.log")
+f.path     # the main file: "cells_R3D.dv"
+f.opened   # what was opened: "cells_R3D.dv.log"
+```
+
+You can also open the folder. A folder opens the image it belongs to (an NDTiff dataset folder), or the one image it holds. A folder with several images raises an error that lists them.
+
+To sort many files at once, for example everything under a folder you want to convert, `group_files` says which files make one image:
+
+```python
+g = micro_reader.group_files("experiment/")
+for group in g.groups:
+    group.main      # the file to open: "slide.vsi", "plate/Index.idx.xml"
+    group.parts     # the other files of a multi-file image
+    group.members   # for a plate or companion index: the files its images come from
+g.singles           # every other file, as given
+```
+
+A file that a plate or companion index names is listed only in that index's group. When the main file of a multi-file image is missing, its group has `main=None`.
 
 ## Axes
 
@@ -354,7 +379,7 @@ img_scene0_level2 = f.select(scene=0, resolution=2)[0]
 Supported pyramids include:
 
 * **Imaris**: all stored levels
-* **TIFF**: OME-TIFF and other TIFF pyramids such as SVS and NDPI
+* **TIFF**: OME-TIFF and whole-slide pyramids (SVS, NDPI, SCN, BIF, QPTIFF, Philips)
 * **CZI**: stored pyramids of whole scenes
 
 Other formats expose a single resolution level.
@@ -406,6 +431,12 @@ f = micro_reader.open("plate.czi", plates=True)
 ```
 
 Missing plane files are read as zeros, with a `MissingImagesWarning`. A field without any of its files is left out.
+
+A plane file whose size or pixel type differs from what the index describes raises an error when it is read. To find such files before reading anything, check them all at once:
+
+```python
+f.check_members()   # opens every plane file once; returns how many were checked
+```
 
 When the channels of a field have different z sampling, `image.parts` gives one image per group of channels that share it.
 
@@ -472,13 +503,16 @@ The position is omitted when it cannot be determined reliably.
 
 | Format               | Notes                                                 |
 | -------------------- | ----------------------------------------------------- |
-| **TIFF / BigTIFF**   | TIFF, OME-TIFF, ImageJ, LSM, STK and TIFF pyramids    |
+| **TIFF / BigTIFF**   | TIFF, OME-TIFF, ImageJ, LSM, STK, Micro-Manager, whole-slide TIFFs |
 | **OME companion**    | `.companion.ome` sets of OME-TIFF files               |
 | **CZI**              | Zeiss CZI, including mosaic tiles and stitched scenes |
 | **ND2**              | Nikon ND2, including legacy JPEG 2000 ND2             |
 | **Leica**            | LIF, LOF, LIFEXT, XLIF, XLEF, XLCF                    |
 | **OIR**              | Olympus / Evident FluoView                            |
+| **OIB / OIF**        | Olympus FluoView FV1000 / FV1200 / FV3000             |
+| **VSI**              | Olympus / Evident cellSens and VS120 / VS200 slide scanners |
 | **Imaris**           | `.ims`, with the `[ims]` extra                        |
+| **DeltaVision**      | `.dv`, `.r3d` (softWoRx, OMX, Priism)                 |
 | **MRC**              | Common MRC modes and extended headers                 |
 | **Plates (HCS)**     | Harmony, MetaXpress, IN Cell and CellVoyager plates   |
 | **JPEG / PNG / BMP** | Common raster image formats                           |
@@ -497,6 +531,14 @@ Supported TIFF formats include:
 * ImageJ
 * Zeiss LSM
 * MetaMorph STK
+* Micro-Manager stacks (MMStack and NDTiff), also when one acquisition is spread over several files
+* Whole-slide TIFFs: Aperio SVS, Hamamatsu NDPI, Leica SCN, Ventana BIF, PerkinElmer / Akoya QPTIFF and Philips
+
+Micro-Manager stage positions are scenes.
+
+A whole-slide file gives the slide first, then the other pictures it stores as further scenes, as Bio-Formats lists them: `label` and `macro` (overview), and for some formats `thumbnail` (QPTIFF) or `probability` (BIF tissue map). Pixel sizes, positions and channel names come from each vendor's own metadata.
+
+Ventana BIF scans store overlapping tiles. They are composed as Roche's description of the format places them. Files from scanners other than the VENTANA DP 200 are not supported.
 
 Compressed TIFF data is decoded only for the strips or tiles needed by the requested region.
 
@@ -591,6 +633,18 @@ These are represented using the common image/index model.
 
 Olympus / Evident FluoView OIR files are supported, including companion files and spectral scans.
 
+### Olympus OIB and OIF
+
+Older FluoView files come in two forms with the same content: an OIB is one file, an OIF is a `.oif` settings file plus a `.oif.files` folder with one TIFF per plane. Both open as one `t c z y x` image, with pixel sizes, z and time steps, channel names, colours and wavelengths. Opening any file in the `.oif.files` folder opens the OIF.
+
+### Olympus VSI
+
+A cellSens VSI is a `.vsi` file plus a `_<name>_` folder that holds the pixels (`stack1/frame_t.ets`, `stack10000/frame_t.ets`, ...). The images are listed as Bio-Formats lists them: one per scanned area, named as in cellSens, with the slide label (`label`) and overview (`overview`) when the scanner took them, and the slide photo (`macro`) last. Each scanned area keeps its resolution levels.
+
+Images are `t c z y x` (`t c z y x s` for brightfield RGB scans), with pixel sizes, z and time steps, and each channel's name, colour and emission wavelength. Stage positions are not read.
+
+Opening the `_<name>_` folder, a `stack` folder or a file in it opens the `.vsi`. An `.ets` file whose `.vsi` is missing is read alone, with a warning, when it is a plain 2-D image; its size is then rounded up to whole tiles.
+
 ### Imaris
 
 Install Imaris support with:
@@ -602,6 +656,12 @@ pip install "micro-reader[ims]"
 Imaris resolution level 0 is exposed at the actual image size, with Imaris chunk padding removed.
 
 Chunked compression is decoded in parallel.
+
+### DeltaVision
+
+DeltaVision files (`.dv`, `.r3d`, `.r3d_d3d`, also deconvolved and projected ones) are recognised by their content, whatever their extension. The image keeps the file's own order of time, waves and z (for example `ctzyx`).
+
+Pixel sizes, and each channel's emission and excitation wavelengths, are read from the file. Channel names come from the softWoRx acquisition log next to it (`<file>.log`); a deconvolved or projected file takes the names from the log of the raw file it was made from. Stage positions are not read.
 
 ### MRC
 

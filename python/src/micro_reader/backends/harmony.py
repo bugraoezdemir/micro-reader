@@ -33,6 +33,13 @@ from .._metadata import Channel, Metadata, quantity
 from .._plate import Plate, Well, row_label
 
 NAME = "harmony"
+#: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
+SET_INDEX = True
+
+
+def may_index(name: str) -> bool:
+    """``group_files``' cheap test (reads nothing): an index is an XML file (``Index.idx.xml``, ``Index.xml``)."""
+    return name.lower().endswith(('.xml',))
 
 
 def sniff(head: bytes, path: str) -> bool:

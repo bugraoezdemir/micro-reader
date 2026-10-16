@@ -51,6 +51,8 @@ from ._tiff_metadata import (OME_DEFAULT_LENGTH, _children, _local, ome_annotati
                              ome_image_metadata, ome_plane_position, tiff_metadata)
 
 NAME = "companion"
+#: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
+SET_INDEX = True
 
 #: member files kept open at once: a read region often spans a hundred planes
 #: (one file each), and reopening a member costs more than keeping its handle
@@ -64,6 +66,11 @@ Z_STEP_TOLERANCE = 0.01
 OME_TYPES = {"int8": "i1", "int16": "i2", "int32": "i4", "uint8": "u1", "uint16": "u2",
              "uint32": "u4", "float": "f4", "double": "f8", "complex": "c8",
              "double-complex": "c16", "bit": "?"}
+
+
+def may_index(name: str) -> bool:
+    """``group_files``' cheap test (reads nothing): an OME companion file (``.companion.ome``)."""
+    return name.lower().endswith(('.ome', '.ome.xml'))
 
 
 def sniff(head: bytes, path: str) -> bool:

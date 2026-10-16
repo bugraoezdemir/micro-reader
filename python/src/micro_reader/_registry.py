@@ -6,19 +6,21 @@ import os
 from typing import Optional
 
 from ._base import SAMPLED_INDICES, File
+from . import _parts
 from ._errors import UnsupportedFormatError
-from .backends import (companion, czi, cv7000, harmony, ims, incell, lif, metaxpress, mrc,
-                       nd2, oir, raster, tiff)
+from .backends import (companion, czi, cv7000, dv, harmony, ims, incell, lif, metaxpress, mrc,
+                       nd2, oif, oir, raster, tiff, vsi)
 
-#: Tried in order: magic numbers before MRC, which may also match by
-#: extension alone; index files of plates (harmony) by their XML namespace;
+#: Tried in order: VSI before TIFF (a .vsi is a TIFF with a metadata tree);
+#: magic numbers before MRC, which may also match by
+#: extension alone (DeltaVision: an MRC-like header with its own ID); index files of plates (harmony) by their XML namespace;
 #: OME companion files by their extension and root element.
 #: Each backend module provides ``NAME``,
 #: ``sniff(head: bytes, path: str) -> bool`` and
 #: ``open(path, tiles="separate", resolutions="base") -> File``; a backend
 #: that declares ``RENAMES`` / ``PLATES`` also takes ``rename=`` / ``plates=``.
-BACKENDS = [tiff, czi, ims, nd2, oir, lif, harmony, metaxpress, incell, cv7000, companion,
-            raster, mrc]
+BACKENDS = [vsi, tiff, czi, ims, nd2, oir, oif, lif, harmony, metaxpress, incell, cv7000, companion,
+            raster, dv, mrc]
 
 #: Bytes read from the start of the file for sniffing.
 HEAD_BYTES = 1024
@@ -57,13 +59,22 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
 
     *axes* (``"canonical"``, or letters such as ``"tczyx"``), *samples* and
     *squeeze* present every image as ``Image.as_axes`` does.  Each image's
-    ``.source`` is then its native image."""
+    ``.source`` is then its native image.
+
+    A part of a multi-file (composite) format -- an OIR continuation, a
+    DeltaVision log, NDTiff's index -- opens the whole image; a folder opens
+    the image it is a part of, or the one image it holds (docs/COMPOSITE.md).
+    ``File.path`` is then the main file, ``File.opened`` the *path* given.
+    A *backend* named explicitly reads *path* itself."""
     if tiles not in TILE_POLICIES:
         raise ValueError(f"tiles={tiles!r}: one of {TILE_POLICIES}")
     if resolutions not in RESOLUTION_POLICIES:
         raise ValueError(f"resolutions={resolutions!r}: one of {RESOLUTION_POLICIES}")
     rename = _check_rename(rename)
-    image = _open(os.fspath(path), backend, tiles, resolutions, rename, bool(plates))
+    opened = os.fspath(path)
+    main = opened if backend is not None else _parts.main_file(opened, BACKENDS)
+    image = _open(main, backend, tiles, resolutions, rename, bool(plates))
+    image.opened = opened
     left = sorted({name for index in image.indices for name in index if name in rename})
     if left:
         image.close()

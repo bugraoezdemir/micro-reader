@@ -1,15 +1,19 @@
 """Metadata of TIFF-family images (docs/METADATA.md), from what tifffile
 parses: OME-XML, then Zeiss LSM's CZ_LSMINFO, then the ImageJ description,
-then MetaMorph STK's calibration, then the plain resolution tags.  The first
-of them a file has is used.
+then MetaMorph STK's calibration, then the whole-slide formats' own records
+(Aperio SVS, Leica SCN, Ventana BIF, PerkinElmer QPTIFF, Philips), then the
+plain resolution tags.  The first of them a file has is used.
 
 OME ``Plane`` PositionX / PositionY are taken as the centre of the image (as
 Bio-Formats writes them) and moved to the first pixel's centre; without a
-pixel size that cannot be done, and the position is left unknown.
+pixel size that cannot be done, and the position is left unknown.  The
+slide formats record the image's top-left corner (SVS ``Left`` / ``Top``,
+SCN view offsets, QPTIFF X/YPosition tags), moved half a pixel inwards.
 """
 from __future__ import annotations
 
 import os
+import re
 import xml.etree.ElementTree as ET
 
 from .._metadata import Channel, Metadata, Quantity, color_hex, quantity
@@ -40,6 +44,12 @@ def tiff_metadata(image, n_channels: int, cache: dict, resolution_tags: bool = T
         meta = _stk(tif.stk_metadata, n_channels)
         if meta is not None:
             return meta
+    for flag, read in SLIDE_READERS:
+        if getattr(tif, flag, False):
+            meta = read(image, n_channels, cache)
+            if meta is not None:
+                return meta
+            break
     # a BinaryOnly stub keeps its metadata in another file (an OME companion):
     # its resolution tags are no pixel size (a 96 dpi display default gave 264.6 um)
     stub = bool(tif.is_ome and "BinaryOnly" in (tif.ome_metadata or ""))
@@ -112,6 +122,11 @@ def _ome_image(image, cache: dict):
     """The OME Image element of *image*'s series: the one whose planes start
     at the series' first IFD, else the one at the series' position."""
     images = _ome_images(image._tif, cache)
+    if getattr(image._series, "kind", "") == "mmstack" and "scene" in image.index:
+        # Micro-Manager positions are one tifffile series (axis R, read as
+        # scenes); its OME-XML has one Image per position, in position order
+        n = image.index["scene"]
+        return images[n][1] if n < len(images) else None
     first_ifd = getattr(image._series.keyframe, "index", None)
     matches = [e for ifd, e in images if ifd is not None and ifd == first_ifd]
     if len(matches) == 1:
@@ -309,6 +324,162 @@ def _imagej_unit(unit):
         return None
     text = str(unit).replace("\\u00B5", "µ").replace("\\u00b5", "µ")
     return text
+
+
+# -- whole-slide formats ----------------------------------------------------------
+#
+# Each reader gives the slide image's metadata, or None for an image it has
+# nothing for (associated images: the resolution tags apply, as before).
+
+def _corner_to_first_pixel(corner: dict, sizes: dict) -> dict:
+    """A recorded top-left corner (axis -> Quantity) -> the first pixel's
+    centre; unknown without the pixel size."""
+    position = {}
+    for axis, q in corner.items():
+        size = sizes.get(axis)
+        if q is not None and size is not None:
+            position[axis] = Quantity(q.value + 0.5 * size.to(q.unit).value, q.unit)
+    return position
+
+
+def _xml(text):
+    """An XML element from a description, its encoding declaration dropped
+    (tifffile has already decoded it); None if it is no XML."""
+    if not text:
+        return None
+    text = re.sub(r"^\s*<\?xml[^>]*\?>", "", text)
+    try:
+        return ET.fromstring(text)
+    except ET.ParseError:
+        return None
+
+
+def _svs(image, n_channels: int, cache: dict):
+    """Aperio SVS: ``MPP`` (µm per pixel) and ``Left`` / ``Top`` (mm) in the
+    slide's description, for the slide (not its label / macro)."""
+    if image._series.name != "Baseline":
+        return None
+    fields = {}
+    for part in image._tif.pages.first.description.split("|")[1:]:
+        if "=" in part:
+            k, v = part.split("=", 1)
+            fields[k.strip()] = v.strip()
+    q = quantity(fields.get("MPP"), "micrometer")
+    if not q:
+        return None
+    sizes = {"x": q, "y": q}
+    corner = {"x": quantity(fields.get("Left"), "millimeter", positive=False),
+              "y": quantity(fields.get("Top"), "millimeter", positive=False)}
+    return Metadata(pixel_sizes=sizes, position=_corner_to_first_pixel(corner, sizes),
+                    channels=_unknown_channels(n_channels))
+
+
+def _scn(image, n_channels: int, cache: dict):
+    """Leica SCN: the image's ``view`` (its extent and offset in the
+    collection, nm) over its pixels gives the pixel size; channel names and
+    colours from ``channelSettings``."""
+    if "scn" not in cache:
+        cache["scn"] = _xml(image._tif.pages.first.description)
+    root = cache["scn"]
+    if root is None:
+        return None
+    element = next((e for e in root.iter() if _local(e.tag) == "image"
+                    and e.get("name") == image._series.name), None)
+    if element is None:
+        return None
+    pixels = next((e for e in element if _local(e.tag) == "pixels"), None)
+    view = next((e for e in element if _local(e.tag) == "view"), None)
+    if pixels is None or view is None:
+        return None
+    sizes = {}
+    for axis in "xy":
+        try:
+            sizes[axis] = quantity(float(view.get(f"size{axis.upper()}")) /
+                                   float(pixels.get(f"size{axis.upper()}")), "nanometer")
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    sizes = {a: q for a, q in sizes.items() if q}
+    corner = {axis: quantity(view.get(f"offset{axis.upper()}"), "nanometer", positive=False)
+              for axis in "xy"}
+    channels = [Channel(name=c.get("name") or None, color=color_hex(c.get("rgb")))
+                for c in element.iter() if _local(c.tag) == "channel"]
+    return Metadata(pixel_sizes=sizes, position=_corner_to_first_pixel(corner, sizes),
+                    channels=_channels(channels, n_channels))
+
+
+def _bif(image, n_channels: int, cache: dict):
+    """Ventana BIF: ``ScanRes`` (µm per pixel) of the scan's ``iScan``
+    element, for the slide (its overview and probability images keep their
+    resolution tags)."""
+    if image._series.name != "Baseline":
+        return None
+    from ._tiff_variants import _xmp
+    root = _xmp(image._series.keyframe)
+    iscan = root.find("./SlideInfo/iScan") if root is not None else None
+    q = quantity(iscan.get("ScanRes"), "micrometer") if iscan is not None else None
+    if not q:
+        return None
+    return Metadata(pixel_sizes={"x": q, "y": q}, channels=_unknown_channels(n_channels))
+
+
+def _qpi(image, n_channels: int, cache: dict):
+    """PerkinElmer / Akoya QPTIFF: pixel size from the resolution tags, the
+    position from the X/YPosition tags (both in ResolutionUnit, as
+    Bio-Formats reads them), channel ``Name`` / ``Color`` from each channel
+    page's XML description."""
+    key = image._series.keyframe
+    sizes = _resolution_tags(key)
+    unit = RESOLUTION_UNITS.get(int(key.tags.valueof("ResolutionUnit", 2)))
+    corner = {}
+    for axis, tag in (("x", "XPosition"), ("y", "YPosition")):
+        value = _rational(key.tags.get(tag))
+        if value is not None and unit:
+            corner[axis] = quantity(value, unit, positive=False)
+    channels = []
+    if "c" in image.axes:
+        for page in image._series.pages[:n_channels]:
+            root = _xml(getattr(page, "description", "") if page is not None else "")
+            name = root.findtext("Name") if root is not None else None
+            color = root.findtext("Color") if root is not None else None
+            rgb = None
+            if color:
+                try:
+                    rgb = color_hex([int(v) for v in color.split(",")])
+                except ValueError:
+                    rgb = None
+            channels.append(Channel(name=name or None, color=rgb))
+    if not sizes and not channels:
+        return None
+    return Metadata(pixel_sizes=sizes, position=_corner_to_first_pixel(corner, sizes),
+                    channels=_channels(channels, n_channels))
+
+
+def _philips(image, n_channels: int, cache: dict):
+    """Philips TIFF: the first ``PixelDataRepresentation``'s
+    ``DICOM_PIXEL_SPACING`` (mm, rows then columns), for the slide."""
+    if image._series.name != "Baseline":
+        return None
+    root = _xml(image._tif.philips_metadata)
+    if root is None:
+        return None
+    for element in root.iter("DataObject"):
+        if element.get("ObjectType") != "PixelDataRepresentation":
+            continue
+        for attribute in element.iter("Attribute"):
+            if attribute.get("Name") == "DICOM_PIXEL_SPACING" and attribute.text:
+                values = attribute.text.replace('"', "").split()
+                if len(values) >= 2:
+                    y, x = quantity(values[0], "millimeter"), quantity(values[1], "millimeter")
+                    sizes = {a: q for a, q in (("x", x), ("y", y)) if q}
+                    if sizes:
+                        return Metadata(pixel_sizes=sizes, channels=_unknown_channels(n_channels))
+        break
+    return None
+
+
+#: tifffile's file flag -> the slide format's metadata reader (first match)
+SLIDE_READERS = (("is_svs", _svs), ("is_scn", _scn), ("is_bif", _bif), ("is_qpi", _qpi),
+                 ("is_philips", _philips))
 
 
 # -- plain TIFF -----------------------------------------------------------------
