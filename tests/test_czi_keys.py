@@ -84,7 +84,7 @@ def test_tiles_per_scene_are_ragged_and_stitching_is_opt_in(tmp_path):
         for image in f.images:
             s, m = image.index["scene"], image.index["tile"]
             np.testing.assert_array_equal(image[0, 0, 0], data[(s, m, (("C", 0),))])
-    with micro_reader.open(path, tiles="stitched") as f:
+    with micro_reader.open(path, tiles="mosaic") as f:
         assert f.indices == [{"scene": 0}, {"scene": 1}]
         assert f.images[0].shape[-2:] == (H, 3 * W)
         np.testing.assert_array_equal(f.images[1][0, 0, 0, :, W:], data[(1, 1, (("C", 0),))])
@@ -114,4 +114,4 @@ def test_bad_tiles_policy(tmp_path):
     path = str(tmp_path / "one.czi")
     _write(path, [(0, None, {"C": 0}, (0, 0))])
     with pytest.raises(ValueError, match="tiles="):
-        micro_reader.open(path, tiles="mosaic")
+        micro_reader.open(path, tiles="blended")

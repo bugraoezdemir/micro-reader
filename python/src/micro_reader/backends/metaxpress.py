@@ -36,7 +36,7 @@ from .._base import File
 from .._errors import CorruptFileError, UnsupportedFormatError
 from .._fileset import Members, PlaneImage, keep_fields
 from .._metadata import Channel, Metadata
-from .._plate import Plate, Well, row_label
+from .._plate import Plate, Well, layout, row_label
 
 NAME = "metaxpress"
 #: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
@@ -201,8 +201,8 @@ class _MetaXpressFile(File):
                 f"{stem} well {row_label(r)}{c + 1} field {s - 1}", unit,
                 {"plate": 0, "acquisition": 0, "well": number[(r, c)], "field": s - 1},
                 channel_names=names, first=first))
-        plate = Plate(name=stem, rows=tuple(row_label(r) for r in range(rows)),
-                      columns=tuple(str(c + 1) for c in range(columns)),
+        row_names, column_names = layout(rows, columns, wells_rc, path)
+        plate = Plate(name=stem, rows=row_names, columns=column_names,
                       wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))
         super().__init__(path, images, plates=[plate])
 

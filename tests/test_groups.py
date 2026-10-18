@@ -215,3 +215,19 @@ def test_a_cellvoyager_measurement_is_one_group(tmp_path):
     (group,) = micro_reader.group_files(str(tmp_path)).groups
     assert os.path.basename(group.main) == "MeasurementDetail.mrf"
     assert "MeasurementData.mlf" in _names(group.parts, tmp_path)
+
+
+def test_cellvoyager_correction_images_are_parts_of_the_plate(tmp_path):
+    """The shading / dark-current / OTF files the instrument writes into the
+    measurement folder belong to the plate's group (not loose images), and
+    still open alone."""
+    import test_cv7000
+    test_cv7000._write(str(tmp_path))
+    names = ["SC_BP445-45_20x_M01_CH01.tif", "DC_EMCCD _1_CAM1.tif", "OTF_SC_BP525-50_20x_M01_CH02.tif"]
+    for name in names:
+        tifffile.imwrite(tmp_path / name, np.zeros((6, 10), "u2"))
+    g = micro_reader.group_files(str(tmp_path))
+    (group,) = g.groups
+    assert set(names) <= set(_names(group.parts, tmp_path)) and not g.singles
+    with micro_reader.open(tmp_path / names[0]) as f:
+        assert f.backend == "tiff" and f.images[0].shape == (6, 10)

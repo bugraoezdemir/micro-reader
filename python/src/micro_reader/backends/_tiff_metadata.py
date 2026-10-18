@@ -1,6 +1,7 @@
 """Metadata of TIFF-family images (docs/METADATA.md), from what tifffile
 parses: OME-XML, then Zeiss LSM's CZ_LSMINFO, then the ImageJ description,
-then MetaMorph STK's calibration, then the whole-slide formats' own records
+then MetaMorph STK's calibration, then MetaMorph / MetaSeries TIFF's
+calibration, then the whole-slide formats' own records
 (Aperio SVS, Leica SCN, Ventana BIF, PerkinElmer QPTIFF, Philips), then the
 plain resolution tags.  The first of them a file has is used.
 
@@ -44,6 +45,10 @@ def tiff_metadata(image, n_channels: int, cache: dict, resolution_tags: bool = T
         meta = _stk(tif.stk_metadata, n_channels)
         if meta is not None:
             return meta
+    if getattr(tif, "is_metaseries", False):
+        meta = _metaseries(tif, n_channels)
+        if meta is not None:
+            return meta
     if getattr(tif, "is_ndtiff", False):
         meta = _ndtiff(image, n_channels, cache)
         if meta is not None:
@@ -69,6 +74,34 @@ def _stk(md: dict, n_channels: int):
     Their resolution tags are a meaningless 72 dpi.  None without one."""
     unit = md.get("CalibrationUnits") or None
     sizes = {axis: quantity(md.get(f"{axis.upper()}Calibration"), unit) for axis in "xy"}
+    sizes = {a: q for a, q in sizes.items() if q}
+    if not sizes:
+        return None
+    return Metadata(pixel_sizes=sizes, channels=_unknown_channels(n_channels))
+
+
+def metaseries_plane_info(tif) -> dict:
+    """The ``PlaneInfo`` of a MetaMorph / MetaSeries TIFF's first page (the
+    ``<MetaData>`` XML of its description, as tifffile parses it); {} when
+    there is none or it cannot be parsed."""
+    try:
+        md = tif.metaseries_metadata
+    except Exception:                                   # noqa: BLE001 - a damaged XML
+        return {}
+    info = (md or {}).get("PlaneInfo")
+    return info if isinstance(info, dict) else {}
+
+
+def _metaseries(tif, n_channels: int):
+    """MetaMorph / MetaSeries TIFF (the ``<MetaData>`` XML in the description;
+    the members of MetaMorph ``.nd`` sets): the spatial calibration
+    (``spatial-calibration-x`` / ``-y`` in ``spatial-calibration-units``),
+    only when ``spatial-calibration-state`` is on.  None without one."""
+    info = metaseries_plane_info(tif)
+    if info.get("spatial-calibration-state") is not True:
+        return None
+    unit = info.get("spatial-calibration-units") or None
+    sizes = {axis: quantity(info.get(f"spatial-calibration-{axis}"), unit) for axis in "xy"}
     sizes = {a: q for a, q in sizes.items() if q}
     if not sizes:
         return None
@@ -437,8 +470,9 @@ def _scn(image, n_channels: int, cache: dict):
     root = cache["scn"]
     if root is None:
         return None
+    name = getattr(image._series, "scn_name", image._series.name)   # the macro is renamed
     element = next((e for e in root.iter() if _local(e.tag) == "image"
-                    and e.get("name") == image._series.name), None)
+                    and e.get("name") == name), None)
     if element is None:
         return None
     pixels = next((e for e in element if _local(e.tag) == "pixels"), None)
@@ -551,7 +585,9 @@ def _rational(tag):
 
 def _resolution_tags(key) -> dict:
     """X / YResolution with an inch or centimetre ResolutionUnit (as
-    Bio-Formats reads plain TIFFs); 'no unit' is not a physical size."""
+    Bio-Formats reads plain TIFFs); 'no unit' is not a physical size, and
+    neither is 1 pixel per unit: a writer's placeholder (decided 2026-10-18:
+    ImageXpress JDCE TIFFs carry 1 / inch, which would be 25 400 µm pixels)."""
     unit_tag = key.tags.get("ResolutionUnit")
     unit = RESOLUTION_UNITS.get(int(unit_tag.value) if unit_tag is not None else 2)
     if unit is None:
@@ -559,6 +595,6 @@ def _resolution_tags(key) -> dict:
     sizes = {}
     for axis, tag in (("x", "XResolution"), ("y", "YResolution")):
         per_unit = _rational(key.tags.get(tag))
-        if per_unit:
+        if per_unit and per_unit != 1:
             sizes[axis] = quantity(1.0 / per_unit, unit)
     return {a: q for a, q in sizes.items() if q}

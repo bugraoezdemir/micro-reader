@@ -33,6 +33,30 @@ def row_label(row: int) -> str:
     return label
 
 
+def layout(rows: int, columns: int, wells, where: str) -> tuple:
+    """(row names, column names) of a plate layout of *rows* x *columns* as
+    the file describes it, grown to hold every well in *wells* ((row,
+    column), 0-based) when it is smaller, with a ``PlateLayoutWarning``.  A
+    plate's wells always lie inside its layout (consumers index ``rows`` /
+    ``columns`` with them).  Seen: a CellVoyager slide holder described as
+    1 x 4 slides, whose records address the wells of the 18-well slide in it
+    (C05)."""
+    wells = list(wells)
+    need_rows = max([r + 1 for r, _ in wells] + [0])
+    need_columns = max([c + 1 for _, c in wells] + [0])
+    if need_rows > rows or need_columns > columns:
+        import warnings
+        from ._errors import PlateLayoutWarning
+        outside = sorted(f"{row_label(r)}{c + 1}" for r, c in wells if r >= rows or c >= columns)
+        warnings.warn(PlateLayoutWarning(
+            f"{where}: the file describes a {rows} x {columns} layout, but wells "
+            f"{', '.join(outside[:5])}{' ...' if len(outside) > 5 else ''} hold images outside "
+            f"it; the layout is given as {max(rows, need_rows)} x {max(columns, need_columns)} "
+            "to hold them"), stacklevel=3)
+        rows, columns = max(rows, need_rows), max(columns, need_columns)
+    return tuple(row_label(r) for r in range(rows)), tuple(str(c + 1) for c in range(columns))
+
+
 @dataclass(frozen=True, eq=False)
 class Field:
     """One field of a well: its field index and its images (full resolution,
@@ -53,7 +77,7 @@ class Field:
     @property
     def tiles(self) -> list:
         """The field's images in tile order (one image when it is not tiled,
-        or stitched).  ``tiles[k]`` is the k-th tile present; ``.index["tile"]``
+        or placed as one mosaic).  ``tiles[k]`` is the k-th tile present; ``.index["tile"]``
         is its tile index."""
         varying = self._orthogonal()
         if varying:
@@ -64,7 +88,7 @@ class Field:
 
     @property
     def image(self):
-        """The field's one image (a field that is not tiled, or stitched)."""
+        """The field's one image (a field that is not tiled, or placed as one mosaic)."""
         if len(self.images) != 1:
             raise ValueError(f"field {self.index} has {len(self.images)} images: use .tiles "
                              "(or .select(...)) to pick one")

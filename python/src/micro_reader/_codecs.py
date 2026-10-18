@@ -171,7 +171,9 @@ def zlib_decompress_into(data, out: np.ndarray, *, partial: bool = False,
         return _check_written(written, out, "deflate", partial)
     import zlib
     try:
-        raw = zlib.decompress(bytes(data))
+        # at most one byte more than *out* holds: a stream claiming more (damaged
+        # data) is caught without inflating all of it into memory
+        raw = zlib.decompressobj().decompress(bytes(data), out.nbytes + 1)
     except zlib.error as exc:
         raise CorruptFileError(f"corrupt deflate data: {exc}") from exc
     return _fill_partial(out, raw, "deflate", partial)

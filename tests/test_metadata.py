@@ -169,7 +169,7 @@ def test_czi(tmp_path):
     # two tiles side by side; Zeiss records the stage position of each
     # tile's centre: tile 0 centred at 100.5 um, 10 pixels of 0.1 um further 101.5
     write_czi(path, [_czi_tile(0, 0, 100.5), _czi_tile(10, 1, 101.5)], metadata=CZI_XML)
-    with micro_reader.open(path, tiles="stitched") as f:
+    with micro_reader.open(path, tiles="mosaic") as f:
         meta = f.images[0].metadata
     _close(meta.pixel_sizes["x"], 0.1, "micrometer")
     _close(meta.pixel_sizes["t"], 2.5, "second")

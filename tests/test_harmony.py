@@ -34,12 +34,18 @@ COMPRESSION = _lzw_or_zlib()
 
 def _write_harmony(folder, wells=((1, 1), (2, 3)), fields=2, channels=2, planes=1,
                    timepoints=1, tp_base=0, version="V4", missing=(), empty=(),
-                   plates=1, flim=(0,), dz=2e-6, compress=False):
+                   plates=1, flim=(0,), dz=2e-6, compress=False, new_style=False):
     """A Harmony plate in *folder*/Images.  *wells*: 1-based (row, col);
     *missing* / *empty*: (row, col, field, tp, ch, pl) planes whose TIFF is
-    not written / whose URL is empty.  -> (index path, {plane key: array})."""
-    images_dir = os.path.join(folder, "Images")
+    not written / whose URL is empty.  *new_style*: as Harmony 5.2 / 6 write
+    their "hs" archives -- per-channel values in ``Maps`` (the first Map holding
+    only a flat-field profile), ``images/index.xml``, one folder per well, and
+    Harmony 5.2's namespace.  -> (index path, {plane key: array})."""
+    images_dir = os.path.join(folder, "images" if new_style else "Images")
     os.makedirs(images_dir, exist_ok=True)
+    channel_tags = ("ChannelName", "ImageResolutionX", "ImageResolutionY", "ImageSizeX",
+                    "ImageSizeY", "MainExcitationWavelength", "MainEmissionWavelength")
+    maps = {}
     data, entries, well_xml = {}, [], []
     for r, c in wells:
         refs = []
@@ -50,6 +56,10 @@ def _write_harmony(folder, wells=((1, 1), (2, 3)), fields=2, channels=2, planes=
                         for fl in flim:
                             key = (r, c, f, t, ch, p)
                             url = f"r{r:02d}c{c:02d}f{f:02d}p{p:02d}-ch{ch}sk{t + 1}fk1fl{fl}.tiff"
+                            if new_style:
+                                url = f"r{r:02d}c{c:02d}/{url}"
+                                os.makedirs(os.path.join(images_dir, f"r{r:02d}c{c:02d}"),
+                                            exist_ok=True)
                             if key not in missing and key not in empty:
                                 a = RNG.integers(0, 4000, (Y, X)).astype("u2")
                                 tifffile.imwrite(os.path.join(images_dir, url), a,
@@ -57,34 +67,45 @@ def _write_harmony(folder, wells=((1, 1), (2, 3)), fields=2, channels=2, planes=
                                 data[key] = a
                             ident = f"{r:02d}{c:02d}K{t + 1}F{f}P{p}R{ch}"
                             refs.append(f'<Image id="{ident}" />')
+                            per_channel = (
+                                f"<ChannelName>ch{ch}</ChannelName>"
+                                f'<ImageResolutionX Unit="m">6.5E-7</ImageResolutionX>'
+                                f'<ImageResolutionY Unit="m">6.5E-7</ImageResolutionY>'
+                                f"<ImageSizeX>{X}</ImageSizeX><ImageSizeY>{Y}</ImageSizeY>"
+                                f'<MainExcitationWavelength Unit="nm">{400 + 100 * ch}</MainExcitationWavelength>'
+                                f'<MainEmissionWavelength Unit="nm">{450 + 100 * ch}</MainEmissionWavelength>')
+                            maps[ch] = per_channel
                             entries.append(
                                 f"<Image Version=\"1\"><id>{ident}</id><State>Ok</State>"
                                 f"<URL>{'' if key in empty else url}</URL>"
                                 f"<Row>{r}</Row><Col>{c}</Col><FieldID>{f}</FieldID>"
                                 f"<PlaneID>{p}</PlaneID><TimepointID>{t}</TimepointID>"
                                 f"<ChannelID>{ch}</ChannelID><FlimID>{fl}</FlimID>"
-                                f"<ChannelName>ch{ch}</ChannelName>"
-                                f'<ImageResolutionX Unit="m">6.5E-7</ImageResolutionX>'
-                                f'<ImageResolutionY Unit="m">6.5E-7</ImageResolutionY>'
-                                f"<ImageSizeX>{X}</ImageSizeX><ImageSizeY>{Y}</ImageSizeY>"
+                                + ("" if new_style else per_channel) +
                                 f'<PositionX Unit="m">{(f - 1) * 1e-4}</PositionX>'
                                 f'<PositionY Unit="m">{(f - 1) * -5e-5}</PositionY>'
                                 f'<PositionZ Unit="m">{p * dz}</PositionZ>'
                                 f'<MeasurementTimeOffset Unit="s">{(t - tp_base) * 30}</MeasurementTimeOffset>'
-                                f'<MainExcitationWavelength Unit="nm">{400 + 100 * ch}</MainExcitationWavelength>'
-                                f'<MainEmissionWavelength Unit="nm">{450 + 100 * ch}</MainEmissionWavelength>'
                                 "</Image>")
         well_xml.append(f"<Well><id>{r:02d}{c:02d}</id><Row>{r}</Row><Col>{c}</Col>"
                         + "".join(refs) + "</Well>")
     plate = ("<Plate><PlateID>P1</PlateID><Name>Screen plate 1</Name>"
              "<PlateRows>8</PlateRows><PlateColumns>12</PlateColumns>"
              + "".join(f'<Well id="{r:02d}{c:02d}" />' for r, c in wells) + "</Plate>")
+    namespace = (f"43B2A954-E3C3-47E1-B392-6635266B0DD3/Harmony{version}" if new_style
+                 else f"http://www.perkinelmer.com/PEHH/Harmony{version}")
+    map_xml = ""
+    if new_style:
+        flat = "".join(f'<Entry ChannelID="{ch}"><FlatfieldProfile>{{}}</FlatfieldProfile></Entry>'
+                       for ch in maps)
+        info = "".join(f'<Entry ChannelID="{ch}">{tags}</Entry>' for ch, tags in maps.items())
+        map_xml = f"<Maps><Map>{flat}</Map><Map>{info}</Map></Maps>"
     xml = ('<?xml version="1.0" encoding="utf-8"?>\n'
-           f'<EvaluationInputData Version="1" xmlns="http://www.perkinelmer.com/PEHH/Harmony{version}">'
+           f'<EvaluationInputData Version="1" xmlns="{namespace}">'
            "<User>test</User><InstrumentType>Operetta</InstrumentType>"
-           f"<Plates>{plate * plates}</Plates><Wells>{''.join(well_xml)}</Wells>"
+           f"<Plates>{plate * plates}</Plates><Wells>{''.join(well_xml)}</Wells>{map_xml}"
            f"<Images>{''.join(entries)}</Images></EvaluationInputData>")
-    index = os.path.join(images_dir, "Index.idx.xml")
+    index = os.path.join(images_dir, "index.xml" if new_style else "Index.idx.xml")
     with open(index, "w", encoding="utf-8") as fh:
         fh.write(xml)
     return index, data
@@ -118,6 +139,39 @@ def test_a_harmony_plate(tmp_path):
         assert [c.name for c in md.channels] == ["ch1", "ch2"]
         assert md.channels[1].emission_wavelength == micro_reader.Quantity(650.0, "nanometer")
         assert "plate 0 'Screen plate 1': 8 x 12, 2 wells with images" in f.outline()
+
+
+@pytest.mark.parametrize("version", ["V6", "V7"])
+def test_new_style_hs_archive(tmp_path, version):
+    """Harmony 5.2 / 6 "hs" archives (zenodo-10776785, zenodo-20799564): the
+    per-channel values in Maps, images/index.xml, a folder per well, a new
+    namespace; the measurement folder and its side files open the index."""
+    measurement = tmp_path / "hs" / "cf91602d"
+    index, data = _write_harmony(str(measurement), channels=2, planes=2, version=version,
+                                 new_style=True)
+    (measurement / "flatfieldcorrection").mkdir()
+    (measurement / "flatfieldcorrection" / "ffc.xml").write_text("<x/>")
+    (measurement / "cf91602d.xml").write_text("<x/>")
+    (measurement / "images" / "image.index.txt").write_text("Row\tColumn\n")
+    with micro_reader.open(index) as f:
+        assert f.format == f"harmony-{version.lower()}"
+        image = f.plates[0].wells[1].fields[1].image
+        assert image.shape == (1, 2, 2, Y, X)
+        np.testing.assert_array_equal(image[0, 1, 1], data[(2, 3, 2, 0, 2, 2)])
+        md = image.metadata
+        assert [c.name for c in md.channels] == ["ch1", "ch2"]
+        assert md.pixel_sizes["x"] == micro_reader.Quantity(0.65, "micrometer")
+        assert md.channels[1].emission_wavelength == micro_reader.Quantity(650.0, "nanometer")
+    for entry in (measurement, measurement / "flatfieldcorrection" / "ffc.xml",
+                  measurement / "cf91602d.xml", measurement / "images" / "image.index.txt"):
+        with micro_reader.open(entry) as f:
+            assert os.path.basename(f.path) == "index.xml"          # as stored
+    with micro_reader.open(measurement / "images" / "r01c01" / os.listdir(
+            measurement / "images" / "r01c01")[0]) as f:
+        assert f.backend == "tiff"                                   # a plane opens as itself
+    g = micro_reader.group_files(str(measurement))
+    assert len(g.groups) == 1 and g.singles == []
+    assert len(g.groups[0].members) == len(data) and len(g.groups[0].parts) == 3
 
 
 def test_field_positions_are_first_pixels_relative_to_the_well(tmp_path):

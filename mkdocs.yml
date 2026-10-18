@@ -1,0 +1,91 @@
+site_name: micro-reader
+site_description: Memory-bounded pixel reader for microscopy images
+repo_url: https://github.com/bugraoezdemir/micro-reader
+repo_name: bugraoezdemir/micro-reader
+
+# The user documentation lives in docs/api. The other files in docs/ are
+# design notes for developers and are not part of the site.
+docs_dir: docs/api
+
+# `mkdocs build --strict` then also fails on links to missing #anchors
+validation:
+  links:
+    anchors: warn
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  font:
+    text: Roboto
+    code: JetBrains Mono
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - content.code.copy
+    - content.code.select
+    - content.code.annotate
+    - content.tabs.link
+    - search.highlight
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+  - attr_list
+  - md_in_html
+  - def_list
+  - tables
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Concepts: concepts.md
+  - User guide:
+      - Opening files: guide/opening.md
+      - Finding images: guide/finding-images.md
+      - Reading pixels: guide/reading.md
+      - Axes: guide/axes.md
+      - Resolution levels: guide/pyramids.md
+      - Metadata: guide/metadata.md
+      - Plates (HCS): guide/plates.md
+      - Multi-file images: guide/multi-file.md
+      - Memory and threads: guide/performance.md
+  - Formats: formats.md
+  - API reference:
+      - reference/index.md
+      - Functions: reference/functions.md
+      - File: reference/file.md
+      - Image: reference/image.md
+      - Metadata: reference/metadata.md
+      - Plates: reference/plates.md
+      - Grouping: reference/grouping.md
+      - Errors and warnings: reference/errors.md
+      - Constants: reference/constants.md
+  - Examples: examples.md

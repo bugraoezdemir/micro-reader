@@ -156,10 +156,10 @@ def _pyramid_czi(path):
     return full, half, quarter
 
 
-def test_czi_stitched_scene_has_its_stored_pyramid(tmp_path):
+def test_czi_mosaic_scene_has_its_stored_pyramid(tmp_path):
     path = str(tmp_path / "pyr.czi")
     full, half, quarter = _pyramid_czi(path)
-    with micro_reader.open(path, tiles="stitched") as f:
+    with micro_reader.open(path, tiles="mosaic") as f:
         (image,) = f.images
         assert image.is_pyramidal and image.index == {"scene": 0, "resolution": 0}
         levels = image.resolutions
@@ -170,7 +170,7 @@ def test_czi_stitched_scene_has_its_stored_pyramid(tmp_path):
         np.testing.assert_array_equal(levels[2][0, 0, 0], quarter)
         np.testing.assert_array_equal(levels[1][0, 0, 0, 5:20, 10:25], half[5:20, 10:25])
         assert levels[1].origin == (50, 20)                      # the scene corner x zoom
-    with micro_reader.open(path, tiles="stitched", resolutions="all") as f:
+    with micro_reader.open(path, tiles="mosaic", resolutions="all") as f:
         assert f.indices == [{"scene": 0, "resolution": k} for k in range(3)]
 
 

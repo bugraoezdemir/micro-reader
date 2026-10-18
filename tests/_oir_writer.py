@@ -32,11 +32,17 @@ def _frame_xml(width, height, dtype, frame_id="t001_0_1", positions=None):
         '</commonframe:imageDefinition>' + values + '</lsmframe:frameProperties>').encode("ascii")
 
 
-def _lsm_xml(channels, axes):
-    """channels: [(guid, order)]; axes: {axis type: max size}."""
+def _lsm_xml(channels, axes, pixel_size=None):
+    """channels: [(guid, order)]; axes: {axis type: max size}; pixel_size: µm
+    (x, y), as FluoView's ``length`` / ``pixelUnit``."""
+    size = "" if pixel_size is None else (
+        f'<commonparam:length><commonparam:x>{pixel_size[0]}</commonparam:x>'
+        f'<commonparam:y>{pixel_size[1]}</commonparam:y></commonparam:length>'
+        '<commonparam:pixelUnit><commonparam:x>MICRO_METER</commonparam:x>'
+        '<commonparam:y>MICRO_METER</commonparam:y></commonparam:pixelUnit>')
     chans = "".join(
         f'<commonphase:channel id="{g}" order="{o}"><commonphase:name>CH{o}</commonphase:name>'
-        '</commonphase:channel>' for g, o in channels)
+        f'{size}</commonphase:channel>' for g, o in channels)
     axs = "".join(
         f'<commonparam:axis enable="true"><commonparam:axis>{kind}</commonparam:axis>'
         f'<commonparam:maxSize>{n}</commonparam:maxSize></commonparam:axis>'
@@ -74,7 +80,7 @@ class _File:
 
 def write_oir(path, data: np.ndarray, *, block_bytes: int = 4096, channel_order=None,
               axes=None, missing=(), truncate=(), companion_planes=(), lambda_index=None,
-              extra_rows=0, frame_axes=None):
+              extra_rows=0, frame_axes=None, pixel_size=None, reference=True):
     """*data*: (T, C, Z, Y, X), or (L, T, C, Z, Y, X) for a lambda scan.  Each plane is stored as pixel blocks of
     *block_bytes* (not necessarily whole rows).
 
@@ -87,6 +93,9 @@ def write_oir(path, data: np.ndarray, *, block_bytes: int = 4096, channel_order=
     frame height (as a concatenated line scan would).  frame_axes: {axis
     type: f(l, t, z)}: frame properties for every frame with its position
     along those axes (as FluoView writes them: TIMELAPSE ms, LAMBDA nm).
+    pixel_size: (x, y) in µm, written per channel.  reference: write the
+    reference image block (``False`` and every plane missing: a file without
+    pixel blocks, as a FluoView overview map's ``.oir``).
     """
     lambdas = data.shape[0] if data.ndim == 6 else None
     if lambdas is None:
@@ -101,10 +110,11 @@ def write_oir(path, data: np.ndarray, *, block_bytes: int = 4096, channel_order=
         if nz > 1:
             axes["ZSTACK"] = nz
     main, companion = _File(), _File()
-    main.block(METADATA, _lsm_xml(list(zip(guids, order)), axes))
+    main.block(METADATA, _lsm_xml(list(zip(guids, order)), axes, pixel_size))
     main.block(FRAMEPROPERTIES, _frame_xml(width, height, data.dtype))
     # a reference image block, which readers must ignore
-    main.uid_pixel(f"REF_LSM0_{guids[0]}_0", b"\x07" * 64)
+    if reference:
+        main.uid_pixel(f"REF_LSM0_{guids[0]}_0", b"\x07" * 64)
     for lam in range(data.shape[0]):
         index = lam + 1 if lambdas else lambda_index
         for t in range(nt):

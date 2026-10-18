@@ -46,7 +46,9 @@ Not yet: volumetric tiles (ImageDepth), OME series spread over several files.
 from __future__ import annotations
 
 import builtins
+import contextlib
 import itertools
+import logging
 import os
 import re
 import struct
@@ -58,7 +60,7 @@ import numpy as np
 from .. import _codecs, _jpeg_restarts, _memory, _parts, _pool, _stream
 from . import _tiff_variants
 from .._base import INDEX_NAMES, File, Image
-from .._errors import (CorruptFileError, MicroReaderError, MissingImagesWarning,
+from .._errors import (CorruptFileError, MicroReaderError, MissingImagesWarning, OpenInstead,
                        UnsupportedFormatError)
 from .._io import DecodeCache, ThreadHandles
 
@@ -142,6 +144,16 @@ def own_codec(key):
             return None
         return codec
     return None
+
+
+def _layout(page) -> tuple:
+    """How a page stores its pixels -- what decoding it as another page assumes:
+    compression, predictor, tiles or strips, sample type and arrangement."""
+    tiled = bool(page.is_tiled)
+    return (int(page.compression), int(page.predictor), tiled,
+            (page.tilelength, page.tilewidth) if tiled else page.rowsperstrip,
+            str(page.dtype), page.samplesperpixel, int(page.planarconfig), page.bitspersample,
+            int(page.fillorder))
 
 
 def jpeg_colour(key) -> str:
@@ -409,12 +421,23 @@ class _TiffImage(Image):
         npages = int(np.prod(self._lead_shape, dtype=np.int64))
         self._page_bytes = int(np.prod(key.shaped, dtype=np.int64)) * self._file_dtype.itemsize
         self._contiguous = None
+        #: pages the file holds; the series' metadata may name more (an acquisition
+        #: stopped early: those read as zeros, with a MissingImagesWarning)
+        self._stored = len(series.pages)
         if npages > len(series.pages):
-            if series.dataoffset is None or not self._raw:
-                raise UnsupportedFormatError(f"{where}: truncated series that is not contiguous")
-            if os.path.getsize(self._path) < series.dataoffset + npages * self._page_bytes:
-                raise CorruptFileError(f"{where}: truncated file")
-            self._contiguous = series.dataoffset
+            if series.dataoffset is not None and self._raw:
+                if os.path.getsize(self._path) < series.dataoffset + npages * self._page_bytes:
+                    raise CorruptFileError(f"{where}: truncated file")
+                self._contiguous = series.dataoffset
+                self._stored = npages
+            elif share is None:
+                # the file itself is whole (a cut file fails at open, _check_complete):
+                # the writer stopped before the planes its metadata announced
+                # (ScanImage: 3 of 24 frames), as an aborted NDTiff is read
+                warnings.warn(MissingImagesWarning(
+                    f"{where}: the file holds {len(series.pages)} of the {npages} planes its "
+                    f"metadata names (an acquisition stopped early?): the other "
+                    f"{npages - len(series.pages)} read as zeros"), stacklevel=4)
 
         if share is None:                      # the first image of this series
             #: page -> (offsets, bytecounts, jpegtables, handles of its file) | None
@@ -473,12 +496,24 @@ class _TiffImage(Image):
                     shift = self._contiguous + p * self._page_bytes - key.dataoffsets[0]
                     entry = ([o + shift for o in key.dataoffsets], key.databytecounts, None,
                              self._handles)
+                elif p >= self._stored:
+                    entry = None                   # named by the metadata, never written
                 else:
                     page = self._series.pages[p]       # parses the IFD on first access
+                    handles = None if page is None else self._handles_of(page)
+                    if handles is not None and handles is not self._handles:
+                        # a page of another file is decoded as the key page is: it must
+                        # be stored the same way (else its bytes read as wrong pixels)
+                        theirs = _layout(getattr(page, "keyframe", None) or page)
+                        if theirs != _layout(key):
+                            raise UnsupportedFormatError(
+                                f"{os.path.basename(self._path)!r}: page {p} of this series, in "
+                                f"{os.path.basename(handles.path)!r}, is stored differently "
+                                f"({theirs}) from the series' first page ({_layout(key)}): a "
+                                f"series spread over files stored differently is not supported yet")
                     entry = None if page is None else (
                         page.dataoffsets, page.databytecounts,
-                        getattr(page, "jpegtables", None) or key.jpegtables,
-                        self._handles_of(page))
+                        getattr(page, "jpegtables", None) or key.jpegtables, handles)
                 self._pages[p] = entry
             return self._pages[p]
 
@@ -923,7 +958,9 @@ class _TiffFile(File):
 
     def close(self) -> None:
         super().close()
-        for image in self.images:
+        # every image's handles: also levels resolutions="base" leaves out of
+        # images, and the native image behind an axes view (``_every_image``)
+        for image in self._every_image():
             getattr(image, "_release", lambda: None)()
         self._tif.close()
 
@@ -965,9 +1002,9 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
         levels.update(level for level in by_level if level != "scene")
         plans.append((s, letters, frame, by_level))
     levels = [level for level in OTHER_INDICES if level in levels]
-    if tiles == "stitched" and "tile" in levels:
+    if tiles == "mosaic" and "tile" in levels:
         raise UnsupportedFormatError(
-            f"{path!r}: tiles='stitched': micro-reader does not compose TIFF tiles "
+            f"{path!r}: tiles='mosaic': micro-reader does not compose TIFF tiles "
             "(each tile is its own image)")
     listed = resolutions == "all"
     images, scene = [], 0
@@ -1089,6 +1126,105 @@ def _ravel(fixed: dict, positions: list, shape) -> int:
 #: pages (its OME-XML may even list planes in other files: tifffile would open them)
 PLAIN_PAGES = {"is_ome": False, "is_imagej": False, "is_shaped": False}
 
+#: what tifffile logs when a file ends before what it points to: it then drops the tag or the
+#: page and goes on, so a cut file would read as a smaller image, or its pages as plain
+#: pages, with no error.  ("MMStack is missing N pages" is not one: it is also a missing file
+#: of a set, which is read with a warning.)
+_TRUNCATED = re.compile(r"invalid value offset|invalid (page )?offset|invalid offset to page|"
+                        r"missing data offset tag|corrupted IFD structure")
+
+
+class _TiffLog(logging.Handler):
+    """tifffile's warnings logged by one thread."""
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.thread, self.messages = threading.get_ident(), []
+        self.tif = None                  # the TiffFile to close when the guard raises
+
+    def emit(self, record):
+        if record.thread == self.thread:
+            self.messages.append(record.getMessage())
+
+    def truncated(self):
+        return next((m for m in self.messages if _TRUNCATED.search(m)), None)
+
+
+@contextlib.contextmanager
+def _truncation_guard(path: str):
+    """Turn what a cut TIFF does to tifffile into ``CorruptFileError``: the warnings it
+    logs while the file is opened, and the errors those leave behind (an ``IndexError``
+    or ``KeyError`` on a dropped tag, ``TiffFileError`` on a page read later).  The
+    end-of-file checks (``_check_complete``, ``_check_extent``) do not need the log, so
+    an application that raises tifffile's log level above WARNING keeps most of this."""
+    import tifffile
+    log = _TiffLog()
+    logger = logging.getLogger("tifffile")
+    logger.addHandler(log)
+    try:
+        yield log
+        found = log.truncated()
+        if found:
+            raise CorruptFileError(f"{path!r}: {found} (truncated file?)")
+    except BaseException as exc:
+        if log.tif is not None:
+            log.tif.close()
+        if isinstance(exc, (MicroReaderError, OpenInstead)) or not isinstance(exc, Exception):
+            raise
+        if isinstance(exc, tifffile.TiffFileError):
+            raise CorruptFileError(f"{path!r}: {exc}") from exc
+        found = log.truncated()
+        if found:
+            raise CorruptFileError(f"{path!r}: {found} (truncated file?)") from exc
+        raise
+    finally:
+        logger.removeHandler(log)
+
+
+def _check_complete(tif, path: str) -> None:
+    """Raise ``CorruptFileError`` when *tif* lost pages to a truncation: no page
+    could be read, or the last page tifffile read points to a next one past the
+    end of the file (tifffile logs it and stops there, so a cut file would read
+    as a smaller image, with no error)."""
+    size = tif.filehandle.size
+    try:
+        n = len(tif.pages)
+    except Exception as exc:                                     # noqa: BLE001 - any parse failure
+        raise CorruptFileError(f"{path!r}: the page directory cannot be read ({exc}); "
+                               "truncated file?") from exc
+    if n == 0:
+        raise CorruptFileError(f"{path!r}: no page can be read (truncated file?)")
+    fmt, at = tif.tiff, tif.pages[-1].offset
+    fh = tif.filehandle
+    try:
+        fh.seek(at)
+        count = struct.unpack(fmt.tagnoformat, fh.read(fmt.tagnosize))[0]   # formats carry the byte order
+        fh.seek(at + fmt.tagnosize + count * fmt.tagsize)
+        raw = fh.read(fmt.offsetsize)
+    except (OSError, struct.error) as exc:
+        raise CorruptFileError(f"{path!r}: the last page's directory ends early (truncated file?)") from exc
+    if len(raw) != fmt.offsetsize:
+        raise CorruptFileError(f"{path!r}: the last page's directory ends early (truncated file?)")
+    following = struct.unpack(fmt.offsetformat, raw)[0]
+    if following >= size:
+        raise CorruptFileError(f"{path!r}: page {n} is past the end of the file (byte {following} "
+                               f"of {size}): truncated file?")
+
+
+def _check_extent(series, path: str) -> None:
+    """Raise ``CorruptFileError`` when the last page of a series (or of one of its
+    levels) has data past the end of its file: the file was cut after its pages
+    were written.  Earlier pages are checked when they are read."""
+    for level in getattr(series, "levels", None) or [series]:
+        page = next((p for p in reversed(level.pages) if p is not None), None)
+        if page is None:
+            continue
+        size = page.parent.filehandle.size           # a series may span several files
+        ends = [o + c for o, c in zip(page.dataoffsets, page.databytecounts) if c]
+        if ends and max(ends) > size:
+            raise CorruptFileError(f"{page.parent.filehandle.path!r}: pixel data ends early, at "
+                                   f"byte {size} of {max(ends)} (truncated file?)")
+
 
 def open_pages(path: str) -> _TiffFile:
     """*path* as plain pages, whatever its own metadata says: for the members of
@@ -1100,11 +1236,10 @@ def open_pages(path: str) -> _TiffFile:
     except ImportError as exc:
         raise MicroReaderError(
             "reading TIFF needs tifffile, a dependency of micro-reader: pip install tifffile") from exc
-    try:
-        tif = tifffile.TiffFile(path, **PLAIN_PAGES)
-    except tifffile.TiffFileError as exc:
-        raise CorruptFileError(f"{path!r}: {exc}") from exc
-    return pages_file(tif, path)
+    with _truncation_guard(path) as guard:
+        tif = guard.tif = tifffile.TiffFile(path, **PLAIN_PAGES)
+        _check_complete(tif, path)
+        return pages_file(tif, path)
 
 
 def plain_pages(tif) -> bool:
@@ -1120,6 +1255,8 @@ def pages_file(tif, path: str) -> _TiffFile:
         series = list(tif.series)
         if not series:
             raise CorruptFileError(f"{path!r} contains no image series")
+        for s in series:
+            _check_extent(s, path)
         images = _images(tif, series, path, "separate", "base", {"sequence": "z"})
         pages = {}
         for image in images:
@@ -1141,15 +1278,26 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa:
     except ImportError as exc:
         raise MicroReaderError(
             "reading TIFF needs tifffile, a dependency of micro-reader: pip install tifffile") from exc
+    with _truncation_guard(path) as guard:
+        tif = guard.tif = tifffile.TiffFile(path)
+        return _open(tif, path, tiles, resolutions, rename, companion, multifile)
+
+
+def _open(tif, path, tiles, resolutions, rename, companion, multifile) -> _TiffFile:
+    """``open`` of an open *tif*; closes it on error."""
     try:
-        tif = tifffile.TiffFile(path)
-    except tifffile.TiffFileError as exc:
-        raise CorruptFileError(f"{path!r}: {exc}") from exc
-    try:
+        _check_complete(tif, path)
         if companion and tif.is_ome:
-            # a BinaryOnly stub: its metadata is in an OME companion (docs/COMPANION.md,
-            # CO-2); companion=False (internal: file sets, whose index file decides) skips it
+            # a BinaryOnly stub: its metadata is in an OME companion or another OME-TIFF
+            # (docs/COMPANION.md); companion=False (internal: file sets, whose index file
+            # decides) skips it.  multifile=True opens the set: the metadata file, as if it
+            # had been opened; multifile=False this file, with that file's metadata (CO-2).
+            # Not Micro-Manager stacks: their files are split by size (see owner).
             from . import companion
+            if multifile and not tif.is_micromanager:
+                target = companion.metadata_file_of(path, tif)
+                if target is not None:
+                    raise OpenInstead(target)
             view = companion.member_view(path, tif)    # takes over *tif* when it is one
             if view is None and not multifile and not tif.is_micromanager:
                 # a multi-file OME-TIFF: only the planes this file holds (not a
@@ -1157,6 +1305,24 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa:
                 view = companion.single_file_view(path, tif)
             if view is not None:
                 return view
+        first = tif.pages[0]
+        if first.description.startswith("[ImarisDataSet]") and first.subfiletype & 1:
+            # Imaris 3 (.ims before the HDF5 format): an RGB thumbnail (a reduced image),
+            # then the planes in an order its description defines; read as a plain TIFF it
+            # gives the wrong images.  Imaris's TIFF export writes the same description on
+            # full-size planes: those are plain TIFFs
+            raise UnsupportedFormatError(
+                f"{path!r}: Imaris 3 file (a TIFF with an '[ImarisDataSet]' description) is not "
+                "supported yet; Imaris 5 files (HDF5) are")
+        if first.tags.get(65200) is not None and (path.lower().endswith(".flex") or len(tif.pages) > 1):
+            # PerkinElmer Opera Flex (the FlexXML tag, several pages): its pages are the fields,
+            # time points and channels of a well, which only that XML orders; read as a plain
+            # TIFF they would be loose pages (decided 2026-10-18: refuse until a Flex backend
+            # exists).  Harmony and Columbus planes carry the tag too, one plane per file:
+            # those are plain TIFFs (the members of their plates)
+            raise UnsupportedFormatError(
+                f"{path!r}: PerkinElmer Opera Flex file (a TIFF with a FlexXML tag) is not "
+                "supported yet")
         series = list(tif.series)
         if tif.is_lsm:
             # Zeiss LSM stores a small RGB preview of every plane (reduced
@@ -1167,6 +1333,8 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa:
         series = _tiff_variants.select(tif, series)
         if not series:
             raise CorruptFileError(f"{path!r} contains no image series")
+        for s in series:
+            _check_extent(s, path)
         images = _images(tif, series, path, tiles, resolutions, rename)
     except BaseException:
         tif.close()

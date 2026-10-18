@@ -24,7 +24,9 @@ micro-reader reads the measurement in that folder.
   plane's Z.  The CV7000's own Harmony-format export (``Index.idx.xml``)
   stores the same X / Y / Z, so both routes give the same positions, up to
   the ``.mlf`` truncating X / Y to 0.1 um (checked on idr0088: < 0.1 um).
-- Channels: name = ``Target``, excitation = the light source's wavelength,
+- Channels: name = ``Target`` (when it is empty or the software's default
+  "Microscope Image": the light source, e.g. "405nm", plus the filter when two
+  channels share one), excitation = the light source's wavelength,
   emission = the centre of the band-pass filter (Bio-Formats 8.0.0 reports
   that centre as the excitation).
 - Actions with different z (a 3-D action next to 2-D ones): a RAGGED image
@@ -46,6 +48,7 @@ from __future__ import annotations
 import os
 import warnings
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from datetime import datetime
 
 from .. import _parts
@@ -54,7 +57,7 @@ from .._errors import CorruptFileError, UnsupportedFormatError
 from .._fileset import (Members, PlaneImage, check_times, keep_fields, ragged_field,
                         z_parts)
 from .._metadata import Channel, Metadata, color_hex, quantity
-from .._plate import Plate, Well, row_label
+from .._plate import Plate, Well, layout, row_label
 
 NAME = "cv7000"
 #: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
@@ -65,6 +68,10 @@ DETAIL, DATA = "MeasurementDetail.mrf", "MeasurementData.mlf"
 ENTRY_ROOTS = (b"bts:WellPlate ", b"bts:MeasurementDetail ", b"bts:MeasurementData ")
 
 
+#: the CellVoyager software's default channel ``Target``: it names no channel
+DEFAULT_TARGET = "Microscope Image"
+#: correction files in a measurement folder: shading, dark current, OTF (upper case)
+CORRECTION_PREFIXES = ("SC_", "DC_", "OTF_")
 #: files of a measurement folder that are parts of its main file (lower case)
 SIDE_EXTENSIONS = (".wpi", ".mrf", ".mlf", ".wpp", ".mes", ".ppp", ".ppf", ".icr", ".xml")
 
@@ -284,10 +291,22 @@ class _CVFile(File):
             images.append(ragged_field(
                 make, kept[(r, c, f)], z_at[(r, c, f)], times, parts,
                 {"plate": 0, "acquisition": 0, "well": number[(r, c)], "field": f - 1}))
-        plate = Plate(name=plate_name, rows=tuple(row_label(r) for r in range(rows)),
-                      columns=tuple(str(c + 1) for c in range(columns)),
+        row_names, column_names = layout(rows, columns, wells_rc, path)
+        plate = Plate(name=plate_name, rows=row_names, columns=column_names,
                       wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))
         super().__init__(path, images, plates=[plate])
+        self._folder = folder
+
+    def _side_files(self) -> set:
+        """The correction files the instrument writes into the measurement folder
+        (``SC_`` shading, ``DC_`` dark current, ``OTF_`` optical transfer images and
+        parameters): side files of the plate for ``group_files``, images on their
+        own when opened (decided 2026-10-18)."""
+        try:
+            names = os.listdir(self._folder)
+        except OSError:
+            return set()
+        return {os.path.join(self._folder, n) for n in names if n.upper().startswith(CORRECTION_PREFIXES)}
 
     @staticmethod
     def _time(value):
@@ -304,20 +323,33 @@ class _CVFile(File):
         root = _parse(mes)
         lights = {e.get(BTS + "Name"): _float(e, "WaveLength")
                   for e in root.iter(BTS + "LightSource")}
-        out = {}
+        out, fallback = {}, {}
         for e in root.iter(BTS + "Channel"):
             if _a(e, "Ch") is None:
                 continue
             light = e.find(BTS + "LightSourceName")
-            ex = lights.get(light.text.strip()) if light is not None and light.text else None
+            light = light.text.strip() if light is not None and light.text else None
+            ex = lights.get(light) if light else None
             em = None
             band = (_a(e, "Acquisition") or "").upper()
             if band.startswith("BP") and "/" in band:      # "BP445/45": centre / width
                 em = quantity(band[2:].split("/", 1)[0], "nm")
-            out[_int(e, "Ch")] = Channel(
-                name=_a(e, "Target") or None, color=color_hex(_a(e, "Color")),
+            ch = _int(e, "Ch")
+            name = (_a(e, "Target") or "").strip()
+            if name in ("", DEFAULT_TARGET):
+                # the software's default target names nothing: the light source does
+                # (decided 2026-10-18; BIA S-BIAD1013 / S-BIAD3934 name every channel so)
+                fallback[ch] = (light, _a(e, "Acquisition"))
+                name = light or ""
+            out[ch] = Channel(
+                name=name or None, color=color_hex(_a(e, "Color")),
                 excitation_wavelength=quantity(ex, "nm") if ex else None,
                 emission_wavelength=em)
+        # two channels on one light source (one laser, two filters): add the filter
+        lights_used = [light for light, _ in fallback.values() if light]
+        for ch, (light, band) in fallback.items():
+            if light and band and lights_used.count(light) > 1:
+                out[ch] = replace(out[ch], name=f"{light} {band}")
         return out
 
     def close(self) -> None:

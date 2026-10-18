@@ -29,7 +29,7 @@ classifiers = [
 # TIFF covers most microscopy images, so it is not an extra (Bugra,
 # 2026-10-01) until micro-reader parses TIFF itself (post-0.0.1). The floor
 # matches eubi-bridge's (tifffile>=2025.5.21), so both install together.
-dependencies = ["numpy>=1.24", "micro-reader-codecs>=0.0.1,<0.1", "tifffile>=2025.5.21"]
+dependencies = ["numpy>=1.24", "micro-reader-codecs>=0.0.2,<0.1", "tifffile>=2025.5.21"]
 
 [project.urls]
 Homepage = "https://github.com/bugraoezdemir/micro-reader"
@@ -37,9 +37,11 @@ Source = "https://github.com/bugraoezdemir/micro-reader"
 Issues = "https://github.com/bugraoezdemir/micro-reader/issues"
 
 [project.optional-dependencies]
-ims = ["h5py>=3.11"]          # first h5py for numpy 2; chunk offsets checked against user blocks
+# HDF5 files: Imaris, ilastik, BigDataViewer; `ims` is the older name, kept
+hdf5 = ["h5py>=3.11"]         # first h5py for numpy 2; chunk offsets checked against user blocks
+ims = ["micro-reader[hdf5]"]
 codecs = ["imagecodecs"]
-all = ["micro-reader[ims,codecs]"]
+all = ["micro-reader[hdf5,codecs]"]
 # the reference readers and encoders the tests compare with: never shipped
 # (readlif is GPL-3, pylibCZIrw LGPL-3: test-only, PLAN.md "Dependency policy")
 test = ["pytest", "pillow", "h5py>=3.11", "imagecodecs", "zstandard", "nd2", "readlif", "liffile",

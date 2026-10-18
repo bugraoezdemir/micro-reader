@@ -262,6 +262,89 @@ def test_volumetric_tiles_are_refused(tmp_path):
         micro_reader.open(path)
 
 
+def test_imaris3_is_refused_not_misread(tmp_path):
+    """Imaris 3 (.ims as a TIFF: an RGB thumbnail with an '[ImarisDataSet]' description,
+    then the planes) read as a plain TIFF gave the thumbnail and loose planes (real-data
+    round, OME davemason *_IMS3.ims): it is refused, and the file is closed again."""
+    path = str(tmp_path / "old_IMS3.ims")
+    with tifffile.TiffWriter(path) as tw:
+        tw.write(np.zeros((32, 32, 3), "u1"), photometric="rgb", subfiletype=1,
+                 description="[ImarisDataSet]\nNumberOfImages=1\nCreator=Imaris\nVersion=4.x\n")
+        for _ in range(3):
+            tw.write(_data((64, 64)), photometric="minisblack")
+    with pytest.raises(UnsupportedFormatError, match="Imaris 3"):
+        micro_reader.open(path)
+    os.remove(path)                                  # Windows: fails while a handle is open
+
+
+def test_opera_flex_is_refused_not_misread(tmp_path):
+    """An Opera Flex file (a TIFF with a FlexXML tag) read as a plain TIFF gave
+    each page as an image (112 for one well, real-data round): refused."""
+    path = str(tmp_path / "001001.flex")
+    with tifffile.TiffWriter(path) as tw:
+        for k in range(4):
+            tw.write(_data((16, 16), seed=k), photometric="minisblack",
+                     extratags=[(65200, "s", 0, "<Root><Arrays/></Root>", True)] if k == 0 else None)
+    with pytest.raises(UnsupportedFormatError, match="Opera Flex"):
+        micro_reader.open(path)
+    os.remove(path)                                  # Windows: fails while a handle is open
+
+
+def test_a_harmony_plane_with_a_flexxml_tag_is_a_plain_tiff(tmp_path):
+    """Harmony and Columbus write the FlexXML tag on their one-plane TIFFs (the
+    members of their plates): those stay plain TIFFs."""
+    path = str(tmp_path / "r01c01f01p01-ch1sk1fk1fl1.tiff")
+    data = _data((16, 16))
+    tifffile.imwrite(path, data, photometric="minisblack",
+                     extratags=[(65200, "s", 0, "<Root><Arrays><Array FrameIndex=\"0\"/></Arrays></Root>", True)])
+    with micro_reader.open(path) as f:
+        np.testing.assert_array_equal(np.asarray(f.images[0][...]), data)
+
+
+def test_one_pixel_per_inch_is_no_pixel_size(tmp_path):
+    """XResolution 1 / inch is a writer's placeholder (ImageXpress JDCE TIFFs):
+    no pixel size, where it would read as 25 400 um.  A real resolution stays."""
+    placeholder, real = str(tmp_path / "placeholder.tif"), str(tmp_path / "real.tif")
+    tifffile.imwrite(placeholder, _data((8, 8)), resolution=(1, 1), resolutionunit="INCH")
+    tifffile.imwrite(real, _data((8, 8)), resolution=(10000, 10000), resolutionunit="CENTIMETER")
+    with micro_reader.open(placeholder) as f:
+        assert f.images[0].metadata.pixel_sizes == {}
+    with micro_reader.open(real) as f:
+        assert f.images[0].metadata.pixel_sizes["x"].to("micrometer").value == pytest.approx(1.0)
+
+
+def test_planes_the_metadata_names_but_the_file_never_got(tmp_path):
+    """An acquisition stopped early (ScanImage: 3 of 24 frames): the planes that
+    exist are read, the others as zeros, with a MissingImagesWarning; it used to
+    be refused."""
+    path = str(tmp_path / "stopped.tif")
+    data = _data((3, 16, 16))
+    with tifffile.TiffWriter(path) as tw:
+        for k, plane in enumerate(data):
+            tw.write(plane, compression="zlib", metadata=None, contiguous=False,
+                     description="ImageJ=1.11a\nimages=8\nslices=8\n" if k == 0 else None)
+    with pytest.warns(micro_reader.MissingImagesWarning, match="holds 3 of the 8 planes"):
+        f = micro_reader.open(path)
+    with f:
+        got = np.asarray(f.images[0][...])
+        assert got.shape == (8, 16, 16)
+        np.testing.assert_array_equal(got[:3], data)
+        assert not got[3:].any()
+
+
+def test_imaris_tiff_export_is_a_plain_tiff(tmp_path):
+    """Imaris's TIFF export writes the '[ImarisDataSet]' description on full-size planes
+    (real-data round, EMPIAR-13192 slices from Imaris 10.2): a plain TIFF, not Imaris 3."""
+    path = str(tmp_path / "Carotid1_Z001.tif")
+    data = _data((48, 64))
+    tifffile.imwrite(path, data, photometric="minisblack",
+                     description="[ImarisDataSet]\nNumberOfImages=1\nVersion = 10.2.0\n\n[Image]\n"
+                                 "OriginalFormat = TIFF\n")
+    with micro_reader.open(path) as f:
+        assert len(f.images) == 1
+        np.testing.assert_array_equal(np.asarray(f.images[0][...]).reshape(data.shape), data)
+
+
 def test_truncated_file_is_reported(tmp_path):
     path = str(tmp_path / "a.tif")
     tifffile.imwrite(path, _data((300, 500)), rowsperstrip=37)

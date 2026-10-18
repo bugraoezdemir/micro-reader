@@ -13,7 +13,8 @@ same scenes whichever reader it uses (Bugra, 2026-10-15):
   plain TIFF; its label / macro are kept here as for the other slides).
 
 Associated images are named in lower case: ``thumbnail``, ``label``,
-``macro``, ``probability``.
+``macro``, ``probability``.  A Leica SCN names its images ``image_0000001819``;
+the one that spans the whole slide is called ``macro`` (``_scn_macros``).
 
 Ventana BIF (Roche, "BIF image file format for digital pathology", v1.0,
 2020): level 0 of a VENTANA DP 200 scan is a grid of tiles that overlap
@@ -78,9 +79,14 @@ def select(tif, series: list) -> list:
     if not variant:
         return series
     kept = []
+    scn_macros = _scn_macros(tif) if variant == "scn" else {}
     for s in series:
         name = s.name or ""
-        if variant == "bif":
+        if variant == "scn":
+            s.scn_name = name                         # the SCN XML's image name (metadata)
+            if name in scn_macros:
+                s.name = scn_macros[name]
+        elif variant == "bif":
             # tifffile's names: up to 2025.12 Label / Thumbnail, from 2026.10.15
             # Overview / Probability
             if name in ("Label", "Overview"):           # IFD 0: the whole slide, label included
@@ -95,6 +101,34 @@ def select(tif, series: list) -> list:
     if variant == "bif":
         _attach_bif_layout(kept)
     return kept
+
+
+# -- Leica SCN -------------------------------------------------------------------
+
+def _scn_macros(tif) -> dict:
+    """SCN image name -> micro-reader's name for the images whose ``view`` spans
+    the whole ``collection`` (the slide): the first brightfield one is ``macro``
+    (OpenSlide's rule), others ``macro <illumination>`` (Leica-Fluorescence-1
+    has a fluorescence one too).  Decided 2026-10-18: the SCN names
+    (``image_0000001819``) say nothing."""
+    try:
+        root = ET.fromstring(tif.pages.first.description)
+    except (ET.ParseError, TypeError):
+        return {}
+    local = lambda e: e.tag.rsplit("}", 1)[-1]   # noqa: E731
+    out = {}
+    for collection in (e for e in root.iter() if local(e) == "collection"):
+        size = (collection.get("sizeX"), collection.get("sizeY"))
+        for image in (e for e in collection if local(e) == "image"):
+            view = next((e for e in image if local(e) == "view"), None)
+            if view is None or (view.get("sizeX"), view.get("sizeY")) != size:
+                continue
+            light = next((e.text for e in image.iter() if local(e) == "illuminationSource"), None)
+            light = (light or "").strip().lower()
+            name = "macro" if light in ("", "brightfield") and "macro" not in out.values() else \
+                f"macro {light or 'other'}"
+            out[image.get("name")] = name
+    return out
 
 
 # -- Ventana BIF -----------------------------------------------------------------

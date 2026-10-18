@@ -4,7 +4,10 @@ element.
 - Pixel sizes: ``DimensionDescription`` ``Length`` (first to last sample,
   in ``Unit``; negative for a z stack taken downwards) over
   ``NumberOfElements - 1``, for x, y, z and t (DimID 1, 2, 3, 4) -- as
-  Bio-Formats computes them.
+  Bio-Formats computes them.  A spatial step of exactly 1 m (``Length`` =
+  ``NumberOfElements - 1`` in m) is LAS's index space -- FLIM "Phasor
+  Plot", "Phasor Mask" and "Pattern Matching Scatter Plot", the only such
+  images in every local Leica file -- and gives no pixel size.
 - Channels: colour from ``ChannelDescription`` ``LUTName``; names: the dye
   names (``MultiBand DyeName``) of the active detectors of the image's
   confocal setting, only when there is one per channel (sequential scans
@@ -76,7 +79,10 @@ def lif_metadata(element, shape: dict, index: dict, tiled: bool = False) -> Meta
             length = abs(float(d.get("Length")))
         except (TypeError, ValueError):
             continue
-        q = quantity(length / (n - 1), d.get("Unit") or ("s" if axis == "t" else "m"))
+        unit = d.get("Unit") or ("s" if axis == "t" else "m")
+        if axis != "t" and unit == "m" and length == n - 1:
+            continue                # 1 m per sample: index space (FLIM phasor plots), no size
+        q = quantity(length / (n - 1), unit)
         if q:
             sizes[axis] = q
     index_values = {}
