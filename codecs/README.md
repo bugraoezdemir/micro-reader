@@ -16,7 +16,7 @@ It has no Python dependencies.
 
 * Every decoder writes straight into a buffer you provide, such as a NumPy array.
 * Decoders run without holding Python's lock, so micro-reader's thread pool can decode on all cores.
-* JPEG 2000 and JPEG XL decode on one thread each. micro-reader already decodes many tiles at once, and threads inside the codec would compete for the same cores.
+* Baseline JPEG, JPEG 2000 and JPEG XL decode on one thread each. micro-reader already decodes many tiles at once, and threads inside the codec would compete for the same cores.
 
 ## Decoders
 
@@ -27,7 +27,8 @@ It has no Python dependencies.
 | `lzw_decode_into`           | LZW, TIFF variant                         | `weezl`                               |
 | `zlib_decompress_into`      | zlib / deflate                            | `libdeflater` (libdeflate)            |
 | `packbits_decode_into`      | PackBits                                  | own                                   |
-| `jpeg_decode_into`          | JPEG: baseline, progressive and lossless  | `jpeg-decoder`                        |
+| `jpeg_decode_into`          | JPEG: baseline and extended (same pixels as libjpeg-turbo) | own, following libjpeg-turbo |
+|                             | JPEG: progressive and lossless            | `jpeg-decoder`                        |
 | `jxl_decode_into`           | JPEG XL                                   | `jxl-oxide`                           |
 | `jpeg2k_decode_into`        | JPEG 2000 (J2K, JP2), also YCbCr with subsampled colour (e.g. Aperio slides) | `jpeg2k` (OpenJPEG) |
 | `png_decode_into`           | PNG                                       | `png`                                 |
@@ -66,6 +67,7 @@ The tests live in the repository's `tests/` folder:
 * `test_codecs.py`
 * `test_czi_codecs.py`
 * `test_tiff_codecs.py`
+* `test_jpeg_exact.py`
 * `test_memory_limit.py`
 
 They compare these decoders with independent reference decoders, bit for bit.
@@ -74,7 +76,7 @@ They compare these decoders with independent reference decoders, bit for bit.
 
 MIT
 
-The bundled crates and C libraries (libzstd, libdeflate, OpenJPEG) are MIT, Apache-2.0, BSD or Zlib licensed. Their notices ship in every wheel as `THIRD_PARTY_LICENSES.txt`.
+The bundled crates and C libraries (libzstd, libdeflate, OpenJPEG) are MIT, Apache-2.0, BSD or Zlib licensed. The JPEG decoder follows libjpeg-turbo (IJG and BSD licences): this software is based in part on the work of the Independent JPEG Group. All notices ship in every wheel as `THIRD_PARTY_LICENSES.txt`.
 
 Whenever `Cargo.lock` changes, regenerate it with:
 
