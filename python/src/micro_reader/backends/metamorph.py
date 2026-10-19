@@ -32,9 +32,11 @@ planes (``DoZSeries``), one for a wavelength with ``WaveDoZ<k>`` FALSE.
 - Metadata (the ``.nd`` file wins, the members fill its gaps, a disagreement
   warns): channel names (``WaveName``; else the members' illumination
   setting), x / y pixel sizes from the members' MetaMorph calibration, z
-  step from ``ZStepSize`` (micrometres, MetaMorph's focus unit).  Not read:
-  stage positions (which point of the field and which way the stage runs
-  against the camera are not recorded), the time step, wavelengths.
+  step from ``ZStepSize`` (micrometres, MetaMorph's focus unit).  The
+  members' stage coordinates (MetaSeries ``stage-position-x`` / ``-y``) are
+  ``Metadata.stage_position``, as recorded, not ``position``: which point of
+  the field they mark and which way the stage runs against the camera are not
+  recorded (Bugra, 2026-10-19).  Not read: the time step, wavelengths.
 - Refused (``UnsupportedFormatError``): several wavelengths in one file
   (``WaveInFileName`` FALSE with more than one wavelength) and wavelengths
   imaged at some timepoints only (``WavePointsCollected``) -- no sample yet.
@@ -323,6 +325,19 @@ def owner(path: str, head):
     return _parts.Part(found[0], found[0], standalone=True)
 
 
+def _stage_position(tif) -> dict:
+    """The MetaSeries ``stage-position-x`` / ``-y`` of a member's first page,
+    as recorded (micrometres, MetaMorph's stage unit): ``Metadata.stage_position``,
+    not ``position`` -- which point of the field they mark and how the stage
+    runs against the camera are not recorded (Bugra, 2026-10-19)."""
+    from ._tiff_metadata import metaseries_plane_info
+    if tif.is_stk:
+        return {}
+    info = metaseries_plane_info(tif)
+    out = {a: quantity(info.get(f"stage-position-{a}"), "micrometer", positive=False) for a in "xy"}
+    return out if all(out.values()) else {}
+
+
 # -- the images -----------------------------------------------------------------
 
 def _plane_image(member, path: str):
@@ -420,12 +435,13 @@ class _NDImage(PlaneImage):
 
     def _read_metadata(self):
         first = self._planes[min(self._planes)][0] if self._planes else None
-        sizes = {}
+        sizes, stage = {}, {}
         if first is not None:
             entry = self._members.acquire(first)
             try:
                 sizes = {a: q for a, q in entry[0].images[0].metadata.pixel_sizes.items()
                          if a in "xy"}
+                stage = _stage_position(entry[0]._tif)
             finally:
                 self._members.release(entry)
         if self.shape[2] > 1:
@@ -433,7 +449,7 @@ class _NDImage(PlaneImage):
             if z is not None:
                 sizes["z"] = z
         names = self._owner._channel_names()
-        return Metadata(pixel_sizes=sizes,
+        return Metadata(pixel_sizes=sizes, stage_position=stage,
                         channels=tuple(Channel(name=names[c]) for c in self._channels))
 
 

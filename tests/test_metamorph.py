@@ -246,3 +246,22 @@ def test_group_files(tmp_path):
 
 def test_member_name_helper():
     assert member_name("x", 2, 3, 1, "GFP") == "x_w1GFP_s2_t3.TIF"
+
+
+def test_stage_coordinates_as_recorded_not_a_position(tmp_path):
+    """The members' stage-position-x / -y become stage_position, as recorded;
+    position (the first pixel along the image axes) stays unknown."""
+    nd, _, _ = write_set(str(tmp_path), stages=["B2", "C4"], times=2,
+                         stage_xy=lambda s: (70360.2 - 39143.2 * s, 9839.7 - 18184.3 * s))
+    with micro_reader.open(nd) as f:
+        b2, c4 = (image.metadata for image in f.images)
+        assert b2.stage_position == {"x": (70360.2, "micrometer"), "y": (9839.7, "micrometer")}
+        assert c4.stage_position["x"] == (pytest.approx(31217.0), "micrometer")
+        assert c4.stage_position["y"] == (pytest.approx(-8344.6), "micrometer")
+        assert b2.position == {} and c4.position == {}
+
+
+def test_no_stage_coordinates_recorded(tmp_path):
+    nd, _, _ = write_set(str(tmp_path), stages=["B2"], times=1)
+    with micro_reader.open(nd) as f:
+        assert f.images[0].metadata.stage_position == {}

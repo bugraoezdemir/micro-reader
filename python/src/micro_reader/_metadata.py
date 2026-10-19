@@ -150,6 +150,11 @@ class Metadata:
     #: this image's value of its indices that have one (D5): {"emission":
     #: Quantity(510.0, "nanometer"), "lifetime": Quantity(2.5, "nanosecond")}
     index_values: dict = field(default_factory=dict)
+    #: the stage coordinates the file records for this image, as recorded,
+    #: where the file's convention (which point of the field, the stage's
+    #: directions against the image axes) is NOT verified -- so they are not
+    #: a ``position``: axis -> Quantity (Bugra, 2026-10-19; MetaMorph)
+    stage_position: dict = field(default_factory=dict)
 
     def scaled(self, factors: dict) -> "Metadata":
         """This metadata for a resolution level whose pixels are *factors*

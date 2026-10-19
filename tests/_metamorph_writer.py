@@ -47,7 +47,7 @@ def write_nd(path, *, times=None, stages=None, waves=None, nz=None, z_step=None,
 
 
 def metaseries_xml(*, calibration=0.65, units="um", z=None, illumination=None,
-                   calibrated=True) -> str:
+                   calibrated=True, stage=None) -> str:
     props = [("spatial-calibration-state", "bool", "on" if calibrated else "off"),
              ("spatial-calibration-x", "float", calibration),
              ("spatial-calibration-y", "float", calibration),
@@ -56,6 +56,8 @@ def metaseries_xml(*, calibration=0.65, units="um", z=None, illumination=None,
         props.append(("z-position", "float", z))
     if illumination is not None:
         props.append(("_IllumSetting_", "string", illumination))
+    if stage is not None:
+        props += [("stage-position-x", "float", stage[0]), ("stage-position-y", "float", stage[1])]
     plane = "\n".join(f'<prop id="{k}" type="{t}" value="{v}"/>' for k, t, v in props)
     return ('<MetaData>\n<prop id="Description" type="string" value=""/>\n'
             '<prop id="MetaDataVersion" type="float" value="1"/>\n'
@@ -137,11 +139,12 @@ def member_name(base, s=None, t=None, w=None, wave_name="", ext=".TIF"):
 
 def write_set(folder, base="exp", *, times=None, stages=None, waves=None, nz=None, z_step=2.0,
               z0=100.0, waves_in_name=True, stk=False, skip=(), shape=(8, 12), seed=7,
-              illumination=True):
+              illumination=True, stage_xy=None):
     """A whole set: the ``.nd`` file and every member, random uint16 planes.
     *skip*: (s, t, w) (0-based) not written.  *illumination*: the members'
     ``_IllumSetting_`` -- True: the wavelength's name, a string: that, None:
-    none.  -> (nd path, {(s, t, w): (n, y, x) array}, {(s, t, w): member path})."""
+    none.  *stage_xy*: s -> (x, y) the members record.
+    -> (nd path, {(s, t, w): (n, y, x) array}, {(s, t, w): member path})."""
     rng = np.random.default_rng(seed)
     os.makedirs(folder, exist_ok=True)
     nd = write_nd(os.path.join(folder, base + ".nd"), times=times, stages=stages, waves=waves,
@@ -168,5 +171,6 @@ def write_set(folder, base="exp", *, times=None, stages=None, waves=None, nz=Non
                     write_stk(path, planes, z=zs)
                 else:
                     write_metaseries(path, planes, z=zs,
-                                     illumination=name if illumination is True else illumination)
+                                     illumination=name if illumination is True else illumination,
+                                     stage=stage_xy(s) if stage_xy else None)
     return nd, data, paths
