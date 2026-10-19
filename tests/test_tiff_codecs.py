@@ -60,11 +60,11 @@ CASES = {
                                                           **STRIPS), "lzw", 0),
     # image codecs
     "jpeg_grey":          (_data(GREY, "u1"), dict(compression="jpeg", compressionargs=Q90,
-                                                   **TILES), "jpeg", 3),
+                                                   **TILES), "jpeg", 0),
     "jpeg_ycbcr_strips":  (_data(RGB, "u1"), dict(compression="jpeg", compressionargs=Q90,
-                                                  photometric="ycbcr", **STRIPS), "jpeg", 3),
+                                                  photometric="ycbcr", **STRIPS), "jpeg", 0),
     "jpeg_rgb_tiles":     (_data(RGB, "u1"), dict(compression="jpeg", compressionargs=Q90,
-                                                  photometric="rgb", **TILES), "jpeg", 3),
+                                                  photometric="rgb", **TILES), "jpeg", 0),
     "jpeg_lossless_12bit": (_data(GREY) % 4096, dict(compression="jpeg", compressionargs=dict(
         lossless=True, bitspersample=12), **TILES), "jpeg", 0),
     "jpeg_lossless_16bit": (_data(GREY), dict(compression="jpeg", compressionargs=dict(
@@ -155,7 +155,7 @@ def test_own_codec_matches_tifffile(files, name, decode_threads):
 @pytest.mark.parametrize("name", list(CASES))
 def test_reference_path_agrees(files, name, monkeypatch):
     """Without the native module, the reference decoders give the same
-    pixels (lossy JPEG: within the standard's tolerance, libjpeg vs ours)."""
+    pixels."""
     if not _codecs.native_available():
         pytest.skip("native module not installed")
     path = _path(files, name)

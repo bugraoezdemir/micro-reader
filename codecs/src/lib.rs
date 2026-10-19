@@ -12,6 +12,7 @@
 
 use std::io::Cursor;
 
+mod jpeg;
 mod stream;
 
 use pyo3::buffer::PyBuffer;
@@ -92,22 +93,31 @@ fn lzw_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyAn
 /// samples are written little-endian (jpeg-decoder gives native order).
 /// *colour*: "auto" (from the JFIF / Adobe markers, as JPEG files say),
 /// "ycbcr" or "rgb" (no transform: what TIFF's Photometric RGB means).
+///
+/// Baseline and extended sequential JPEG (8-bit, 1 or 3 components) decode to
+/// libjpeg-turbo's pixels (`jpeg.rs`); other kinds go to jpeg-decoder.
 #[pyfunction]
 #[pyo3(signature = (data, out, colour = "auto"))]
 fn jpeg_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyAny>, colour: &str)
     -> PyResult<(usize, usize, usize, usize)> {
-    let transform = match colour {
-        "auto" => None,
-        "ycbcr" => Some(jpeg_decoder::ColorTransform::YCbCr),
-        "rgb" => Some(jpeg_decoder::ColorTransform::RGB),
+    let (transform, own) = match colour {
+        "auto" => (None, jpeg::Colour::Auto),
+        "ycbcr" => (Some(jpeg_decoder::ColorTransform::YCbCr), jpeg::Colour::YCbCr),
+        "rgb" => (Some(jpeg_decoder::ColorTransform::RGB), jpeg::Colour::Rgb),
         other => return Err(PyValueError::new_err(format!("jpeg: unknown colour {other:?}"))),
     };
     with_buffers(py, data, out, move |input, output| {
+        // progressive, lossless, ...: jpeg-decoder below
+        let why = match jpeg::decode_into(input, output, own) {
+            Ok((w, h, n)) => return Ok((w, h, n, 8)),
+            Err(jpeg::JpegError::Corrupt(e)) => return Err(format!("jpeg: {e}")),
+            Err(jpeg::JpegError::Unsupported(why)) => why,
+        };
         let mut decoder = jpeg_decoder::Decoder::new(input);
         if let Some(transform) = transform {
             decoder.set_color_transform(transform);
         }
-        let pixels = decoder.decode().map_err(|e| format!("jpeg: {e}"))?;
+        let pixels = decoder.decode().map_err(|e| format!("jpeg: {e} ({why})"))?;
         let info = decoder.info().ok_or("jpeg: no image information")?;
         let (samples, bits) = match info.pixel_format {
             jpeg_decoder::PixelFormat::L8 => (1, 8),

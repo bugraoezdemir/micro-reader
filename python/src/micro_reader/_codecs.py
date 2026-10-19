@@ -331,9 +331,10 @@ def jpeg_decode_into(data, out: np.ndarray, *, colour: str = "auto",
     samples]) little-endian, colour in R, G, B order.  Returns (width,
     height, samples, bits).  *colour*: "auto" (the JPEG's own markers),
     "ycbcr", or "rgb" (stored without a colour transform: TIFF Photometric
-    RGB).  Lossy JPEG may differ from other decoders by a few grey levels
-    (allowed by the JPEG standard); lossless is exact.  12-bit lossy JPEG
-    goes to imagecodecs."""
+    RGB).  Baseline and extended 8-bit JPEG decode to libjpeg-turbo's pixels
+    (imagecodecs, tifffile, Pillow), bit for bit; progressive JPEG may differ
+    from them by a few grey levels (allowed by the JPEG standard); lossless is
+    exact.  12-bit lossy JPEG goes to imagecodecs."""
     if _use_native(native, "jpeg_decode_into") and not _is_12bit_lossy_jpeg(data):
         try:
             return _native.jpeg_decode_into(data, memoryview(out).cast("B"), colour)

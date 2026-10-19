@@ -122,13 +122,7 @@ def test_matches_tifffile(files, name, decode_threads):
         for key in _keys(ref.shape):
             got = scene[key]
             assert got.dtype.isnative
-            if name == "jpeg_rgb":
-                # lossy JPEG: our decoder vs libjpeg may differ by a few levels
-                # (the standard allows it; measured max 3 on noise)
-                diff = np.abs(got.astype(int) - ref[key].astype(int))
-                assert diff.max(initial=0) <= 3, f"{name} {key}"
-            else:
-                np.testing.assert_array_equal(got, ref[key], err_msg=f"{name} {key}")
+            np.testing.assert_array_equal(got, ref[key], err_msg=f"{name} {key}")
 
 
 @pytest.mark.parametrize("name", ["single_strip", "strips_37", "strips_1", "big_endian",
