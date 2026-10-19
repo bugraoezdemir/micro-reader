@@ -372,21 +372,27 @@ class _TiffImage(Image):
                 f"{key.bitspersample}-bit)")
         if key.shaped[1] != 1:
             raise UnsupportedFormatError(f"{where}: volumetric pages (ImageDepth)")
-        if key.axes not in _PAGE_AXES:
-            raise UnsupportedFormatError(f"{where}: page axes {key.axes!r}")
+        page_axes, page_shape = key.axes, tuple(key.shape)
+        if page_axes not in _PAGE_AXES:
+            raise UnsupportedFormatError(f"{where}: page axes {page_axes!r}")
         # tifffile stacks the pages and reshapes them to the series shape, so
         # the pages must be its trailing dimensions.  Only the shapes must
         # match: series metadata may name the page axes differently (e.g. an
         # RGB-planar page 'SYX' labelled 'ZYX').
-        shape, axes, k = tuple(series.shape), series.axes, len(key.shape)
-        if shape[len(shape) - k:] != tuple(key.shape):
+        shape, axes = tuple(series.shape), series.axes
+        if page_axes == "YXS" and page_shape[-1] == 1 and                 shape[len(shape) - 2:] == page_shape[:2] and not axes.endswith("S"):
+            # one sample the series leaves out (a NanoZoomer S20MD's Map page:
+            # photometric RGB with one sample per pixel): read as 'YX'
+            page_axes, page_shape = "YX", page_shape[:2]
+        k = len(page_shape)
+        if shape[len(shape) - k:] != page_shape:
             raise UnsupportedFormatError(
                 f"{where}: pages ({key.axes} {key.shape}) do not map onto the "
                 f"trailing axes of the series ({axes} {shape})")
         #: where the tiles are placed (Ventana BIF, ``_tiff_variants``); None: the grid
         self._layout = getattr(series, "layout", None)
         if self._layout is not None:
-            x = len(shape) - k + key.axes.index("X")
+            x = len(shape) - k + page_axes.index("X")
             shape = shape[:x] + (self._layout.width,) + shape[x + 1:]
 
         self._tif = tif
@@ -394,13 +400,13 @@ class _TiffImage(Image):
         self._key = key
         self._path = tif.filehandle.path
         self._lead_shape = shape[:len(shape) - k]
-        self._page_pos = _PAGE_AXES[key.axes]
+        self._page_pos = _PAGE_AXES[page_axes]
         self._sep, _, self._length, self._width, self._contig = key.shaped
         self._file_dtype = np.dtype(key.dtype).newbyteorder(tif.byteorder)
         self._raw = (key.compression == 1 and key.predictor == 1 and key.fillorder == 1
                      and not key.is_subsampled and key.sampleformat != 5
                      and key.bitspersample == 8 * self._file_dtype.itemsize)
-        self._as_normalised = _AS_NORMALISED[key.axes]
+        self._as_normalised = _AS_NORMALISED[page_axes]
         self._tiled = bool(key.is_tiled)
         if self._tiled:
             self._seg_rows, self._seg_cols = key.tilelength, key.tilewidth

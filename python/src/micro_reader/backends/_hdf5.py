@@ -12,7 +12,7 @@ global lock, so threads do not speed it up.  ``ChunkReader`` asks h5py only
 where each chunk is (``chunk_iter``), reads the chunks with per-thread file
 handles and decompresses them on the shared decode pool.  Filters handled:
 deflate (gzip), shuffle, Fletcher-32 (checked), LZ4 (ImarisWriter), zstd,
-scaleoffset (integers).  A dataset with any other filter (szip, Blosc, ...) or
+scaleoffset (integers), LZF (h5py's; ilastik exports).  A dataset with any other filter (szip, Blosc, ...) or
 without chunks is read through h5py instead: correct, just not parallel.
 Chunks of datasets in other files (external links: BigDataViewer's partitioned
 files) are read from those files.  A read h5py fails on raises
@@ -40,18 +40,22 @@ FILTER_DEFLATE, FILTER_SHUFFLE, FILTER_FLETCHER32 = 1, 2, 3
 FILTER_LZ4 = 32004                   # HDF Group registered filter; ImarisWriter writes it
 FILTER_ZSTD = 32015                  # registered zstd filter: one zstd frame per chunk
 FILTER_SCALEOFFSET = 6               # built into HDF5; BigDataViewer writes it (integers only here)
+FILTER_LZF = 32000                   # h5py's own filter; ilastik exports with it
 SUPPORTED_FILTERS = {FILTER_DEFLATE, FILTER_SHUFFLE, FILTER_FLETCHER32, FILTER_LZ4, FILTER_ZSTD,
-                     FILTER_SCALEOFFSET}
+                     FILTER_SCALEOFFSET, FILTER_LZF}
 #: HDF5 filters by number (errors name them)
 FILTER_NAMES = {1: "deflate", 2: "shuffle", 3: "Fletcher-32", 4: "szip", 6: "scaleoffset",
                 307: "bzip2", 32000: "LZF", 32001: "Blosc", 32004: "LZ4", 32008: "bitshuffle", 32013: "zfp", 32015: "zstd", 32017: "SZ",
                 32026: "Blosc2"}
 #: filters h5py applies itself (a failure with them is the data, not a missing plugin)
-H5PY_FILTERS = {FILTER_DEFLATE, FILTER_SHUFFLE, FILTER_FLETCHER32, 4, FILTER_SCALEOFFSET, 32000}
+H5PY_FILTERS = {FILTER_DEFLATE, FILTER_SHUFFLE, FILTER_FLETCHER32, 4, FILTER_SCALEOFFSET, FILTER_LZF}
 #: chunks at least this large are decoded here, in parallel; smaller ones through
 #: h5py (Layout.prefer_native)
 NATIVE_MIN_CHUNK = 32 << 10
 NATIVE_MIN_CHUNK_SCALEOFFSET = 1 << 20
+#: LZF: h5py's decoder is fast C too (measured 2026-10-19, uint16 chunks: 0.8-0.9x at
+#: 32-48 KiB, 1.1-1.2x at 64 KiB, 1.6-2x at 128 KiB, 3.4x at 512 KiB)
+NATIVE_MIN_CHUNK_LZF = 64 << 10
 #: a read needing fewer chunks than this share of a dataset's chunks looks them
 #: up one by one instead of mapping every chunk (measured 2026-10-18, a Luxendo
 #: file of 2048 chunks: the whole map 1.4 ms = 0.7 us a chunk, one lookup 3.7 us)
@@ -460,7 +464,8 @@ class Layout:
         self.parameters = [tuple(int(v) for v in f[2]) for f in pipeline]
         self.native = bool(self.chunks) and set(self.filters) <= SUPPORTED_FILTERS and all(
             _scaleoffset_native(p) for f, p in zip(self.filters, self.parameters)
-            if f == FILTER_SCALEOFFSET)
+            if f == FILTER_SCALEOFFSET) and (
+            FILTER_LZF not in self.filters or _codecs.lzf_available())   # else h5py's
         #: a contiguous (unchunked) dataset: the byte offset of its data, read
         #: directly; None: chunked, or not stored in the file (never written,
         #: or in an external raw file)
@@ -477,6 +482,7 @@ class Layout:
         #: path (measured 2026-10-17: deflate wins from 32 KiB chunks, up to 8x at
         #: 1 MiB; scaleoffset only from 1 MiB -- h5py's is fast C, ours numpy)
         threshold = (NATIVE_MIN_CHUNK_SCALEOFFSET if FILTER_SCALEOFFSET in self.filters
+                     else NATIVE_MIN_CHUNK_LZF if FILTER_LZF in self.filters
                      else NATIVE_MIN_CHUNK)
         self.prefer_native = self.native and (
             any(f not in H5PY_FILTERS for f in self.filters) or self.chunk_nbytes >= threshold)
@@ -629,6 +635,13 @@ class Layout:
                 data = out[:written]
             elif fid == FILTER_LZ4:
                 data = _lz4_unframe(data, where, self.stage_nbytes)
+            elif fid == FILTER_LZF:
+                out = np.empty(self.chunk_nbytes, np.uint8)
+                try:
+                    _codecs.lzf_decompress_into(data, out)
+                except CorruptFileError as exc:
+                    raise CorruptFileError(f"{where}: {exc}") from exc
+                data = out
             elif fid == FILTER_ZSTD:
                 out = np.empty(self.chunk_nbytes, np.uint8)
                 try:

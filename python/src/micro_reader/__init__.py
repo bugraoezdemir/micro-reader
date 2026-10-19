@@ -8,7 +8,8 @@ from ._base import INDEX_NAMES, PLATE_INDICES, SAMPLED_INDICES, File, Image, Rea
 from ._metadata import Channel, Metadata, Quantity
 from ._plate import Acquisition, Field, Plate, Well
 from ._errors import (CompanionWarning, CompositeWarning, CorruptFileError, MicroReaderError,
-                      MissingImagesWarning, PlateLayoutWarning, UnsupportedFormatError)
+                      MissingImagesWarning, PlateLayoutWarning, SkewedGridWarning,
+                      UnsupportedFormatError)
 from ._memory import MemoryLimitError, memory_limit, set_memory_limit
 from ._io import cache_limit, cached_bytes, set_cache_limit
 from ._pool import decode_threads, set_decode_threads
@@ -25,5 +26,5 @@ __all__ = [
     "cache_limit", "set_cache_limit", "cached_bytes",
     "MicroReaderError", "UnsupportedFormatError", "CorruptFileError", "MemoryLimitError", "DamagedFileWarning",
     "MissingImagesWarning", "CompanionWarning", "CompositeWarning", "PlateLayoutWarning",
-    "__version__",
+    "SkewedGridWarning", "__version__",
 ]

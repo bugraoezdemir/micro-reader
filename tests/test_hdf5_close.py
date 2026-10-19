@@ -27,6 +27,7 @@ def chunk_path(request, monkeypatch):
     if request.param == "native":
         monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK", 0)
         monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK_SCALEOFFSET", 0)
+        monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK_LZF", 0)
     return request.param
 
 

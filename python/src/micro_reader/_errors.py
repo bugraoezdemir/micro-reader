@@ -41,6 +41,14 @@ class CompanionWarning(UserWarning):
     (docs/COMPANION.md)."""
 
 
+class SkewedGridWarning(UserWarning):
+    """The file's sampling grid has axes that are not perpendicular (a
+    crystallographic unit cell with angles other than 90 degrees, e.g. an MRC
+    map).  The image is read as stored, with the true sampling distance along
+    each grid axis; an axis-aligned image (OME-Zarr before 0.6) cannot hold
+    the skew."""
+
+
 class PlateLayoutWarning(UserWarning):
     """A plate's wells lie outside the layout its file describes (e.g. a slide
     holder whose records address the wells of the slide in it); the layout

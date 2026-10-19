@@ -62,6 +62,59 @@ fn lz4_block_decompress_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Boun
     })
 }
 
+/// LZF (liblzf's format; h5py's HDF5 filter 32000) -> `out`; returns the bytes
+/// written.  An error when the data needs more room than `out` or is damaged.
+#[pyfunction]
+fn lzf_decompress_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyAny>) -> PyResult<usize> {
+    with_buffers(py, data, out, |input, output| lzf_decompress(input, output))
+}
+
+fn lzf_decompress(input: &[u8], output: &mut [u8]) -> Result<usize, String> {
+    let (mut i, mut o) = (0usize, 0usize);
+    while i < input.len() {
+        let ctrl = input[i] as usize;
+        i += 1;
+        if ctrl < 32 {                                    // ctrl + 1 literal bytes
+            let n = ctrl + 1;
+            if i + n > input.len() {
+                return Err("lzf: literal run past the end of the data".into());
+            }
+            if o + n > output.len() {
+                return Err("lzf: decodes to more bytes than expected".into());
+            }
+            output[o..o + n].copy_from_slice(&input[i..i + n]);
+            i += n;
+            o += n;
+        } else {                                          // a copy of earlier output
+            let mut n = ctrl >> 5;
+            if n == 7 {
+                n += *input.get(i).ok_or("lzf: truncated back reference")? as usize;
+                i += 1;
+            }
+            let low = *input.get(i).ok_or("lzf: truncated back reference")? as usize;
+            i += 1;
+            n += 2;
+            let distance = ((ctrl & 0x1f) << 8) + low + 1;
+            if distance > o {
+                return Err("lzf: back reference before the start".into());
+            }
+            if o + n > output.len() {
+                return Err("lzf: decodes to more bytes than expected".into());
+            }
+            let from = o - distance;
+            if distance >= n {
+                output.copy_within(from..from + n, o);
+            } else {                                      // overlapping: a repeating pattern
+                for k in 0..n {
+                    output[o + k] = output[from + k];
+                }
+            }
+            o += n;
+        }
+    }
+    Ok(o)
+}
+
 /// TIFF-style LZW (MSB first, 8-bit symbols, early code-size switch) -> `out`;
 /// returns the bytes written (the stream may end before `out` is full).
 #[pyfunction]
@@ -610,6 +663,7 @@ fn micro_reader_codecs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add_function(wrap_pyfunction!(zstd_decompress_into, m)?)?;
     m.add_function(wrap_pyfunction!(lz4_block_decompress_into, m)?)?;
+    m.add_function(wrap_pyfunction!(lzf_decompress_into, m)?)?;
     m.add_function(wrap_pyfunction!(lzw_decode_into, m)?)?;
     m.add_function(wrap_pyfunction!(jpeg_decode_into, m)?)?;
     m.add_function(wrap_pyfunction!(jxl_decode_into, m)?)?;
