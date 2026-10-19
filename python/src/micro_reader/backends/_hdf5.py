@@ -590,10 +590,15 @@ class Layout:
 
     def decode_nbytes(self, size: int) -> int:
         """Bytes decoding a chunk stored in *size* bytes holds at most: the
-        stored bytes, a stage's input and output, and scaleoffset's
-        temporaries (a fill mask; numpy's unpacking -- 8-byte values, or
-        without the native module -- works in uint64, ~40 bytes a value)."""
+        stored bytes, a stage's input and output, deflate's second copy without
+        the native module, and scaleoffset's temporaries (a fill mask; numpy's
+        unpacking -- 8-byte values, or without the native module -- works in
+        uint64, ~40 bytes a value)."""
         peak = size + 2 * self.stage_nbytes
+        if FILTER_DEFLATE in self.filters and not _codecs.native_available():
+            # the standard library's zlib builds its result from blocks it joins
+            # at the end: the decoded stage twice for a moment, besides the output
+            peak += self.stage_nbytes
         if FILTER_SCALEOFFSET in self.filters:
             n = self.chunk_nbytes // self.dtype.itemsize
             peak += n if self.dtype.itemsize <= 4 and _codecs.native_available() else 40 * n
