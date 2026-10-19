@@ -25,6 +25,7 @@ def chunk_path(request, monkeypatch):
     if request.param == "native":
         monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK", 0)
         monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK_SCALEOFFSET", 0)
+        monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK_LZF", 0)
     return request.param
 
 
@@ -312,7 +313,8 @@ def test_ilastik_lists_every_dataset_past_the_classify_cap(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("options", [
     {"scaleoffset": 0, "compression": "gzip"},
-    {"compression": "gzip", "shuffle": True, "fletcher32": True}], ids=["scaleoffset", "shuffle"])
+    {"compression": "gzip", "shuffle": True, "fletcher32": True},
+    {"compression": "lzf", "shuffle": True}], ids=["scaleoffset", "shuffle", "lzf"])
 @pytest.mark.parametrize("dtype", ["u2", "u8"])
 def test_reservation_covers_decoding(tmp_path, monkeypatch, options, dtype):
     """What a chunk's decoding allocates (tracemalloc's peak) stays within the
@@ -320,6 +322,7 @@ def test_reservation_covers_decoding(tmp_path, monkeypatch, options, dtype):
     scaleoffset's unpacking holds several uint64 arrays of the chunk."""
     monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK", 0)
     monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK_SCALEOFFSET", 0)
+    monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK_LZF", 0)
     data = np.random.default_rng(0).integers(0, 3000, (1, 256, 256)).astype(dtype)
     _ilastik(tmp_path / "f.h5", data, chunks=(1, 256, 256), **options)
     reserved = []

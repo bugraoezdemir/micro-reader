@@ -236,8 +236,11 @@ def _ome(image, n_channels: int, cache: dict):
             cache["annotations"] = ome_annotations(root)
         return cache["annotations"]
 
+    # Micro-Manager writes its Java ARGB colours into OME Color (RGBA by the
+    # schema): FITC #33FF33 is stored as -13369549, read as RGBA #FF33FF
     return ome_image_metadata(element, dict(zip(image.axes, image.shape)), n_channels,
-                              image.index, annotations)
+                              image.index, annotations,
+                              argb=bool(getattr(image._tif, "is_micromanager", False)))
 
 
 def ome_annotations(root) -> dict:
@@ -246,7 +249,8 @@ def ome_annotations(root) -> dict:
             if _local(e.tag) == "XMLAnnotation"}
 
 
-def ome_image_metadata(element, shape: dict, n_channels: int, index: dict, annotations):
+def ome_image_metadata(element, shape: dict, n_channels: int, index: dict, annotations,
+                       argb: bool = False):
     """The ``Metadata`` an OME ``Image`` element gives, or None without
     ``Pixels``: pixel sizes, time increment, channels, the first plane's stage
     position, Modulo index values.  Shared by OME-TIFF and companion files.
@@ -254,7 +258,8 @@ def ome_image_metadata(element, shape: dict, n_channels: int, index: dict, annot
     *shape*: axis -> size of the image it describes (positions are moved from
     the field's centre to the first pixel); *index*: that image's index;
     *annotations*: a callable giving {ID: XMLAnnotation element}, called only
-    when the image refers to an annotation."""
+    when the image refers to an annotation.  *argb*: Channel ``Color`` holds
+    Java ARGB ints (Micro-Manager's OME writer), not OME's RGBA."""
     pixels = _children(element, "Pixels")
     if not pixels:
         return None
@@ -271,7 +276,7 @@ def ome_image_metadata(element, shape: dict, n_channels: int, index: dict, annot
     for c in _children(p, "Channel"):
         channels.append(Channel(
             name=c.get("Name") or None,
-            color=_ome_color(c.get("Color")),
+            color=_ome_color(c.get("Color"), argb),
             emission_wavelength=quantity(c.get("EmissionWavelength"),
                                          c.get("EmissionWavelengthUnit") or OME_DEFAULT_WAVELENGTH),
             excitation_wavelength=quantity(c.get("ExcitationWavelength"),
@@ -339,15 +344,18 @@ def _ome_index_values(element, index: dict, annotations) -> dict:
     return out
 
 
-def _ome_color(value):
+def _ome_color(value, argb: bool = False):
     """OME Color: a signed 32-bit RGBA integer; opaque white (-1) is
-    Bio-Formats' and OME's default, i.e. no colour."""
+    Bio-Formats' and OME's default, i.e. no colour.  *argb*: a Java ARGB int
+    (Micro-Manager), whose -1 is an explicit white."""
     if value in (None, ""):
         return None
     try:
         number = int(value)
     except ValueError:
         return None
+    if argb:
+        return "#%06X" % (number & 0xFFFFFF)
     if number == -1:
         return None
     return color_hex(number)

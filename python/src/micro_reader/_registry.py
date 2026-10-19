@@ -9,8 +9,9 @@ from typing import Optional
 from ._base import SAMPLED_INDICES, File
 from . import _parts
 from ._errors import CorruptFileError, OpenInstead, UnsupportedFormatError
-from .backends import (bdv, companion, czi, cv7000, dv, harmony, hdf5, ilastik, ims, incell, lif,
-                       metamorph, metaxpress, mrc, nd2, oif, oir, omp2info, raster, tiff, vsi)
+from .backends import (bdv, companion, czi, cv7000, dv, harmony, hdf5, ics, ilastik, ims, incell,
+                       lif, metamorph, metaxpress, micromanager, mrc, nd2, ndpis, oif, oir,
+                       omp2info, raster, tiff, vsi)
 
 #: Tried in order: VSI before TIFF (a .vsi is a TIFF with a metadata tree);
 #: magic numbers before MRC, which may also match by
@@ -24,9 +25,14 @@ from .backends import (bdv, companion, czi, cv7000, dv, harmony, hdf5, ilastik, 
 #: ilastik, Luxendo / Fiji HDF5 (hdf5), then ims, which also refuses every other HDF5
 #: file with what it holds.  MetaMorph ``.nd`` sets by their ``"NDInfoFile"`` line;
 #: their TIFF / STK files are parts (``metamorph.owner``, asked after ``tiff.owner``
-#: in this order, docs/COMPOSITE.md rule 5).
+#: in this order, docs/COMPOSITE.md rule 5).  ICS headers by their ``ics_version`` line;
+#: ``.ids`` pixel files and Huygens Remote Manager's side files are their parts.  Hamamatsu
+#: ``.ndpis`` set files by their ``[NanoZoomer Digital Pathology Image Set]`` line.
+#: Micro-Manager image-per-file acquisitions by a ``metadata.txt`` starting with its
+#: ``"Summary"``; their plane TIFFs, other positions' ``metadata.txt`` and folders are
+#: parts (``micromanager.owner``, after ``tiff.owner``: MMStack names never collide).
 BACKENDS = [vsi, tiff, czi, bdv, ilastik, hdf5, ims, nd2, oir, omp2info, oif, lif, harmony,
-            metaxpress, metamorph, incell, cv7000, companion, raster, dv, mrc]
+            metaxpress, metamorph, micromanager, incell, cv7000, companion, ndpis, ics, raster, dv, mrc]
 
 #: Bytes read from the start of the file for sniffing.
 HEAD_BYTES = 1024

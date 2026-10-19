@@ -63,8 +63,8 @@ VARIANTS = {
     "time_channels":   {"compression": "gzip", "n_t": 3, "n_c": 4},
     "odd_chunks":      {"compression": "gzip", "chunks": (3, 7, 10)},
     "unwritten_chunks": {"compression": "gzip", "skip_chunks": True},
+    "lzf":             {"compression": "lzf"},
     # not handled natively: must fall back to h5py and still be right
-    "lzf_fallback":    {"compression": "lzf"},
     "contiguous_fallback": {"chunks": None},
 }
 

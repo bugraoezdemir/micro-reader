@@ -17,11 +17,12 @@ def axistags(keys: str) -> str:
 
 
 def write_ilastik(path, data: np.ndarray, keys: str, name="exported_data", chunks=None,
-                  compression=None, extra=None):
+                  compression=None, extra=None, shuffle=False):
     """One ilastik-style dataset (more with *extra*: {name: (data, keys)})."""
     with h5py.File(path, "w") as f:
         for n, (arr, k) in {name: (data, keys), **(extra or {})}.items():
-            ds = f.create_dataset(n, data=arr, chunks=chunks, compression=compression)
+            ds = f.create_dataset(n, data=arr, chunks=chunks, compression=compression,
+                                  shuffle=shuffle)
             ds.attrs["axistags"] = axistags(k)
     return data
 

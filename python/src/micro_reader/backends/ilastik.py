@@ -11,9 +11,15 @@ first::
 
 Each such dataset is one image (index ``scene``, in name order), with the
 dataset's own axis order (``zyxc``, ``tzyxc``, ``cyx``, ...: ``as_axes``
-gives another).  The ``resolution`` of an axis has no unit, so no pixel sizes
-are given (docs/METADATA.md: never guess).  An ilastik project (``.ilp``) is
-not an image and is refused by the ``ims`` backend's catch-all.
+gives another).  An ilastik project (``.ilp``) is not an image and is
+refused by the ``ims`` backend's catch-all.
+
+**Pixel sizes.**  The ``resolution`` of an axis is its pixel size; ilastik
+since 2025-09 ("Read and write pixel sizes with h5") writes the units next to
+the axistags, as a JSON attribute ``axis_units`` (``{"x": "µm", "t": "sec",
+"c": ""}``, as its input file spelled them).  An axis gets a pixel size when
+its resolution is positive and its unit is known; a resolution without a unit
+(older files, ``""``, ``"pixel"``) gives none (docs/METADATA.md: never guess).
 
 Pixels are read through ``_hdf5.ChunkReader``: chunks decoded in parallel,
 contiguous datasets read as runs of bytes.
@@ -22,11 +28,13 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 
 import numpy as np
 
 from .._base import File, Image
 from .._errors import CorruptFileError, UnsupportedFormatError
+from .._metadata import Metadata, quantity
 from . import _hdf5
 
 NAME = "ilastik"
@@ -58,14 +66,36 @@ def parse_axistags(text, ndim: int, where: str) -> str:
     return "".join(keys)
 
 
+def pixel_sizes(tags_text, units_text) -> dict:
+    """axis -> Quantity from an ``axistags`` attribute's resolutions and an
+    ``axis_units`` attribute (either may be missing or unreadable: then the
+    axes it would describe have no pixel size)."""
+    try:
+        units = json.loads(units_text) if units_text is not None else {}
+        resolutions = {str(a["key"]).lower(): a.get("resolution")
+                       for a in json.loads(tags_text)["axes"]}
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return {}
+    if not isinstance(units, dict):
+        return {}
+    sizes = {}
+    for axis in "xyzt":
+        q = quantity(resolutions.get(axis), units.get(axis) or None)
+        if q is not None:
+            sizes[axis] = q
+    return sizes
+
+
 class _IlastikImage(Image):
     """One dataset, in its own axis order."""
 
     def __init__(self, position: int, path: str, name: str, ds, reader: _hdf5.ChunkReader):
         where = f"{os.path.basename(path)}:{name}"
-        axes = parse_axistags(_hdf5.attr_text(ds.attrs, "axistags"), ds.ndim, where)
+        tags = _hdf5.attr_text(ds.attrs, "axistags")
+        axes = parse_axistags(tags, ds.ndim, where)
         if ds.dtype.kind not in "biuf":
             raise UnsupportedFormatError(f"{where}: pixel type {ds.dtype} is not an image type")
+        self._sizes = pixel_sizes(tags, _hdf5.attr_text(ds.attrs, "axis_units"))
         self._ds = ds
         self._key = name
         self._reader = reader
@@ -73,6 +103,10 @@ class _IlastikImage(Image):
         super().__init__(position, axes, ds.shape, ds.dtype,
                          name=name if name != "exported_data" else os.path.basename(path),
                          read_unit=ds.chunks, index={"scene": position})
+
+    def _read_metadata(self):
+        n = self.shape[self.axes.index("c")] if "c" in self.axes else 1
+        return replace(Metadata.unknown(n), pixel_sizes=self._sizes)
 
     def _read_block(self, block):
         if self._closed:

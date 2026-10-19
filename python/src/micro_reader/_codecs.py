@@ -122,6 +122,35 @@ def lz4_block_decompress_into(data, out: np.ndarray, *, native: bool | None = No
         raise CorruptFileError(f"LZ4 data decodes to {written} bytes, expected {out.nbytes}")
 
 
+def lzf_available() -> bool:
+    """Whether LZF can be decoded here: the native module, or imagecodecs."""
+    if _use_native(None, "lzf_decompress_into"):
+        return True
+    try:
+        import imagecodecs
+    except ImportError:
+        return False
+    return bool(getattr(getattr(imagecodecs, "LZF", None), "available", False))
+
+
+def lzf_decompress_into(data, out: np.ndarray, *, native: bool | None = None) -> None:
+    """LZF data (liblzf's format, no header; h5py's HDF5 filter 32000) -> *out*,
+    exactly its size."""
+    if _use_native(native, "lzf_decompress_into"):
+        try:
+            written = _native.lzf_decompress_into(data, memoryview(out).cast("B"))
+        except ValueError as exc:
+            raise CorruptFileError(f"corrupt LZF data: {exc}") from exc
+    else:
+        codecs = _imagecodecs("LZF data")
+        try:                                            # straight into *out*: no copies
+            written = len(codecs.lzf_decode(data, header=False, out=out.reshape(-1).view(np.uint8)))
+        except Exception as exc:                        # noqa: BLE001
+            raise CorruptFileError(f"corrupt LZF data: {exc}") from exc
+    if written != out.nbytes:
+        raise CorruptFileError(f"LZF data decodes to {written} bytes, expected {out.nbytes}")
+
+
 def _check_written(written: int, out: np.ndarray, what: str, partial: bool) -> int:
     if written > out.nbytes or (written < out.nbytes and not partial):
         raise CorruptFileError(f"{what} data decodes to {written} bytes, expected {out.nbytes}")

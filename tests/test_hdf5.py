@@ -23,6 +23,7 @@ def chunk_path(request, monkeypatch):
     if request.param == "native":
         monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK", 0)
         monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK_SCALEOFFSET", 0)
+        monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK_LZF", 0)
     return request.param
 
 
@@ -49,12 +50,16 @@ def _keys(shape, n=20, seed=1):
 
 # -- ilastik --------------------------------------------------------------------
 
-@pytest.mark.parametrize("layout", ["contiguous", "chunked", "gzip"])
+@pytest.mark.parametrize("layout", ["contiguous", "chunked", "gzip", "lzf", "lzf_shuffle"])
 def test_ilastik_matches_h5py(tmp_path, layout, decode_threads, chunk_path):
     data = np.random.default_rng(0).integers(0, 60000, (3, 7, 33, 41, 2)).astype(np.uint16)
+    data[1] = 7                                     # runs: LZF back references
     path = tmp_path / "export.h5"
     opts = {"contiguous": {}, "chunked": {"chunks": (1, 4, 16, 16, 2)},
-            "gzip": {"chunks": (1, 4, 16, 16, 2), "compression": "gzip"}}[layout]
+            "gzip": {"chunks": (1, 4, 16, 16, 2), "compression": "gzip"},
+            "lzf": {"chunks": (1, 4, 16, 16, 2), "compression": "lzf"},     # as ilastik exports
+            "lzf_shuffle": {"chunks": (1, 4, 16, 16, 2), "compression": "lzf",
+                            "shuffle": True}}[layout]
     write_ilastik(path, data, "tzyxc", **opts)
     with micro_reader.open(path) as f:
         assert (f.backend, f.format) == ("ilastik", "ilastik")
@@ -103,6 +108,50 @@ def test_ilastik_several_datasets_are_scenes(tmp_path):
         assert f.images[1].as_axes("canonical").shape == (1, 3, 1, 20, 30)
         assert len(f.images[0].metadata.channels) == 2
         assert f.images[0].metadata.pixel_sizes == {}               # resolution has no unit
+
+
+def _ilastik_with_units(path, keys, resolutions, units):
+    """As ilastik >= 2025-09 writes an export (OpH5N5WriterBigDataset): vigra
+    axistags with resolutions, and ``axis_units`` as json.dumps of a dict."""
+    import json
+    data = np.zeros((2,) * len(keys), np.uint8)
+    tags = {"axes": [{"key": k, "typeFlags": {"t": 8, "c": 1}.get(k, 2), "resolution": r,
+                      "description": ""} for k, r in zip(keys, resolutions)]}
+    with h5py.File(path, "w") as f:
+        ds = f.create_group("volume").create_dataset("data", data=data)
+        ds.attrs["axistags"] = json.dumps(tags)
+        if units is not None:
+            ds.attrs["axis_units"] = json.dumps(units if isinstance(units, dict)
+                                                else dict(zip(keys, units)))
+
+
+@pytest.mark.parametrize("keys, resolutions, units, expected", [
+    # ilastik's own test cases (test_pixel_sizes.py), µ in both spellings, json-escaped
+    ("tzcyx", [120, 0.54321, 0.0, 6.000024000096, 13], ["s", "µm", "", "mm", "µm"],
+     {"t": (120, "second"), "z": (0.54321, "micrometer"), "y": (6.000024000096, "millimeter"),
+      "x": (13, "micrometer")}),
+    ("zyx", [0.5, 0.2, 0.2], ["μm", "nm", "cm"],
+     {"z": (0.5, "micrometer"), "y": (0.2, "nanometer"), "x": (2000.0, "micrometer")}),
+    ("tyx", [3, 1, 1], ["min", "micron", "microns"],
+     {"t": (3, "minute"), "y": (1, "micrometer"), "x": (1, "micrometer")}),
+    # no unit, "pixel", an unknown unit, a zero resolution: no pixel size
+    ("zyx", [2.0, 0.3, 0.3], ["pixel", "", "mistake"], {}),
+    ("yx", [0.0, 0.0], ["µm", "µm"], {}),
+    ("cyx", [0.0, 0.25, 0.25], None, {}),                        # before 2025-09: no units
+    ("yx", [0.25, 0.25], "not json", {}),
+])
+def test_ilastik_pixel_sizes_from_axis_units(tmp_path, keys, resolutions, units, expected):
+    path = tmp_path / "export.h5"
+    _ilastik_with_units(path, keys, resolutions, units)
+    if units == "not json":
+        with h5py.File(path, "a") as f:
+            f["volume/data"].attrs["axis_units"] = "{x: um"
+    with micro_reader.open(path) as f:
+        sizes = f.images[0].metadata.pixel_sizes
+        got = {a: (pytest.approx(q.value), q.unit) for a, q in sizes.items()}
+        assert got == expected
+        if "c" in keys:
+            assert len(f.images[0].metadata.channels) == 2
 
 
 def test_ilastik_bad_axistags(tmp_path):

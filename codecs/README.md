@@ -24,6 +24,7 @@ It has no Python dependencies.
 | --------------------------- | ----------------------------------------- | ------------------------------------- |
 | `zstd_decompress_into`      | zstd                                      | `zstd` (libzstd)                      |
 | `lz4_block_decompress_into` | LZ4 block                                 | `lz4_flex`                            |
+| `lzf_decompress_into`       | LZF (h5py's HDF5 filter)                  | own                                   |
 | `lzw_decode_into`           | LZW, TIFF variant                         | `weezl`                               |
 | `zlib_decompress_into`      | zlib / deflate                            | `libdeflater` (libdeflate)            |
 | `packbits_decode_into`      | PackBits                                  | own                                   |
