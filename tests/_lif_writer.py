@@ -27,16 +27,17 @@ def _dim(dim_id, n, inc, unit="m", length=1e-4):
 
 
 def image(name, data, axes="tczyx", *, resolution=None, data_type=None, rgb=False,
-          tags=None, order=DEFAULT_ORDER, row_pad=0, tiles=None, children=()):
+          tags=None, order=DEFAULT_ORDER, row_pad=0, tiles=None, lengths=None, children=()):
     """One image element.  *data* has *axes* (a subset of t c z l m y x, plus
     s for interleaved colour, samples in R, G, B order); it is stored with
     *order* (fastest first), rows padded by *row_pad* bytes.  *rgb*: store
     the samples B, G, R interleaved in each pixel, tagged 3, 2, 1 (as LAS
     files store colour); *tags* overrides the ChannelTags.  *tiles*:
-    [(FieldX, FieldY, PosX, PosY)] for the TileScanInfo attachment."""
+    [(FieldX, FieldY, PosX, PosY)] for the TileScanInfo attachment.
+    *lengths*: {axis: Length in m} instead of the default 1e-4."""
     return dict(name=name, data=np.asarray(data), axes=axes, resolution=resolution,
                 data_type=data_type, rgb=rgb, tags=tags, order=order, row_pad=row_pad,
-                tiles=tiles, children=list(children))
+                tiles=tiles, lengths=lengths or {}, children=list(children))
 
 
 def folder(name, children=()):
@@ -102,7 +103,8 @@ def _layout(img):
         f'<ChannelDescription DataType="{data_type}" ChannelTag="{tag}" Resolution="{resolution}" '
         f'NameOfMeasuredQuantity="" Min="0" Max="0" Unit="" LUTName="Gray" IsLUTInverted="0" '
         f'BytesInc="{inc}" BitInc="0"/>' for tag, inc in channels)
-    dims_xml = "".join(_dim(DIM_IDS[a], sizes[a], strides[a], unit="s" if a == "t" else "m")
+    dims_xml = "".join(_dim(DIM_IDS[a], sizes[a], strides[a], unit="s" if a == "t" else "m",
+                            length=img.get("lengths", {}).get(a, 1e-4))
                        for a in "xyztlm" if a in "xy" or sizes[a] > 1)
     tiles_xml = ""
     if img["tiles"]:

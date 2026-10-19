@@ -157,7 +157,7 @@ def test_tiles_are_images_with_positions(tmp_path):
         # the replacement: each tile's position, along the image's axes (um)
         assert [round(s.metadata.position["x"].value) for s in img.images] == [0, 100, 200]
     with pytest.raises(UnsupportedFormatError, match="does not compose Leica tiles"):
-        micro_reader.open(path, tiles="stitched")
+        micro_reader.open(path, tiles="mosaic")
 
 
 def test_untiled_images_of_a_tiled_file_get_tile_0(tmp_path):
@@ -271,3 +271,17 @@ def test_concurrent_reads(tmp_path, decode_threads):
         for th in threads:
             th.join()
     assert not errors
+
+
+def test_one_metre_per_pixel_is_index_space(tmp_path):
+    """LAS stores FLIM phasor plots with Length = N - 1 m (1 m per pixel):
+    no pixel size, while the image beside it keeps its own."""
+    plot = np.ones((30, 51), np.float32)
+    path = str(tmp_path / "flim.lif")
+    write_lif(path, [image("Fast Flim", np.ones((8, 10), np.float16), "yx"),
+                     image("Phasor Plot", plot, "yx", lengths={"x": 50, "y": 29})])
+    with micro_reader.open(path) as f:
+        fast, phasor = f.images
+        assert set(fast.metadata.pixel_sizes) == {"x", "y"}
+        assert phasor.metadata.pixel_sizes == {}
+        np.testing.assert_array_equal(phasor[...].reshape(plot.shape), plot)

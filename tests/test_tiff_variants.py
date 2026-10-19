@@ -149,7 +149,9 @@ def test_scn_series_metadata(tmp_path):
             tw.write(plane, metadata=None, tile=(16, 16))
     with micro_reader.open(path) as f:
         assert f.format == "scn"
-        assert [im.name for im in f.images] == ["overview", "tissue"]
+        # the image whose view spans the whole slide is the macro (its SCN name says nothing)
+        assert [im.name for im in f.images] == ["macro", "tissue"]
+        assert f.images[0].metadata.pixel_sizes["x"] == Quantity(25000.0, "nanometer")
         np.testing.assert_array_equal(f.images[1][...], tissue)
         np.testing.assert_array_equal(f.images[1].resolutions[1][...], small)
         meta = f.images[1].metadata

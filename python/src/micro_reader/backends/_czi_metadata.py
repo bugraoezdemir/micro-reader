@@ -229,5 +229,10 @@ def czi_metadata(image, fh, root) -> Metadata:
         y1 = max(e.y + e.height for e in tiles)
         whole = replace(first, x=x0, y=y0, width=x1 - x0, height=y1 - y0)
         position = first_pixel_position(image, scene_position(root, first.scene), whole, sizes)
-    return Metadata(pixel_sizes=sizes, position=position,
-                    channels=channels(root, image._czi._dim_starts.get("C", 0), n_c))
+    ids = getattr(image, "_channel_ids", None)           # a part: the file's channels it holds
+    if ids is not None:
+        every = channels(root, 0, max(ids) + 1)
+        chosen = tuple(every[k] for k in ids)
+    else:
+        chosen = channels(root, image._czi._dim_starts.get("C", 0), n_c)
+    return Metadata(pixel_sizes=sizes, position=position, channels=chosen)

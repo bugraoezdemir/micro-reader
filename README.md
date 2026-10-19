@@ -570,13 +570,15 @@ An OME companion file (`.companion.ome`) describes images stored in separate TIF
 f = micro_reader.open("data.companion.ome")
 ```
 
-Opening one of the TIFF files on its own reads only that file, with its pixel sizes, channels and position taken from the companion. If the companion is missing, the file is read without pixel sizes, with a `CompanionWarning`. A TIFF whose metadata lives in another OME-TIFF (instead of a `.companion.ome`) takes it from that file in the same way.
-
-Some OME-TIFF sets keep the full OME-XML in their TIFF files instead of a companion. Opening one of those files reads the whole set. To read only the planes stored in that file, with the set's metadata:
+Opening one of the TIFF files of the set also reads the whole set, as if the companion had been opened: `f.path` is then the companion, and the companion's metadata is used. To read only that file, with its pixel sizes, channels and position taken from the companion:
 
 ```python
-f = micro_reader.open("set_t001.ome.tif", multifile=False)
+f = micro_reader.open("data_t001.ome.tif", multifile=False)
 ```
+
+If the companion is missing or does not list the file, opening the whole set raises an error that names `multifile=False`. With `multifile=False` the file is then read without pixel sizes, with a `CompanionWarning`. A TIFF whose metadata lives in another OME-TIFF (instead of a `.companion.ome`) works the same way, with that OME-TIFF in the companion's place.
+
+Some OME-TIFF sets keep the full OME-XML in their TIFF files instead of a companion. Opening one of those files also reads the whole set, and `multifile=False` reads only the planes stored in that file, with the set's metadata.
 
 Micro-Manager stacks always open whole, also with `multifile=False`: they split their files by size, so one file does not hold a complete part of the image.
 

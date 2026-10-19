@@ -347,6 +347,12 @@ class File:
         out.discard(self.path)
         return out
 
+    def _side_files(self) -> set:
+        """Files that belong to this file set without being read as its images
+        (CellVoyager correction images) -- for ``group_files``, which lists them
+        among the set's parts.  They still open alone.  Empty by default."""
+        return set()
+
     def check_members(self) -> int:
         """For a file set (a plate, an OME companion set): open every member
         file once and check that it is the plane its index describes (size,
@@ -374,8 +380,28 @@ class File:
                                    f"not fit the index: {shown}")
         return checked
 
+    def _every_image(self) -> list:
+        """Every image this file gave out, each once: ``images``, their
+        resolution levels and the parts of ragged / mixed-type images (also
+        the levels ``resolutions="base"`` leaves out of ``images``).  An
+        axes image (``open(axes=...)``) counts as the native image it shows."""
+        out, seen = [], set()
+        todo = [getattr(image, "source", image) for image in reversed(self.images)]
+        while todo:
+            image = todo.pop()
+            if id(image) in seen:
+                continue
+            seen.add(id(image))
+            out.append(image)
+            todo.extend(reversed([m for m in image.resolutions + image.parts
+                                  if id(m) not in seen]))
+        return out
+
     def close(self) -> None:
-        for image in self.images:
+        """Close every image the file gave out (``_every_image``): reading
+        any of them afterwards -- a resolution level or a part too -- raises
+        ``ValueError``."""
+        for image in self._every_image():
             image.close()
 
     def __enter__(self) -> "File":

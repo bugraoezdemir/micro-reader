@@ -490,9 +490,9 @@ class _LifFile(File):
             # indices: those some image of the file has more than one of
             levels = [level for level in OTHER_INDICES
                       if any(lay.size.get(level, 1) > 1 for lay in layouts)]
-            if tiles == "stitched" and "tile" in levels:
+            if tiles == "mosaic" and "tile" in levels:
                 raise UnsupportedFormatError(
-                    f"{path!r}: tiles='stitched': micro-reader does not compose Leica tiles "
+                    f"{path!r}: tiles='mosaic': micro-reader does not compose Leica tiles "
                     "(each tile is its own image; image.metadata.position gives its place)")
             images = []
             for n, ((name, element, block, _), layout) in enumerate(zip(entries, layouts)):

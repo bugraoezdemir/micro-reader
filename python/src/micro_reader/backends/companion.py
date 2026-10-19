@@ -547,63 +547,101 @@ def _has_channel_info(channel) -> bool:
                                        channel.excitation_wavelength))
 
 
-def member_view(path: str, tif):
-    """CO-2 (docs/COMPANION.md): the images of TIFF *path* (opened as *tif*)
-    with their metadata from the companion its ``BinaryOnly`` stub points to.
+class _NotFollowed(Exception):
+    """A ``BinaryOnly`` stub's metadata file that cannot be used: *why*, and
+    the file as the stub writes it (*written*)."""
+
+    def __init__(self, why: str, written: str):
+        super().__init__(why)
+        self.why, self.written = why, written
+
+
+def _follow(path: str, tif):
+    """The metadata file TIFF *path*'s ``BinaryOnly`` stub points to, checked:
+    (where, parsed core, the file's key in it); None when the file is not a
+    stub.  ``_NotFollowed`` when the metadata file is missing, unreadable, does
+    not list the file, describes another set or another size / type.
 
     - The stub's ``MetadataFile`` is followed as written, relative to the file;
       an absolute path that does not exist falls back to its name in the
-      file's folder.
-    - The file is found in the companion by its UUID, else by its path; it is
-      recognised when either check passes (its UUID is the companion's entry,
-      or its stub points to this companion's UUID), and its pages must fit
-      their entries (size, type, one sample).
-    - Its planes must form one block of a companion image; it opens as that
-      block, axes ``t c z y x`` without the size-1 axes the companion says
-      nothing about (no z / t size, no channel information).
-
-    None when the file is not a stub (it opens as it is); None with a loud
-    CompanionWarning when the companion is missing, unreadable, or does not
-    recognise it (it opens with default pixel sizes). When it returns the
-    images, it has taken over *tif* (kept as the member, or closed)."""
+      file's folder (with a CompanionWarning).
+    - The file is found in the metadata file by its UUID, else by its path; it
+      is recognised when either check passes (its UUID is the entry's, or its
+      stub points to this metadata file's UUID), and its pages must fit their
+      entries (size, type, one sample)."""
     found = _stub(tif)
     if found is None:
         return None
     own, written, points_to = found
     folder = os.path.dirname(os.path.abspath(path))
-
-    def refuse(why):
-        warnings.warn(CompanionWarning(
-            f"{path!r} keeps its metadata in the companion {written!r}, which {why}: it opens "
-            f"with default pixel sizes. Open the companion file to read the whole set."),
-            stacklevel=4)
-
     where = os.path.normpath(written if os.path.isabs(written) else os.path.join(folder, written))
     if os.path.isabs(written) and not os.path.isfile(where):
         here = os.path.join(folder, os.path.basename(written.replace("\\", "/")))
         if os.path.isfile(here):
             warnings.warn(CompanionWarning(
                 f"{path!r}: its companion {written!r} does not exist; {here!r} is used"),
-                stacklevel=3)
+                stacklevel=4)
             where = here
     if not os.path.isfile(where):
-        return refuse(f"is not there ({where!r})")
+        raise _NotFollowed(f"is not there ({where!r})", written)
     try:
         core = load(where)
     except (CorruptFileError, UnsupportedFormatError) as exc:
-        return refuse(f"cannot be read ({exc})")
+        raise _NotFollowed(f"cannot be read ({exc})", written) from None
     key = core.by_uuid.get(own) if own else None
     if key is None:
         key = core.by_path.get(os.path.normcase(os.path.abspath(path)))
     if key is None:
-        return refuse("does not list it")
+        raise _NotFollowed("does not list it", written)
     listed = core.member_uuid.get(key)
     checks = [None if not (a and b) else a == b for a, b in ((own, listed), (points_to, core.uuid))]
     if False in checks and True not in checks:
-        return refuse("describes another set (its UUIDs do not match)")
+        raise _NotFollowed("describes another set (its UUIDs do not match)", written)
     misfit = _misfit(tif, core, key)
     if misfit:
-        return refuse(misfit)
+        raise _NotFollowed(misfit, written)
+    return where, core, key
+
+
+def metadata_file_of(path: str, tif):
+    """``open(..., multifile=True)`` (the default) on a member of a set: the
+    metadata file its ``BinaryOnly`` stub points to, checked as ``_follow``
+    does -- the set opens as if that file were opened (docs/COMPANION.md,
+    "multifile chooses between CO-1 and CO-2").  None when the file is not a
+    stub.  A metadata file that cannot be followed is an error: the set cannot
+    be opened, and ``multifile=False`` opens the file alone."""
+    try:
+        followed = _follow(path, tif)
+    except _NotFollowed as exc:
+        raise CorruptFileError(
+            f"{path!r} keeps its metadata in {exc.written!r}, which {exc.why}: the set it "
+            f"belongs to cannot be opened. multifile=False opens this file alone.") from None
+    return None if followed is None else followed[0]
+
+
+def member_view(path: str, tif):
+    """CO-2, ``open(..., multifile=False)`` (docs/COMPANION.md): the images of
+    TIFF *path* (opened as *tif*) with their metadata from the metadata file
+    its ``BinaryOnly`` stub points to (``_follow``).  Its planes must form one
+    block of an image there; it opens as that block, axes ``t c z y x``
+    without the size-1 axes the metadata says nothing about (no z / t size,
+    no channel information).
+
+    None when the file is not a stub (it opens as it is); None with a loud
+    CompanionWarning when the metadata file cannot be followed (it opens with
+    default pixel sizes). When it returns the images, it has taken over *tif*
+    (kept as the member, or closed)."""
+    try:
+        followed = _follow(path, tif)
+    except _NotFollowed as exc:
+        warnings.warn(CompanionWarning(
+            f"{path!r} keeps its metadata in the companion {exc.written!r}, which {exc.why}: it "
+            f"opens with default pixel sizes. Open the companion file to read the whole set."),
+            stacklevel=3)
+        return None
+    if followed is None:
+        return None
+    where, core, key = followed
     return _member_file(path, tif, core, key, where)
 
 

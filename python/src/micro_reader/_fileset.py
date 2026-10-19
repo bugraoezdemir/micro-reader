@@ -161,8 +161,13 @@ class PlaneImage(Image):
         self._members = members
         self._planes = planes
         self._readable = readable
+        self._closed = False
 
     def _read_block(self, block):
+        if self._closed:
+            # its members would reopen on acquire: a closed file set stays closed
+            raise ValueError(f"{self.name!r} has been closed: its file was closed "
+                             "(File.close() or the end of a with block)")
         if not self._readable:
             raise UnsupportedFormatError(
                 f"{self.name!r} is ragged and its parts do not share a z grid: read its "
@@ -274,7 +279,7 @@ class PlaneImage(Image):
         return 1
 
     def close(self) -> None:
-        pass                                    # the file closes the members
+        self._closed = True                     # the file closes the members
 
 
 def keep_fields(fields: dict, wanted, path: str) -> dict:

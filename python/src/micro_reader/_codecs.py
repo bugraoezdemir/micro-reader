@@ -132,7 +132,12 @@ def _fill_partial(out: np.ndarray, raw, what: str, partial: bool) -> int:
     """A reference decoder's bytes -> *out*.  With *partial*, a shorter
     result fills the start of *out* (TIFF readers accept short segments)
     and a longer one is cut; returns the bytes written."""
-    raw = memoryview(bytes(raw)).cast("B")
+    try:
+        # the decoder's own buffer, not a copy of it: a copy is one more decoded
+        # block alive at once, beyond the memory the caller reserved
+        raw = memoryview(raw).cast("B")
+    except (TypeError, ValueError):                    # not a contiguous buffer
+        raw = memoryview(bytes(raw)).cast("B")
     view = memoryview(out).cast("B")
     if not partial:
         _check_written(len(raw), out, what, partial)
@@ -171,7 +176,10 @@ def zlib_decompress_into(data, out: np.ndarray, *, partial: bool = False,
         return _check_written(written, out, "deflate", partial)
     import zlib
     try:
-        raw = zlib.decompress(bytes(data))
+        # at most one byte more than *out* holds: a stream claiming more (damaged
+        # data) is caught without inflating all of it into memory
+        # zlib reads any bytes-like input in place: no copy of the stored bytes
+        raw = zlib.decompressobj().decompress(data, out.nbytes + 1)
     except zlib.error as exc:
         raise CorruptFileError(f"corrupt deflate data: {exc}") from exc
     return _fill_partial(out, raw, "deflate", partial)

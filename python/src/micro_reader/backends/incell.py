@@ -31,7 +31,7 @@ from .._errors import CorruptFileError
 from .._fileset import (Members, PlaneImage, check_times, keep_fields, ragged_field,
                         z_parts)
 from .._metadata import Channel, Metadata, quantity
-from .._plate import Plate, Well, row_label
+from .._plate import Plate, Well, layout, row_label
 
 NAME = "incell"
 #: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
@@ -141,8 +141,8 @@ class _InCellFile(File):
             images.append(ragged_field(
                 make, kept[(r, c, f)], focus[(r, c, f)], times, parts,
                 {"plate": 0, "acquisition": 0, "well": number[(r, c)], "field": f}))
-        plate = Plate(name=base, rows=tuple(row_label(r) for r in range(rows)),
-                      columns=tuple(str(c + 1) for c in range(columns)),
+        row_names, column_names = layout(rows, columns, wells_rc, path)
+        plate = Plate(name=base, rows=row_names, columns=column_names,
                       wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))
         super().__init__(path, images, plates=[plate])
 

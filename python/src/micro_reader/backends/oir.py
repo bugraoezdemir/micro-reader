@@ -117,20 +117,34 @@ CONTINUATION = re.compile(r"^(?P<stem>.+)_(?P<n>\d{5})$")
 
 def may_own(folder: str, name: str, folders) -> bool:
     """``group_files``' cheap test (reads nothing): ``<stem>_NNNNN`` may be a
-    continuation."""
-    return CONTINUATION.match(name) is not None
+    continuation, ``<stem>.hdf5`` beside ``<stem>.oir`` a map's pixels."""
+    if CONTINUATION.match(name) is not None:
+        return True
+    stem, ext = os.path.splitext(name)
+    return ext.lower() == ".hdf5" and (stem + ".oir").lower() in folders.names(folder)
+
+
+#: the HDF5 signature
+HDF5_MAGIC = b"\x89HDF\r\n\x1a\n"
 
 
 def owner(path: str, head):
-    """A continuation file opens its main file ``<stem>.oir``
-    (docs/COMPOSITE.md); it is no image on its own."""
-    if head is None or head[:16] != MAGIC:
+    """A continuation file opens its main file ``<stem>.oir``; so does the
+    ``<stem>.hdf5`` beside it, the pixels of a FluoView overview map
+    (docs/COMPOSITE.md, "metadata + pixels"). Neither is an image on its own."""
+    if head is None:
         return None
-    match = CONTINUATION.match(os.path.basename(path))
+    folder, base = os.path.dirname(path), os.path.basename(path)
+    stem, ext = os.path.splitext(base)
+    if head[:8] == HDF5_MAGIC and ext.lower() == ".hdf5":
+        main = _parts.find(folder, stem + ".oir")
+        return _parts.Part(main, main) if main is not None else None
+    if head[:16] != MAGIC:
+        return None
+    match = CONTINUATION.match(base)
     if match is None:
         return None
     name = match.group("stem") + ".oir"
-    folder = os.path.dirname(path)
     return _parts.Part(_parts.find(folder, name), os.path.join(folder, name))
 
 
@@ -231,6 +245,14 @@ class _OirImage(Image):
     def __init__(self, path: str):
         pairs, frames, lsm, self._luts = _scan(path, 0)
         if not frames or not pairs:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            pixels = _parts.find(os.path.dirname(path), stem + ".hdf5")
+            if not pairs and pixels is not None:
+                # a FluoView overview map: this file its metadata, the .hdf5 its pyramid
+                # (datasets named by this file's channel ids; docs/COMPOSITE.md)
+                raise UnsupportedFormatError(
+                    f"{path!r}: a FluoView overview map, its pixels in "
+                    f"{os.path.basename(pixels)!r}: not read yet")
             raise UnsupportedFormatError(f"{path!r}: OIR file without image data")
         # continuation files: <name>_00001, <name>_00002, ... (no extension)
         self._paths = [path]

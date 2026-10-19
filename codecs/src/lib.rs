@@ -278,39 +278,132 @@ fn webp_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyA
     })
 }
 
-/// The components of a decoded JPEG 2000 *image*, interleaved into *output*;
-/// (width, height, components, bits, signed).
-fn j2k_write(image: &jpeg2k::Image, output: &mut [u8]) -> Result<(usize, usize, usize, usize, bool), String> {
+/// OpenJPEG's sYCC -> RGB of one pixel (color.c `sycc_to_rgb`, which
+/// imagecodecs uses): the arithmetic in double precision, truncated to int,
+/// clamped to 0 ..= upb.
+fn sycc_to_rgb(offset: i32, upb: i32, y: i32, cb: i32, cr: i32) -> [i32; 3] {
+    let (cb, cr) = ((cb - offset) as f32 as f64, (cr - offset) as f32 as f64);
+    let r = y + (1.402 * cr) as i32;
+    let g = y - (0.344 * cb + 0.714 * cr) as i32;
+    let b = y + (1.772 * cb) as i32;
+    [r.clamp(0, upb), g.clamp(0, upb), b.clamp(0, upb)]
+}
+
+/// The three components of an sYCC image -> full-resolution R, G, B, chroma
+/// upsampled as OpenJPEG does it (color.c `sycc444/422/420_to_rgb`): pixel
+/// (row, col) takes the chroma sample (row / dy, col / dx); when the image
+/// origin (x0, y0) is odd, the first column / row has no chroma sample and
+/// uses Cb = Cr = 0, as OpenJPEG does.  None when the layout is not one of
+/// 4:4:4, 4:2:2 or 4:2:0.
+fn sycc_planes(comps: &[jpeg2k::ImageComponent], x0: usize, y0: usize)
+    -> Option<Result<[Vec<i32>; 3], String>> {
+    let (w, h) = (comps[0].width() as usize, comps[0].height() as usize);
+    let (cw, ch) = (comps[1].width() as usize, comps[1].height() as usize);
+    if (comps[2].width() as usize, comps[2].height() as usize) != (cw, ch) || cw == 0 || ch == 0 {
+        return None;
+    }
+    let factor = |full: usize, part: usize| if part == full { Some(1) }
+                                            else if part < full && 2 * part >= full { Some(2) }
+                                            else { None };
+    let (dx, dy) = (factor(w, cw)?, factor(h, ch)?);
+    if dx == 1 && dy == 2 {
+        return None;                                   // 4:4:0: OpenJPEG leaves it as it is
+    }
+    let bits = comps[0].precision();
+    if bits == 0 || bits > 16 || comps.iter().any(|c| c.precision() != bits || c.is_signed()) {
+        return None;
+    }
+    let (offset, upb) = (1i32 << (bits - 1), (1i32 << bits) - 1);
+    let offx = if dx == 2 { x0 & 1 } else { 0 };
+    let offy = if dy == 2 { y0 & 1 } else { 0 };
+    let (luma, cb, cr) = (comps[0].data(), comps[1].data(), comps[2].data());
+    let mut out = [vec![0i32; w * h], vec![0i32; w * h], vec![0i32; w * h]];
+    for row in 0..h {
+        for col in 0..w {
+            let at = row * w + col;
+            let (b, r) = if (offx == 1 && col == 0) || (offy == 1 && row == 0) {
+                (0, 0)
+            } else {
+                let k = ((row - offy) / dy) * cw + (col - offx) / dx;
+                match (cb.get(k), cr.get(k)) {
+                    (Some(&b), Some(&r)) => (b, r),
+                    _ => return Some(Err("jpeg 2000: chroma smaller than its luma".into())),
+                }
+            };
+            let rgb = sycc_to_rgb(offset, upb, luma[at], b, r);
+            out[0][at] = rgb[0];
+            out[1][at] = rgb[1];
+            out[2][at] = rgb[2];
+        }
+    }
+    Some(Ok(out))
+}
+
+/// The components of a decoded JPEG 2000 *image*, interleaved into *output*,
+/// leaving out its first *skip* = (columns, rows); (width, height, components,
+/// bits, signed) of what is written.  Three components in sYCC -- a JP2 that
+/// says so, or (as OpenJPEG and imagecodecs decide) a codestream whose chroma
+/// is subsampled horizontally, e.g. Aperio's TIFF compression 33003 -- are
+/// upsampled and converted to RGB, as imagecodecs does.
+fn j2k_write(image: &jpeg2k::Image, output: &mut [u8], skip: (usize, usize))
+    -> Result<(usize, usize, usize, usize, bool), String> {
     let comps = image.components();
     let first = comps.first().ok_or("jpeg 2000: no components")?;
-    let (w, h) = (first.width() as usize, first.height() as usize);
+    let (fw, fh) = (first.width() as usize, first.height() as usize);
     let (bits, signed) = (first.precision() as usize, first.is_signed());
-    if comps.iter().any(|c| c.width() as usize != w || c.height() as usize != h
-                        || c.precision() as usize != bits || c.is_signed() != signed) {
+    let differ = comps.iter().any(|c| c.width() as usize != fw || c.height() as usize != fh
+                                      || c.precision() as usize != bits || c.is_signed() != signed);
+    let sycc = comps.len() == 3
+        && (matches!(image.color_space(), jpeg2k::ColorSpace::SYCC)
+            || (comps[1].width() as usize) < fw);
+    let converted = if sycc {
+        match sycc_planes(comps, image.x_offset() as usize, image.y_offset() as usize) {
+            Some(planes) => Some(planes?),
+            None if differ => {
+                return Err("jpeg 2000: components differ in size or precision in a way not \
+                            supported (only 4:4:4, 4:2:2 and 4:2:0 sYCC)".into());
+            }
+            None => None,
+        }
+    } else if differ {
         return Err("jpeg 2000: components differ in size or precision (subsampled)".into());
+    } else {
+        None
+    };
+    let planes: Vec<&[i32]> = match &converted {
+        Some(p) => p.iter().map(|v| v.as_slice()).collect(),
+        None => comps.iter().map(|c| c.data()).collect(),
+    };
+    let (sx, sy) = skip;
+    if sx > fw || sy > fh {
+        return Err("jpeg 2000: decoded area smaller than its offset".into());
     }
-    let n = comps.len();
+    let (w, h, n) = (fw - sx, fh - sy, planes.len());
     let item = if bits <= 8 { 1 } else if bits <= 16 { 2 } else { 4 };
     if w * h * n * item != output.len() {
         return Err(format!("jpeg 2000: {w} x {h} x {n} at {bits} bits does not fill {} bytes",
                            output.len()));
     }
-    // typed writes (vectorised when there is one component): OpenJPEG
-    // gives each component as i32 samples
+    // typed writes (vectorised when there is one component and no skip):
+    // OpenJPEG gives each component as i32 samples
     macro_rules! interleave {
         ($t:ty) => {{
             let (head, out, tail) = unsafe { output.align_to_mut::<$t>() };
             if !head.is_empty() || !tail.is_empty() {
                 return Err("jpeg 2000: output buffer not aligned".into());
             }
-            if n == 1 {
-                for (dst, &v) in out.iter_mut().zip(comps[0].data()) {
+            if n == 1 && skip == (0, 0) {
+                for (dst, &v) in out.iter_mut().zip(planes[0]) {
                     *dst = (v as $t).to_le();
                 }
             } else {
-                for (k, comp) in comps.iter().enumerate() {
-                    for (dst, &v) in out[k..].iter_mut().step_by(n).zip(comp.data()) {
-                        *dst = (v as $t).to_le();
+                for (k, plane) in planes.iter().enumerate() {
+                    for row in 0..h {
+                        let src = &plane[(row + sy) * fw + sx..(row + sy) * fw + fw];
+                        let dst = &mut out[row * w * n + k..(row + 1) * w * n];
+                        for (d, &v) in dst.iter_mut().step_by(n).zip(src) {
+                            *d = (v as $t).to_le();
+                        }
                     }
                 }
             }
@@ -332,7 +425,7 @@ fn jpeg2k_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, P
     -> PyResult<(usize, usize, usize, usize, bool)> {
     with_buffers(py, data, out, |input, output| {
         let image = jpeg2k::Image::from_bytes(input).map_err(|e| format!("jpeg 2000: {e}"))?;
-        j2k_write(&image, output)
+        j2k_write(&image, output, (0, 0))
     })
 }
 
@@ -346,12 +439,16 @@ fn jpeg2k_decode_area_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<
                            x0: u32, y0: u32, x1: u32, y1: u32)
     -> PyResult<(usize, usize, usize, usize, bool)> {
     with_buffers(py, data, out, move |input, output| {
-        let area: jpeg2k::DecodeArea = format!("{x0}:{y0}:{x1}:{y1}").parse()
+        // decoded from even coordinates and cropped: subsampled chroma (4:2:2,
+        // 4:2:0) has no sample for an odd first column / row of an area, so an
+        // area then equals the same rectangle of the whole image
+        let (ax, ay) = (x0 & !1, y0 & !1);
+        let area: jpeg2k::DecodeArea = format!("{ax}:{ay}:{x1}:{y1}").parse()
             .map_err(|e| format!("jpeg 2000: area: {e}"))?;
         let params = jpeg2k::DecodeParameters::new().decode_area(Some(area));
         let image = jpeg2k::Image::from_bytes_with(input, params)
             .map_err(|e| format!("jpeg 2000: {e}"))?;
-        j2k_write(&image, output)
+        j2k_write(&image, output, ((x0 - ax) as usize, (y0 - ay) as usize))
     })
 }
 

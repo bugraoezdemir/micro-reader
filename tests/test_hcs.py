@@ -102,7 +102,7 @@ def test_mosaic_tiles_stay_within_their_field(tmp_path):
                              for w, fd in ((0, 0), (0, 1), (1, 0)) for t in range(2)]
         (image,) = f.select(well=0, field=1, tile=1)
         np.testing.assert_array_equal(image[0, 0, 0], data[(2, 1)])
-    with micro_reader.open(path, plates=True, tiles="stitched") as f:
+    with micro_reader.open(path, plates=True, tiles="mosaic") as f:
         assert f.indices == [{**ONE, "well": 0, "field": 0}, {**ONE, "well": 0, "field": 1},
                              {**ONE, "well": 1, "field": 0}]
         np.testing.assert_array_equal(f.images[1][0, 0, 0, :, W:], data[(2, 1)])
@@ -158,7 +158,7 @@ def test_navigation_reaches_the_same_images_as_select(tmp_path):
         assert [fld.tiles[1].index["field"] for fld in well.fields] == [0, 1]
         with pytest.raises(ValueError, match="has 2 images"):
             well.fields[0].image                      # tiled: pick a tile
-    with micro_reader.open(path, plates=True, tiles="stitched") as f:
+    with micro_reader.open(path, plates=True, tiles="mosaic") as f:
         fld = f.plates[0].wells[1].fields[0]
         assert fld.tiles == [fld.image] and fld.image is f.images[2]
 

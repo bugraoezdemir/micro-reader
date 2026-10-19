@@ -29,7 +29,7 @@ It has no Python dependencies.
 | `packbits_decode_into`      | PackBits                                  | own                                   |
 | `jpeg_decode_into`          | JPEG: baseline, progressive and lossless  | `jpeg-decoder`                        |
 | `jxl_decode_into`           | JPEG XL                                   | `jxl-oxide`                           |
-| `jpeg2k_decode_into`        | JPEG 2000 (J2K, JP2)                      | `jpeg2k` (OpenJPEG)                   |
+| `jpeg2k_decode_into`        | JPEG 2000 (J2K, JP2), also YCbCr with subsampled colour (e.g. Aperio slides) | `jpeg2k` (OpenJPEG) |
 | `png_decode_into`           | PNG                                       | `png`                                 |
 | `webp_decode_into`          | WebP, lossless and lossy                  | `image-webp`                          |
 | `unpack_bits_into`          | packed samples, 1 to 32 bit               | own                                   |

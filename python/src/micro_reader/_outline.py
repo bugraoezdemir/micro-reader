@@ -42,7 +42,9 @@ def _leaf(images) -> str:
     if levels > 1:
         parts.append(f"{levels} levels")
     if first.is_ragged:
-        parts.append("ragged: " + " + ".join(str(p.shape) for p in first.parts))
+        typed = len({p.dtype for p in first.parts}) > 1      # parts of different pixel types
+        parts.append(("parts: " if typed else "ragged: ") + " + ".join(
+            f"{p.shape} {p.dtype}" if typed else str(p.shape) for p in first.parts))
     return ", ".join(parts)
 
 

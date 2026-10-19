@@ -17,7 +17,8 @@ RNG = np.random.default_rng(7)
 def _write(path, data, axes):
     tifffile.imwrite(path, data, metadata={"axes": axes}, photometric="minisblack")
     with tifffile.TiffFile(path) as tif:                    # the writer keeps the letters
-        assert tif.series[0].axes == axes
+        # (tifffile 2026.6+ leaves out letters of size 1: AZYX with A = 1 reads as ZYX)
+        assert tif.series[0].axes in (axes, "".join(a for a, n in zip(axes, data.shape) if n > 1))
 
 
 def test_lifetime_and_lambda_are_indices(tmp_path):
@@ -57,7 +58,7 @@ def test_tile_grid_is_one_tile_level(tmp_path):
             j, k = divmod(image.index["tile"], 4)
             np.testing.assert_array_equal(image[...], data[j, k])
     with pytest.raises(UnsupportedFormatError, match="does not compose TIFF tiles"):
-        micro_reader.open(path, tiles="stitched")
+        micro_reader.open(path, tiles="mosaic")
 
 
 def test_untiled_series_of_a_tiled_file_get_tile_0(tmp_path):

@@ -13,7 +13,7 @@ Images (docs/AXES.md): one per scene, mosaic tile, rotation, view,
 illumination, phase and block, indexed by ``{"scene": S, "tile": M,
 "rotation": R, "view": V, "illumination": I, "phase": H, "block": B}`` with
 the file's own indices; an index is there only where the file has more than
-one (tiles: more than one in some scene).  ``tiles="stitched"`` composes each scene's
+one (tiles: more than one in some scene).  ``tiles="mosaic"`` places each scene's
 tiles instead, the way libCZI / pylibCZIrw compose them: the level-0
 subblocks of a plane (not pyramid levels) are drawn in mosaic-index order,
 later tiles on top, over a black background, inside the bounding box.
@@ -38,14 +38,15 @@ import struct
 import sys
 import warnings
 from dataclasses import dataclass, replace
+from typing import Optional
 
 import numpy as np
 
 from .. import _codecs, _jpeg_restarts, _memory, _pool, _stream
 from .._base import File, Image
-from .._errors import CorruptFileError, UnsupportedFormatError
+from .._errors import CorruptFileError, MicroReaderError, UnsupportedFormatError
 from .._io import DecodeCache, ThreadHandles
-from .._plate import Plate, Well, row_label
+from .._plate import Plate, Well, layout as layout_names, row_label
 
 NAME = "czi"
 #: reads a plate's layout and indexes its images by well and field
@@ -66,7 +67,7 @@ PIXEL_TYPES = {0: ("<u1", 1), 1: ("<u2", 1), 2: ("<f4", 1), 3: ("<u1", 3), 4: ("
 AXIS_DIMS = "TCZ"
 KEY_DIMS = {"rotation": "R", "view": "V", "illumination": "I", "phase": "H", "block": "B"}
 PLANE_DIMS = AXIS_DIMS + "".join(KEY_DIMS.values())
-TILE_POLICIES = ("separate", "stitched")
+TILE_POLICIES = ("separate", "mosaic")
 UNCOMPRESSED, JPEG, LZW, JPEG_LOSSLESS, JPEG_XR, ZSTD0, ZSTD1, CHUNKED, JPEG_XL = range(9)
 COMPRESSIONS = {UNCOMPRESSED: "none", JPEG: "JPEG", LZW: "LZW",
                 JPEG_LOSSLESS: "JPEG lossless (undocumented; standard lossless JPEG assumed)",
@@ -140,23 +141,32 @@ def _directory(fh) -> list:
     head = fh.read(32 + 80)
     if head[:10] != MAGIC:
         raise CorruptFileError("not a CZI file")
+    if len(head) < 32 + 80:
+        raise CorruptFileError("the file header ends early (truncated file?)")
     (major, minor, _, _, _, _, file_part, directory_position, _, _, _) = \
         struct.unpack_from("<iiii16s16siqqiq", head, 32)
     if not directory_position:
         raise CorruptFileError("CZI without a subblock directory")
     fh.seek(directory_position)
     seg = fh.read(32)
-    if not seg[:16].rstrip(b"\x00") == b"ZISRAWDIRECTORY":
+    if len(seg) < 32 or not seg[:16].rstrip(b"\x00") == b"ZISRAWDIRECTORY":
         raise CorruptFileError(f"no ZISRAWDIRECTORY at byte {directory_position}")
     allocated, used = struct.unpack_from("<qq", seg, 16)
     data = fh.read(used or allocated)
+    if len(data) != (used or allocated):
+        raise CorruptFileError(f"the subblock directory at byte {directory_position} ends early "
+                               "(truncated file?)")
     count, = struct.unpack_from("<i", data)
     pos, entries = 128, []
-    for n in range(count):
-        entry, size = _parse_entry(data, pos)
-        entry.order = n
-        entries.append(entry)
-        pos += size
+    try:
+        for n in range(count):
+            entry, size = _parse_entry(data, pos)
+            entry.order = n
+            entries.append(entry)
+            pos += size
+    except struct.error as exc:
+        raise CorruptFileError(f"the subblock directory at byte {directory_position} ends "
+                               f"inside entry {len(entries)} of {count}") from exc
     return entries
 
 
@@ -331,11 +341,14 @@ class _PlaneTiles:
 
 
 class _CziImage(Image):
-    """One image of a CZI (a mosaic tile, a stitched scene, or the canvas of
+    """One image of a CZI (a mosaic tile, a scene's tiles as one mosaic, or the canvas of
     all scenes), composed from its subblocks."""
 
     def __init__(self, czi: "_CziFile", index: int, subblocks: list, name: str,
-                 key: dict, box: tuple = None):
+                 key: dict, box: tuple = None, channels: Optional[list] = None):
+        #: a part of an image whose channels differ in pixel type: the file's
+        #: channel numbers (C) this image holds, in order; None: all of them
+        self._channel_ids = list(channels) if channels is not None else None
         if not subblocks:
             raise CorruptFileError(f"{czi.path!r}: scene without subblocks")
         types = {s.pixel_type for s in subblocks}
@@ -365,12 +378,16 @@ class _CziImage(Image):
         # plane -> subblocks in drawing order: scene, mosaic index, directory
         # order (libCZI's order; the scene only matters on the whole-file canvas)
         by_plane: dict = {}
+        ids = self._channel_ids
         for s in sorted(subblocks, key=lambda s: (s.scene, s.mosaic, s.order)):
-            key = tuple(s.plane.get(d, czi._dim_starts.get(d, 0)) - czi._dim_starts.get(d, 0)
+            key = tuple(ids.index(s.plane.get(d, czi._dim_starts.get(d, 0)))
+                        if d == "C" and ids is not None else
+                        s.plane.get(d, czi._dim_starts.get(d, 0)) - czi._dim_starts.get(d, 0)
                         for d in axes)
             by_plane.setdefault(key, []).append(s)
         self._planes = {key: _PlaneTiles(tiles, self.origin) for key, tiles in by_plane.items()}
-        shape = [czi._dim_sizes.get(d, 1) for d in axes] + [y1 - y0, x1 - x0]
+        shape = [len(ids) if d == "C" and ids is not None else czi._dim_sizes.get(d, 1)
+                 for d in axes] + [y1 - y0, x1 - x0]
         letters = "".join(d.lower() for d in axes) + "yx"
         if self._samples > 1:
             shape.append(self._samples)
@@ -615,8 +632,8 @@ class _CziImage(Image):
             b = min(y1, a + per_piece)
             with _memory.reserve((b - a) * row_bytes, f"{self._czi.path!r}: rows of a subblock"):
                 buf = np.empty((b - a) * row_bytes, np.uint8)
-                n = _stream.read(self._czi.path, offset, length, codec, (a - sy0) * row_bytes, buf,
-                                 size=s.height * row_bytes)
+                n = _stream.read(self._czi.path, self._czi._base + offset, length, codec,
+                                 (a - sy0) * row_bytes, buf, size=s.height * row_bytes)
                 if n < buf.nbytes:
                     raise CorruptFileError(f"{self._czi.path!r}: subblock data ends early")
                 rows = buf.view(self._file_dtype).reshape(b - a, row)
@@ -803,20 +820,125 @@ class _CziImage(Image):
         self._closed = True
 
 
+class _Shifted:
+    """A file handle seen from *base*: a CZI embedded in another file (an
+    attachment) reads as if it were a file of its own of *size* bytes."""
+
+    def __init__(self, raw, base: int, size: int):
+        self._raw, self._base, self._size = raw, base, size
+
+    def seek(self, pos: int, whence: int = 0) -> int:
+        if whence == 2:
+            self._raw.seek(self._base + self._size + pos)
+        elif whence == 1:
+            self._raw.seek(pos, 1)
+        else:
+            self._raw.seek(self._base + pos)
+        return self._raw.tell() - self._base
+
+    def tell(self) -> int:
+        return self._raw.tell() - self._base
+
+    def read(self, n: int = -1) -> bytes:
+        left = self._size - self.tell()
+        return self._raw.read(left if n is None or n < 0 else min(n, max(0, left)))
+
+    def readinto(self, buf) -> int:
+        return self._raw.readinto(buf)
+
+    def close(self) -> None:
+        self._raw.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+class _ShiftedHandles(ThreadHandles):
+    """Per-thread handles of an embedded CZI (``_Shifted``).  ``read`` is the
+    base class's: it seeks through ``get()``, which already shifts by *base*."""
+
+    def __init__(self, path: str, base: int, size: int):
+        super().__init__(path)
+        self.base, self.size = base, size
+
+    def get(self):
+        return _Shifted(ThreadHandles.get(self), self.base, self.size)
+
+
+#: attachments that are pictures of the slide, listed as further scenes (as the
+#: slide TIFF and VSI readers list label and macro): CZI name -> image name.
+#: The Thumbnail (a small JPEG copy of the image itself) is left out.
+ATTACHED_IMAGES = {"Label": "label", "SlidePreview": "slide preview"}
+
+
+def _attachments(fh) -> list:
+    """The attachment directory: (name, content type, data offset, data size)."""
+    fh.seek(0)
+    head = fh.read(32 + 80)
+    if len(head) < 112 or not head.startswith(b"ZISRAWFILE"):
+        return []
+    position = struct.unpack_from("<q", head, 32 + 72)[0]
+    if position <= 0:
+        return []
+    fh.seek(position)
+    if not fh.read(32).startswith(b"ZISRAWATTDIR"):
+        return []
+    count = struct.unpack("<i", fh.read(256)[:4])[0]
+    out = []
+    for _ in range(max(0, count)):
+        e = fh.read(128)
+        if len(e) < 128:
+            break
+        out.append((e[48:128].split(b"\x00")[0].decode(errors="replace"),
+                    e[40:48].split(b"\x00")[0].decode(errors="replace"),
+                    struct.unpack_from("<q", e, 12)[0]))
+    found = []
+    for name, ctype, segment in out:
+        fh.seek(segment)
+        seg = fh.read(32 + 8)
+        if len(seg) < 40 or not seg.startswith(b"ZISRAWATTACH"):
+            continue
+        used = struct.unpack_from("<q", seg, 24)[0]
+        size = struct.unpack_from("<q", seg, 32)[0]
+        if 0 < size <= used - 256:
+            found.append((name, ctype, segment + 32 + 256, size))
+    return found
+
+
 class _CziFile(File):
     backend = NAME
 
     def __init__(self, path: str, tiles: str = "separate", resolutions: str = "base",
-                 plates: bool = False):
+                 plates: bool = False, base: int = 0, size: Optional[int] = None):
         if tiles not in TILE_POLICIES:
             raise ValueError(f"tiles={tiles!r}: one of {TILE_POLICIES}")
         self.path = path
-        self._handles = ThreadHandles(path)
+        #: an embedded CZI (an attachment) starts at *base* in *path*
+        self._base, self._size = base, size
+        self._attached: list = []
+        self._handles = ThreadHandles(path) if not base else _ShiftedHandles(path, base, size)
+        try:
+            self._build(path, tiles, resolutions, plates)
+        except BaseException:                   # a file that cannot be opened leaves nothing open
+            self._handles.close()
+            for inner in self._attached:
+                inner.close()
+            _stream.forget(path)
+            raise
+
+    def _open_raw(self):
+        fh = builtins.open(self.path, "rb")
+        return fh if not self._base else _Shifted(fh, self._base, self._size)
+
+    def _build(self, path: str, tiles: str, resolutions: str, plates: bool) -> None:
         #: decoded compressed tiles, shared by all images of the file
         self.decode_cache = DecodeCache(DECODE_CACHE_BYTES)
         #: subblock position -> RestartIndex | None of large JPEG subblocks
         self.restarts: dict = {}
-        with builtins.open(path, "rb") as fh:
+        with self._open_raw() as fh:
             entries = _directory(fh)
             level0 = [e for e in entries if e.level0] or entries
             #: pyramid subblocks (lower resolution levels of whole scenes)
@@ -882,9 +1004,13 @@ class _CziFile(File):
             name = base + " " + " ".join(f"{k} {v}" for k, v in shown.items())
             if listed:
                 key["resolution"] = 0
-            image = _CziImage(self, len(images), groups[values], name, key)
+            mixed = len({s.pixel_type for s in groups[values]}) > 1
+            if mixed:                               # channels of different pixel types
+                image = self._mixed(len(images), groups[values], name, key)
+            else:
+                image = _CziImage(self, len(images), groups[values], name, key)
             images.append(image)
-            if with_levels:
+            if with_levels and not mixed:
                 levels = self._resolution_levels(image, pyramid, values, name, key)
                 if levels:
                     image._resolutions = [image] + levels
@@ -892,9 +1018,71 @@ class _CziFile(File):
                         level._resolutions = image._resolutions
                     if listed:
                         images.extend(levels)
+        if not self._base:                          # the slide's label and preview
+            images.extend(self._attached_images(images, resolutions, listed))
         for n, image in enumerate(images):
             image._position = n
         super().__init__(path, images, plates=[plate] if plate else [])
+
+    def _mixed(self, position: int, subblocks: list, name: str, key: dict):
+        """An image whose channels differ in pixel type (gray8 + gray16, ...):
+        a ``ChannelStack`` of one part per pixel type -- each part exact, in its
+        own type, with index ``part`` -- read whole in the widest type (every
+        value unchanged).  Colour and grey channels do not mix."""
+        from .._stack import ChannelStack
+        by_channel: dict = {}
+        for s in subblocks:
+            by_channel.setdefault(s.plane.get("C", self._dim_starts.get("C", 0)), set()).add(
+                s.pixel_type)
+        if any(len(t) > 1 for t in by_channel.values()):
+            raise UnsupportedFormatError(f"{self.path!r}: a CZI channel with several pixel types")
+        types = {t for ts in by_channel.values() for t in ts}
+        if any(t not in PIXEL_TYPES for t in types) or \
+                len({PIXEL_TYPES[t][1] for t in types}) > 1:
+            raise UnsupportedFormatError(f"{self.path!r}: CZI channels mix pixel types "
+                                         f"{sorted(types)} of different samples (grey and colour)")
+        groups: dict = {}
+        for c, (t,) in sorted(by_channel.items()):
+            groups.setdefault(t, []).append(c)
+        parts = []
+        for k, (t, channels) in enumerate(sorted(groups.items(), key=lambda g: g[1][0])):
+            chosen = [s for s in subblocks if s.plane.get("C", self._dim_starts.get("C", 0))
+                      in channels]
+            parts.append(_CziImage(self, position, chosen, f"{name} part {k}",
+                                   {**key, "part": k}, channels=channels))
+        order = sorted((c, part, j) for part in parts for j, c in enumerate(part._channel_ids))
+        return ChannelStack(position, parts, [(part, j) for _c, part, j in order], name, key)
+
+    def _attached_images(self, images: list, resolutions: str, listed: bool) -> list:
+        """The slide's label and preview (CZI attachments holding a CZI of
+        their own), as further scenes after the file's own."""
+        with self._open_raw() as fh:
+            found = _attachments(fh)
+        scene = max([im.index.get("scene", -1) for im in images] + [-1]) + 1
+        out = []
+        base = os.path.basename(self.path)
+        for attachment, label in ATTACHED_IMAGES.items():
+            for name, ctype, offset, size in found:
+                if name != attachment or ctype.upper() != "CZI":
+                    continue
+                try:
+                    inner = _CziFile(self.path, "mosaic", resolutions, base=offset, size=size)
+                except (MicroReaderError, OSError, ValueError, struct.error) as exc:
+                    warnings.warn(f"{self.path!r}: the {label} picture (attachment {name!r}) "
+                                  f"cannot be read: {exc}", stacklevel=4)
+                    continue
+                self._attached.append(inner)
+                for picture in inner.images:
+                    if not picture.is_pyramid:
+                        continue                    # its levels come with it
+                    for level in picture.resolutions:
+                        level.index = {"scene": scene}
+                        if listed or level is not picture:
+                            level.index["resolution"] = level.level
+                        level.name = f"{base} {label}"
+                    out.extend(picture.resolutions if listed else [picture])
+                    scene += 1
+        return out
 
     def _plate_map(self, groups: dict) -> tuple:
         """``({scene: (well, field)}, Plate)`` when the file is a plate
@@ -920,9 +1108,9 @@ class _CziFile(File):
             place = places[s]
             well_field[s] = (number[place], fields.get(place, 0))
             fields[place] = fields.get(place, 0) + 1
-        plate = Plate(name="",
-                      rows=tuple(row_label(r) for r in range(layout["rows"])),
-                      columns=tuple(str(c + 1) for c in range(layout["columns"])),
+        row_names, column_names = layout_names(layout["rows"], layout["columns"], wells,
+                                               self.path)
+        plate = Plate(name="", rows=row_names, columns=column_names,
                       wells=tuple(Well(r, c, names[(r, c)]) for r, c in wells))
         return well_field, plate
 
@@ -1001,6 +1189,8 @@ class _CziFile(File):
 
     def close(self) -> None:
         super().close()
+        for inner in self._attached:
+            inner.close()
         self._handles.close()
         _stream.forget(self.path)
 
