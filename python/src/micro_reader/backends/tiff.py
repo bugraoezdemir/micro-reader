@@ -156,6 +156,20 @@ def _layout(page) -> tuple:
             int(page.fillorder))
 
 
+class _Scatter:
+    """The destination of a segment several cells of a composed level need
+    (``_merge_decodes``): assigning it the rows and columns all of them span
+    copies each its own, *targets* ``(destination, rows, cols)``."""
+    __slots__ = ("targets",)
+
+    def __init__(self, targets):
+        self.targets = targets
+
+    def __setitem__(self, key, value):
+        for dst, rows, cols in self.targets:
+            dst[...] = value[rows, cols]
+
+
 def jpeg_colour(key) -> str:
     """How the JPEG segments of *key* store colour (as tifffile decides):
     RGB without JFIF marker is stored untransformed (e.g. Aperio SVS)."""
@@ -394,6 +408,9 @@ class _TiffImage(Image):
         if self._layout is not None:
             x = len(shape) - k + page_axes.index("X")
             shape = shape[:x] + (self._layout.width,) + shape[x + 1:]
+            if self._layout.height is not None:                   # iScan BIF: areas
+                y = len(shape) - k + page_axes.index("Y")
+                shape = shape[:y] + (self._layout.height,) + shape[y + 1:]
 
         self._tif = tif
         self._series = series
@@ -416,6 +433,7 @@ class _TiffImage(Image):
         self._segs_across = -(-self._width // self._seg_cols)     # as stored
         #: the value of missing pages and segments
         self._nodata = key.nodata
+        self._stored_width = self._width
         if self._layout is not None:
             self._width = self._layout.width                      # as composed
             if self._layout.fill is not None:
@@ -591,6 +609,9 @@ class _TiffImage(Image):
             dest[...] = self._nodata
             return
         layout = self._layout
+        if layout is not None and layout.areas:
+            self._plan_areas(p, entry, ss, ys, xs, cs, dest, raws, decodes)
+            return
         if layout is None or not layout.pieces:
             self._plan_stored(p, entry, ss, ys, xs, cs, dest, raws, decodes)
             return
@@ -607,6 +628,59 @@ class _TiffImage(Image):
                 self._plan_stored(p, entry, ss, slice(y0, y1),
                                   slice(stored + x0 - composed, stored + x1 - composed),
                                   cs, part, raws, decodes)
+
+    def _plan_areas(self, p, entry, ss, ys, xs, cs, dest, raws, decodes) -> None:
+        """``_plan_page`` for a level composed of areas of tile cells (iScan
+        BIF, ``TileLayout.areas``): the fill value first, then each cell's
+        part from its stored pixels.  A segment several cells need (lower
+        levels: one stored tile holds many cells) is decoded once."""
+        dest[...] = self._nodata
+        mine = []
+        for area in self._layout.areas:
+            rows = [c for c in area.rows if c[0] < ys.stop and c[1] > ys.start]
+            if not rows:
+                continue
+            cols = [c for c in area.cols if c[0] < xs.stop and c[1] > xs.start]
+            for r0, r1, sr in rows:
+                y0 = max(ys.start, r0)
+                y1 = min(ys.stop, r1, r0 + self._length - sr)       # within the stored level
+                if y0 >= y1:
+                    continue
+                for c0, c1, sc in cols:
+                    x0 = max(xs.start, c0)
+                    x1 = min(xs.stop, c1, c0 + self._stored_width - sc)
+                    if x0 >= x1:
+                        continue
+                    part = dest[:, y0 - ys.start:y1 - ys.start, x0 - xs.start:x1 - xs.start]
+                    self._plan_stored(p, entry, ss, slice(sr + y0 - r0, sr + y1 - r0),
+                                      slice(sc + x0 - c0, sc + x1 - c0), cs, part, raws, mine)
+        decodes.extend(self._merge_decodes(mine))
+
+    def _merge_decodes(self, decodes) -> list:
+        """*decodes* with the jobs of one segment made one: decoded once, its
+        rows and columns of every job copied to each job's destination
+        (``_Scatter``).  Segments decoded in parts (too large for the memory
+        budget) keep their jobs."""
+        groups: dict = {}
+        for job in decodes:
+            groups.setdefault((job[0], job[1]), []).append(job)
+        out = []
+        for jobs in groups.values():
+            rows, cols, samples = self._segment_shape(jobs[0][1])
+            if len(jobs) == 1 or _memory.should_stream(
+                    rows * cols * samples * self._file_dtype.itemsize):
+                out.extend(jobs)
+                continue
+            r0 = min(j[6][1].start for j in jobs)
+            r1 = max(j[6][1].stop for j in jobs)
+            c0 = min(j[6][2].start for j in jobs)
+            c1 = max(j[6][2].stop for j in jobs)
+            targets = [(j[5], slice(j[6][1].start - r0, j[6][1].stop - r0),
+                        slice(j[6][2].start - c0, j[6][2].stop - c0)) for j in jobs]
+            p, i, offset, count, jpegtables, _, part = jobs[0]
+            out.append((p, i, offset, count, jpegtables, _Scatter(targets),
+                        (part[0], slice(r0, r1), slice(c0, c1), part[3])))
+        return out
 
     def _plan_stored(self, p, entry, ss, ys, xs, cs, dest, raws, decodes) -> None:
         """``_plan_page`` for rows *ys* and columns *xs* of page *p* as stored."""
