@@ -7,13 +7,13 @@ position (64-bit: files beyond 4 GB work) and, per dimension, start index,
 size and stored size.  A subblock is a tile of one plane: X / Y give its
 rectangle in the image's pixel coordinates, the other dimensions its plane
 (T, C, Z, views V, phases H, illuminations I, rotations R, blocks B), S its
-scene and M its mosaic index.
+scene (the image index ``series``) and M its mosaic index.
 
-Images (docs/AXES.md): one per scene, mosaic tile, rotation, view,
-illumination, phase and block, indexed by ``{"scene": S, "tile": M,
+Images (docs/AXES.md): one per scene (series), mosaic tile, rotation, view,
+illumination, phase and block, indexed by ``{"series": S, "tile": M,
 "rotation": R, "view": V, "illumination": I, "phase": H, "block": B}`` with
 the file's own indices; an index is there only where the file has more than
-one (tiles: more than one in some scene).  ``tiles="mosaic"`` places each scene's
+one (tiles: more than one in some series).  ``tiles="mosaic"`` places each series'
 tiles instead, the way libCZI / pylibCZIrw compose them: the level-0
 subblocks of a plane (not pyramid levels) are drawn in mosaic-index order,
 later tiles on top, over a black background, inside the bounding box.
@@ -90,7 +90,7 @@ class Subblock:
     y: int
     width: int
     height: int
-    scene: int
+    series: int              # S, the CZI scene
     mosaic: int
     order: int               # position in the directory
     position: int            # file position of the subblock segment
@@ -128,7 +128,7 @@ def _parse_entry(data, pos: int):
     entry = Subblock(
         plane={d: v[0] for d, v in dims.items() if d not in "SM"},
         x=x0, y=y0, width=w, height=h,
-        scene=dims.get("S", (0,))[0], mosaic=dims.get("M", (-1,))[0],
+        series=dims.get("S", (0,))[0], mosaic=dims.get("M", (-1,))[0],
         order=0, position=position, compression=compression, pixel_type=pixel_type,
         level0=pyramid_type == 0 and (sw, sh) == (w, h), key=key,
         stored_width=sw, stored_height=sh)
@@ -187,7 +187,7 @@ def _inline_key(fh, position: int):
 
 
 def _ranges(values) -> str:
-    """[1, 2, 3, 7] -> '1-3, 7' (scene lists can be long)."""
+    """[1, 2, 3, 7] -> '1-3, 7' (series lists can be long)."""
     out, values = [], sorted(values)
     for _, group in itertools.groupby(enumerate(values), lambda p: p[1] - p[0]):
         run = [v for _, v in group]
@@ -273,8 +273,8 @@ def _recover(fh, path: str, entries: list) -> dict:
         "recovered": len(bad) - len(unresolved),
         "unrecoverable": len(unresolved),
         "shifts": sorted(set(shifts)),
-        "scenes_affected": sorted({e.scene for e in bad}),
-        "scenes_unreadable": sorted({e.scene for e in unresolved.values()}),
+        "series_affected": sorted({e.series for e in bad}),
+        "series_unreadable": sorted({e.series for e in unresolved.values()}),
         "unresolved_keys": set(unresolved),
     }
 
@@ -341,8 +341,8 @@ class _PlaneTiles:
 
 
 class _CziImage(Image):
-    """One image of a CZI (a mosaic tile, a scene's tiles as one mosaic, or the canvas of
-    all scenes), composed from its subblocks."""
+    """One image of a CZI (a mosaic tile, a series' tiles as one mosaic, or the canvas of
+    all series), composed from its subblocks."""
 
     def __init__(self, czi: "_CziFile", index: int, subblocks: list, name: str,
                  key: dict, box: tuple = None, channels: Optional[list] = None):
@@ -350,7 +350,7 @@ class _CziImage(Image):
         #: channel numbers (C) this image holds, in order; None: all of them
         self._channel_ids = list(channels) if channels is not None else None
         if not subblocks:
-            raise CorruptFileError(f"{czi.path!r}: scene without subblocks")
+            raise CorruptFileError(f"{czi.path!r}: series without subblocks")
         types = {s.pixel_type for s in subblocks}
         if len(types) != 1 or next(iter(types)) not in PIXEL_TYPES:
             raise UnsupportedFormatError(f"{czi.path!r}: CZI pixel types {sorted(types)}")
@@ -367,19 +367,19 @@ class _CziImage(Image):
         # plane axes: T C Z always; B I H only where the file has several
         axes = [d for d in AXIS_DIMS if d in "TCZ" or czi._dim_sizes.get(d, 1) > 1]
         self._plane_dims = axes
-        if box is not None:                        # a resolution level: the scene's box, scaled
+        if box is not None:                        # a resolution level: the series' box, scaled
             x0, y0, x1, y1 = box
         else:
             x0 = min(s.x for s in subblocks)
             y0 = min(s.y for s in subblocks)
             x1 = max(s.x + s.width for s in subblocks)
             y1 = max(s.y + s.height for s in subblocks)
-        self.origin = (x0, y0)                     # scene box in image pixel coordinates
-        # plane -> subblocks in drawing order: scene, mosaic index, directory
-        # order (libCZI's order; the scene only matters on the whole-file canvas)
+        self.origin = (x0, y0)                     # series box in image pixel coordinates
+        # plane -> subblocks in drawing order: series, mosaic index, directory
+        # order (libCZI's order; the series only matters on the whole-file canvas)
         by_plane: dict = {}
         ids = self._channel_ids
-        for s in sorted(subblocks, key=lambda s: (s.scene, s.mosaic, s.order)):
+        for s in sorted(subblocks, key=lambda s: (s.series, s.mosaic, s.order)):
             key = tuple(ids.index(s.plane.get(d, czi._dim_starts.get(d, 0)))
                         if d == "C" and ids is not None else
                         s.plane.get(d, czi._dim_starts.get(d, 0)) - czi._dim_starts.get(d, 0)
@@ -402,7 +402,7 @@ class _CziImage(Image):
         if not s.data_offset:
             if s.position < 0:
                 raise CorruptFileError(
-                    f"{self._czi.path!r} is damaged: the subblock for scene {s.scene}, "
+                    f"{self._czi.path!r} is damaged: the subblock for series {s.series}, "
                     f"tile {s.mosaic}, plane {s.plane} could not be found")
             fh = self._czi._handles.get()
             fh.seek(s.position)
@@ -541,10 +541,10 @@ class _CziImage(Image):
         tile[...] = decoded.reshape(tile.shape)
 
     def _draw(self, s: Subblock, piece, band_y0, xs, dst) -> int:
-        """Draw *piece* (y0, y1, x0, x1 in scene coordinates, inside subblock
+        """Draw *piece* (y0, y1, x0, x1 in series coordinates, inside subblock
         *s* and inside the band) onto *dst* (the band: rows, cols[, samples])."""
         ox, oy = self.origin
-        sy0, sx0 = s.y - oy, s.x - ox                       # tile's place in the scene
+        sy0, sx0 = s.y - oy, s.x - ox                       # tile's place in the series
         y0, y1, x0, x1 = piece
         item = self._file_dtype.itemsize * self._samples
         target = dst[y0 - band_y0:y1 - band_y0, x0 - xs.start:x1 - xs.start]
@@ -682,7 +682,7 @@ class _CziImage(Image):
         return (y1 - y0) * (x1 - x0) * self._samples
 
     def _place_decoded(self, rows, a: int, b: int, piece, band_y0, xs, dst) -> None:
-        """Decoded rows *a*..*b* (scene coordinates) of *piece*, (rows, cols,
+        """Decoded rows *a*..*b* (series coordinates) of *piece*, (rows, cols,
         samples) in R, G, B order, onto *dst* in the file's B, G, R order."""
         _, _, x0, x1 = piece
         if self._samples > 1:
@@ -788,8 +788,8 @@ class _CziImage(Image):
 
     def read_region(self, x: int, y: int, width: int, height: int, **planes) -> np.ndarray:
         """A rectangle in the file's own pixel coordinates (libCZI's ``roi``,
-        e.g. from ``origin`` or the XML metadata), composed from this scene's
-        tiles; parts outside the scene's box are background (0), as libCZI
+        e.g. from ``origin`` or the XML metadata), composed from this series'
+        tiles; parts outside the series' box are background (0), as libCZI
         returns them.  *planes* select the other axes like ``read``."""
         if width < 0 or height < 0:
             raise ValueError(f"negative region size {width} x {height}")
@@ -814,7 +814,11 @@ class _CziImage(Image):
 
     def _read_metadata(self):
         from ._czi_metadata import czi_metadata
-        return czi_metadata(self, self._czi._handles.get(), self._czi._xml_root)
+        meta = czi_metadata(self, self._czi._handles.get(), self._czi._xml_root)
+        if meta is not None and getattr(self, "_attachment", False):
+            # a label / slide preview: no position until its frame is verified (4.18)
+            meta = replace(meta, position={})
+        return meta
 
     def close(self) -> None:
         self._closed = True
@@ -868,7 +872,7 @@ class _ShiftedHandles(ThreadHandles):
         return _Shifted(ThreadHandles.get(self), self.base, self.size)
 
 
-#: attachments that are pictures of the slide, listed as further scenes (as the
+#: attachments that are pictures of the slide, listed as further series (as the
 #: slide TIFF and VSI readers list label and macro): CZI name -> image name.
 #: The Thumbnail (a small JPEG copy of the image itself) is left out.
 ATTACHED_IMAGES = {"Label": "label", "SlidePreview": "slide preview"}
@@ -941,7 +945,7 @@ class _CziFile(File):
         with self._open_raw() as fh:
             entries = _directory(fh)
             level0 = [e for e in entries if e.level0] or entries
-            #: pyramid subblocks (lower resolution levels of whole scenes)
+            #: pyramid subblocks (lower resolution levels of whole series)
             pyramid = [e for e in entries if not e.level0] if level0 is not entries else []
             #: {} for a sound file; otherwise what was damaged and recovered
             self.damage = _recover(fh, path, level0)
@@ -950,13 +954,13 @@ class _CziFile(File):
                 if e.key in self.damage["unresolved_keys"]:
                     e.position = -1                         # reading it raises
             d = self.damage
-            lost = (f"; {d['unrecoverable']} subblocks could NOT be found (scenes "
-                    f"{d['scenes_unreadable']}) and cannot be read"
+            lost = (f"; {d['unrecoverable']} subblocks could NOT be found (series "
+                    f"{d['series_unreadable']}) and cannot be read"
                     if d["unrecoverable"] else "")
             warnings.warn(DamagedFileWarning(
                 f"DAMAGED CZI FILE: {path!r}. Its subblock directory does not match the "
                 f"data from byte {d['first_bad_offset']:,} on ({d['misplaced']} of "
-                f"{len(level0)} subblocks misplaced, scenes {_ranges(d['scenes_affected'])}). "
+                f"{len(level0)} subblocks misplaced, series {_ranges(d['series_affected'])}). "
                 f"micro-reader recovered the real position of {d['recovered']} of them "
                 f"(shift {d['shifts']} bytes), each verified against the subblock's own "
                 f"header{lost}. Other readers (pylibCZIrw, aicspylibczi, Bio-Formats) fail "
@@ -970,23 +974,23 @@ class _CziFile(File):
             if values:
                 self._dim_starts[d] = min(values)
                 self._dim_sizes[d] = max(values) - min(values) + 1
-        per_scene: dict = {}
+        per_series: dict = {}
         for e in level0:
-            per_scene.setdefault(e.scene, set()).add(e.mosaic)
-        #: some scene has several mosaic tiles
-        self._tiled = any(len(m) > 1 for m in per_scene.values())
-        #: indices this file has, besides "scene"
+            per_series.setdefault(e.series, set()).add(e.mosaic)
+        #: some series has several mosaic tiles
+        self._tiled = any(len(m) > 1 for m in per_series.values())
+        #: indices this file has, besides "series"
         self._levels = (["tile"] if self._tiled and tiles == "separate" else []) + \
             [level for level, d in KEY_DIMS.items() if self._dim_sizes.get(d, 1) > 1]
         groups: dict = {}
         for e in level0:
             groups.setdefault(self._key_of(e), []).append(e)
         base = os.path.basename(path)
-        # resolution levels: stored for whole scenes only (pyramid subblocks
+        # resolution levels: stored for whole series only (pyramid subblocks
         # carry no tile index), and not trusted in a repaired directory
         with_levels = "tile" not in self._levels and pyramid and not self.damage
         listed = resolutions == "all"
-        # a plate (opt-in): scenes become wells and fields, in well order
+        # a plate (opt-in): series become wells and fields, in well order
         well_field, plate = self._plate_map(groups) if plates else (None, None)
         order = sorted(groups, key=(lambda v: (well_field[v[0]], v[1:]))
                        if well_field else None)
@@ -1000,7 +1004,7 @@ class _CziFile(File):
                 shown = {k: v for k, v in key.items() if k not in ("plate", "acquisition")}
                 shown["well"] = plate.wells[well].name
             else:
-                key = shown = dict(zip(["scene"] + self._levels, values))
+                key = shown = dict(zip(["series"] + self._levels, values))
             name = base + " " + " ".join(f"{k} {v}" for k, v in shown.items())
             if listed:
                 key["resolution"] = 0
@@ -1055,10 +1059,13 @@ class _CziFile(File):
 
     def _attached_images(self, images: list, resolutions: str, listed: bool) -> list:
         """The slide's label and preview (CZI attachments holding a CZI of
-        their own), as further scenes after the file's own."""
+        their own), as further series after the file's own.  They have no
+        stage position (``metadata.position`` is empty): their inner CZI's
+        stage tags are in a frame not verified against the slide's (plan
+        4.18)."""
         with self._open_raw() as fh:
             found = _attachments(fh)
-        scene = max([im.index.get("scene", -1) for im in images] + [-1]) + 1
+        series = max([im.index.get("series", -1) for im in images] + [-1]) + 1
         out = []
         base = os.path.basename(self.path)
         for attachment, label in ATTACHED_IMAGES.items():
@@ -1076,19 +1083,21 @@ class _CziFile(File):
                     if not picture.is_pyramid:
                         continue                    # its levels come with it
                     for level in picture.resolutions:
-                        level.index = {"scene": scene}
+                        level.index = {"series": series}
                         if listed or level is not picture:
                             level.index["resolution"] = level.level
                         level.name = f"{base} {label}"
+                        for each in [level] + level.parts:  # no stage position (4.18)
+                            each._attachment = True
                     out.extend(picture.resolutions if listed else [picture])
-                    scene += 1
+                    series += 1
         return out
 
     def _plate_map(self, groups: dict) -> tuple:
-        """``({scene: (well, field)}, Plate)`` when the file is a plate
+        """``({series: (well, field)}, Plate)`` when the file is a plate
         (``_czi_metadata.plate_layout``), else ``(None, None)``.  Wells are
-        the ones that hold scenes, in row then column order; the scenes of a
-        well are its fields, in scene order."""
+        the ones that hold series (CZI scenes), in row then column order; the
+        series of a well are its fields, in series order."""
         from ._czi_metadata import plate_layout
         layout = plate_layout(self._xml_root)
         if layout is None:
@@ -1116,7 +1125,7 @@ class _CziFile(File):
 
     def _resolution_levels(self, image: "_CziImage", pyramid: list, values: tuple, name: str,
                            key: dict) -> list:
-        """*image*'s lower resolution levels: one per stored zoom of its scene
+        """*image*'s lower resolution levels: one per stored zoom of its series
         (x rotation, view), each composed from that zoom's pyramid subblocks
         at their scaled positions in a grid of the scene's size x zoom (rounded
         down, as libCZI sizes a zoomed read)."""
@@ -1130,7 +1139,7 @@ class _CziFile(File):
             by_zoom.setdefault(round(e.stored_width / e.width, 6), []).append(e)
         levels = []
         for k, zoom in enumerate(sorted(by_zoom, reverse=True), start=1):
-            # coordinates in the file's frame at this zoom: the scene's corner
+            # coordinates in the file's frame at this zoom: the series' corner
             # (its origin) scaled, plus each subblock's scaled offset from it
             ox, oy = int(np.floor(x0 * zoom)), int(np.floor(y0 * zoom))
             placed = [replace(e, x=ox + int(np.floor((e.x - x0) * zoom)),
@@ -1155,7 +1164,7 @@ class _CziFile(File):
 
     def _key_of(self, e: Subblock) -> tuple:
         """The image index values of subblock *e*, in index order."""
-        values = [e.scene]
+        values = [e.series]
         for level in self._levels:
             if level == "tile":
                 values.append(max(e.mosaic, 0))
@@ -1165,9 +1174,9 @@ class _CziFile(File):
         return tuple(values)
 
     def canvas(self, **key) -> _CziImage:
-        """All scenes composed on one canvas: the box around every level-0
+        """All series composed on one canvas: the box around every level-0
         tile of the file (libCZI's ``total_bounding_rectangle_no_pyramid``),
-        background between the scenes.  Its ``origin`` is the box's corner.
+        background between the series.  Its ``origin`` is the box's corner.
         A file with several rotations / views needs ``rotation=`` /
         ``view=``: they are different frames."""
         unknown = set(key) - set(KEY_DIMS)

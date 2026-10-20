@@ -103,7 +103,7 @@ def test_ilastik_several_datasets_are_scenes(tmp_path):
         f["plain"] = np.zeros(5)                    # no axistags: not an image
     with micro_reader.open(path) as f:
         assert [im.axes for im in f.images] == ["cyx", "yxc"]       # name order: data, exported_data
-        assert [im.index for im in f.images] == [{"scene": 0}, {"scene": 1}]
+        assert [im.index for im in f.images] == [{"series": 0}, {"series": 1}]
         np.testing.assert_array_equal(f.images[1].read(c=2), probs[..., 2])
         assert f.images[1].as_axes("canonical").shape == (1, 3, 1, 20, 30)
         assert len(f.images[0].metadata.channels) == 2
@@ -186,7 +186,7 @@ def test_bdv_tiles_channels_timepoints_levels(tmp_path, decode_threads):
     stored = write_bdv(tmp_path)
     with micro_reader.open(tmp_path / "dataset.xml") as f:
         assert (f.backend, f.format) == ("bdv", "bdv-xml")
-        assert f.index_range == {"scene": 1, "tile": 2, "resolution": 1}
+        assert f.index_range == {"series": 1, "tile": 2, "resolution": 1}
         assert len(f.images) == 2
         image = f.select(tile=1)[0]
         assert image.axes == "tczyx" and image.shape == (2, 2, 6, 40, 50)
@@ -246,7 +246,7 @@ def test_bdv_scaleoffset_full_precision_chunks(tmp_path, chunk_path):
 def test_bdv_channel_names_and_all_levels(tmp_path):
     write_bdv(tmp_path, tiles=1, channel_names={0: "GFP", 1: "RFP"})
     with micro_reader.open(tmp_path / "dataset.xml", resolutions="all") as f:
-        assert f.index_range == {"scene": 1, "resolution": 2}
+        assert f.index_range == {"series": 1, "resolution": 2}
         assert [ch.name for ch in f.images[0].metadata.channels] == ["GFP", "RFP"]
         assert f.select(resolution=1)[0].shape[-2:] == (20, 25)
 
@@ -282,7 +282,7 @@ def test_bdv_hdf5_alone(tmp_path):
         f = micro_reader.open(tmp_path / "dataset.h5")
     with f:
         assert f.format == "bdv-hdf5"
-        assert f.index_range == {"scene": 1, "sequence": 4, "resolution": 1}
+        assert f.index_range == {"series": 1, "sequence": 4, "resolution": 1}
         image = f.select(sequence=3)[0]                     # setup 3 = tile 1, channel 1
         np.testing.assert_array_equal(image.read(t=0, c=0), stored[(0, 1, 1, 0)].view(np.uint16))
         assert image.metadata.pixel_sizes == {}
@@ -310,7 +310,7 @@ def test_bdv_setups_without_attributes_are_a_sequence(tmp_path):
     xml.write_text(re.sub(r"<attributes>.*?</attributes>", "", text, flags=re.S),
                    encoding="utf-8")
     with micro_reader.open(xml) as f:
-        assert f.index_range == {"scene": 1, "sequence": 4, "resolution": 1}
+        assert f.index_range == {"series": 1, "sequence": 4, "resolution": 1}
         image = f.select(sequence=3)[0]                     # setup 3: tile 1, channel 1
         assert image.shape[:2] == (2, 1)
         np.testing.assert_array_equal(image.read(t=1, c=0), stored[(1, 1, 1, 0)].view(np.uint16))
@@ -453,7 +453,7 @@ def test_fiji_hdf5_planes_and_scenes(tmp_path):
     write_fiji(tmp_path / "named.h5", {"raw": np.zeros((3, 8, 9), np.uint8),
                                        "mask": np.ones((8, 9), np.uint8)})
     with micro_reader.open(tmp_path / "named.h5") as f:
-        assert [(im.axes, im.index["scene"]) for im in f.images] == [("yx", 0), ("zyx", 1)]
+        assert [(im.axes, im.index["series"]) for im in f.images] == [("yx", 0), ("zyx", 1)]
     write_fiji(tmp_path / "four.h5", {"vol": np.zeros((2, 3, 8, 9), np.uint8)})
     with pytest.raises(UnsupportedFormatError, match="no axis order"):
         micro_reader.open(tmp_path / "four.h5")

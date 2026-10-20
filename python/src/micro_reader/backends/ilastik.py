@@ -9,7 +9,7 @@ first::
     {"axes": [{"key": "z", "typeFlags": 2, "resolution": 0, "description": ""},
               {"key": "y", ...}, {"key": "x", ...}, {"key": "c", "typeFlags": 1, ...}]}
 
-Each such dataset is one image (index ``scene``, in name order), with the
+Each such dataset is one image (index ``series``, in name order), with the
 dataset's own axis order (``zyxc``, ``tzyxc``, ``cyx``, ...: ``as_axes``
 gives another).  An ilastik project (``.ilp``) is not an image and is
 refused by the ``ims`` backend's catch-all.
@@ -102,7 +102,7 @@ class _IlastikImage(Image):
         self._closed = False
         super().__init__(position, axes, ds.shape, ds.dtype,
                          name=name if name != "exported_data" else os.path.basename(path),
-                         read_unit=ds.chunks, index={"scene": position})
+                         read_unit=ds.chunks, index={"series": position})
 
     def _read_metadata(self):
         n = self.shape[self.axes.index("c")] if "c" in self.axes else 1

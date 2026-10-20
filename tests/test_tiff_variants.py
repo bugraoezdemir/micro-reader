@@ -546,9 +546,9 @@ def test_ndtiff_positions_are_scenes(tmp_path, per_file):
     assert len(paths) == (1 if per_file is None else 5)
     with micro_reader.open(paths[0]) as f:
         assert f.format == "ndtiff"
-        assert [im.index["scene"] for im in f.images] == [0, 1]
+        assert [im.index["series"] for im in f.images] == [0, 1]
         for im in f.images:
-            p = im.index["scene"]
+            p = im.index["series"]
             a = im.as_axes("tczyx")
             assert a.shape == (3, 2, 2, 24, 40)
             whole = a[...]

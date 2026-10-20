@@ -25,7 +25,7 @@ UM = "micrometer"
 
 def _check_all(f, data):
     """Every plane written equals the image's; every other plane is zeros."""
-    by_scene = {im.index["scene"]: im[...] for im in f.images}
+    by_scene = {im.index["series"]: im[...] for im in f.images}
     for (p, t, c, z), plane in data.items():
         if p in by_scene:
             np.testing.assert_array_equal(by_scene[p][t, c, z], plane)
@@ -43,7 +43,7 @@ def test_one_position_1_4(tmp_path):
             assert (f.backend, f.format) == ("micromanager", "micromanager-files")
             (im,) = f.images
             assert im.axes == "tczyx" and im.shape == (3, 2, 2, Y, X) and im.dtype == "uint16"
-            assert im.index == {"scene": 0} and im.name == "acq_1"
+            assert im.index == {"series": 0} and im.name == "acq_1"
             _check_all(f, data)
             np.testing.assert_array_equal(im[2, 1, 1, 2:5, 3:9], data[(0, 2, 1, 1)][2:5, 3:9])
             md = im.metadata
@@ -89,7 +89,7 @@ def test_positions_are_scenes_and_any_part_opens_them(tmp_path):
         with micro_reader.open(opened) as f:
             assert f.backend == "micromanager" and os.path.samefile(f.path, files[0])
             assert f.opened == opened
-            assert [im.index for im in f.images] == [{"scene": k} for k in range(3)]
+            assert [im.index for im in f.images] == [{"series": k} for k in range(3)]
             assert [im.name for im in f.images] == [f"acq {label}" for label in labels]
             np.testing.assert_array_equal(f.images[2][1, 1, 0], data[(2, 1, 1, 0)])
     with micro_reader.open(root) as f:
@@ -122,7 +122,7 @@ def test_a_position_folder_that_is_missing(tmp_path):
         f = micro_reader.open(root)
     with f:
         assert os.path.samefile(f.path, files[1])          # the first position there
-        assert [im.index["scene"] for im in f.images] == [1, 3]
+        assert [im.index["series"] for im in f.images] == [1, 3]
         _check_all(f, data)
 
 

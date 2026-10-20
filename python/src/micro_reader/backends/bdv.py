@@ -502,7 +502,7 @@ def _build(h5, path: str, xml: Optional[_Xml], resolutions: str, tiles: str,
     absent = []
     images_by_level = []
     for g, (gkey, group) in enumerate(sorted(groups.items())):
-        index = {"scene": 0}
+        index = {"series": 0}
         index.update({name: ranks[a].index(v) for name, a, v in zip(index_names, dims, gkey)})
         n_levels = {_levels(h5, s.id) for s in group}
         if len(n_levels) != 1:

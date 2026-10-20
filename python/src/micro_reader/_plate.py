@@ -17,7 +17,7 @@ from dataclasses import dataclass, field as _field, replace
 from typing import Tuple
 
 #: indices that nest (docs/AXES.md); every other index is orthogonal
-CONTAINMENT = ("plate", "well", "field", "scene", "tile", "part", "resolution")
+CONTAINMENT = ("plate", "well", "field", "series", "tile", "part", "resolution")
 
 
 def row_label(row: int) -> str:

@@ -3,7 +3,7 @@ tifffile's series are images, what they are called, and how the tiles of a
 Ventana BIF scan are placed.
 
 Series kept follow Bio-Formats per format, so that eubi-bridge gives the
-same scenes whichever reader it uses (Bugra, 2026-10-15):
+same series whichever reader it uses (Bugra, 2026-10-15):
 
 - Aperio SVS: the thumbnail is left out (a small copy of the pyramid);
   label and macro stay, after the slide.

@@ -143,11 +143,11 @@ def test_own_codec_matches_tifffile(files, name, decode_threads):
     with tifffile.TiffFile(path) as tf:
         ref = tf.series[0].asarray()
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        assert scene._codec == codec                    # decoded by micro-reader, not tifffile
-        assert scene.shape == ref.shape and scene.dtype == ref.dtype
+        series = img.images[0]
+        assert series._codec == codec                    # decoded by micro-reader, not tifffile
+        assert series.shape == ref.shape and series.dtype == ref.dtype
         for key in _keys(ref.shape):
-            got = scene[key]
+            got = series[key]
             assert got.dtype.isnative
             _compare(got, ref[key], tolerance, f"{name} {key}")
 
@@ -209,10 +209,10 @@ def test_jpeg_tables_are_joined(tmp_path, photometric, shape):
         assert tf.pages[0].jpegtables == tables        # the case under test
         ref = tf.asarray()
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        assert scene._codec == "jpeg"
-        _compare(scene[...], ref, 3, photometric)
-        assert np.abs(scene[...].astype(int) - data.astype(int)).mean() < 3   # really the image
+        series = img.images[0]
+        assert series._codec == "jpeg"
+        _compare(series[...], ref, 3, photometric)
+        assert np.abs(series[...].astype(int) - data.astype(int)).mean() < 3   # really the image
 
 
 def test_other_compressions_go_to_tifffile(tmp_path):
@@ -224,9 +224,9 @@ def test_other_compressions_go_to_tifffile(tmp_path):
     except Exception as exc:                            # noqa: BLE001
         pytest.skip(f"no LERC encoder: {exc}")
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        assert scene._codec is None
-        np.testing.assert_array_equal(scene[...], tifffile.imread(path))
+        series = img.images[0]
+        assert series._codec is None
+        np.testing.assert_array_equal(series[...], tifffile.imread(path))
 
 
 def test_missing_imagecodecs_is_explained(tmp_path, monkeypatch):
@@ -239,14 +239,14 @@ def test_missing_imagecodecs_is_explained(tmp_path, monkeypatch):
     except Exception as exc:                            # noqa: BLE001
         pytest.skip(f"no LERC encoder: {exc}")
     with micro_reader.open(path) as img:
-        scene = img.images[0]
+        series = img.images[0]
 
         def fail(*args, **kwargs):
             raise ValueError("requires the imagecodecs package")
-        monkeypatch.setattr(scene, "_decode", fail)
+        monkeypatch.setattr(series, "_decode", fail)
         monkeypatch.setitem(sys.modules, "imagecodecs", None)   # import fails
         with pytest.raises(UnsupportedFormatError, match="imagecodecs"):
-            scene[...]
+            series[...]
 
 
 # -- packed bit depths and FillOrder 2 (codec audit follow-up #2) ----------------------
@@ -276,10 +276,10 @@ def test_packed_depths_and_fill_order(tmp_path, bits, dtype, byteorder, compress
         pytest.skip("plain whole-byte samples: covered elsewhere")
     path, data = _packed_case(tmp_path, bits, dtype, byteorder, compression, fillorder, 1)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        assert scene._codec is not None                  # decoded by micro-reader
+        series = img.images[0]
+        assert series._codec is not None                  # decoded by micro-reader
         for key in _keys(data.shape):
-            np.testing.assert_array_equal(scene[key], data[key], err_msg=str(key))
+            np.testing.assert_array_equal(series[key], data[key], err_msg=str(key))
     if bits == 24:
         # tifffile is no reference for 24-bit samples, and its behaviour
         # changed between versions: 2025.12.20 shifts little-endian samples
@@ -363,10 +363,10 @@ def test_eer_movies(tmp_path, name, bits, decode_threads):
         dtype, shape = tf.series[0].dtype, tf.series[0].shape
     ref = truth.astype(dtype)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        assert scene._codec == "eer" and scene.dtype == dtype and scene.shape == shape
+        series = img.images[0]
+        assert series._codec == "eer" and series.dtype == dtype and series.shape == shape
         for key in _keys(ref.shape):
-            np.testing.assert_array_equal(scene[key], ref[key], err_msg=str(key))
+            np.testing.assert_array_equal(series[key], ref[key], err_msg=str(key))
 
 
 def test_eer_without_imagecodecs(tmp_path, monkeypatch):

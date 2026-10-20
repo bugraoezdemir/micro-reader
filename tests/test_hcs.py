@@ -1,7 +1,7 @@
 """Plates (docs/HCS.md): ``File.plates``, the well / field indices, and the
 pyramid sub-identity of images.  Zeiss plates from the own CZI writer
 (tests/_czi_writer.py), with the plate metadata Zen writes: the sample-holder
-template (rows x columns) and a ``Shape`` per scene naming its well, 1-based."""
+template (rows x columns) and a ``Shape`` per series naming its well, 1-based."""
 from __future__ import annotations
 
 import numpy as np
@@ -19,8 +19,8 @@ ONE = {"plate": 0, "acquisition": 0}
 
 
 def _plate_xml(scenes, rows=8, columns=12, template=True):
-    """*scenes*: {scene: (row, column, name) with Zeiss' 1-based row / column,
-    or None for a scene without a well}."""
+    """*scenes*: {series: (row, column, name) with Zeiss' 1-based row / column,
+    or None for a series without a well}."""
     parts = []
     for s, shape in scenes.items():
         inner = ""
@@ -42,12 +42,12 @@ def _plate_xml(scenes, rows=8, columns=12, template=True):
 
 
 def _write(path, scenes, metadata, tiles_per_scene=1):
-    """One tile (or *tiles_per_scene* mosaic tiles) per scene -> {(scene, tile): array}."""
+    """One tile (or *tiles_per_scene* mosaic tiles) per series -> {(series, tile): array}."""
     out, data = [], {}
     for s in scenes:
         for m in range(tiles_per_scene):
             a = RNG.integers(1, 60000, (H, W)).astype("u2")
-            t = dict(scene=s, plane={"C": 0}, x=1000 * s + W * m, y=0, height=H, width=W,
+            t = dict(series=s, plane={"C": 0}, x=1000 * s + W * m, y=0, height=H, width=W,
                      dtype="u2", compression=0, payload=raw_payload(a))
             if tiles_per_scene > 1:
                 t["mosaic"] = m
@@ -57,7 +57,7 @@ def _write(path, scenes, metadata, tiles_per_scene=1):
     return data
 
 
-# scene 0 is in a later well than scenes 1 and 2: images follow the wells
+# series 0 is in a later well than scenes 1 and 2: images follow the wells
 SCENES = {0: (3, 5, "C5"), 1: (2, 2, "B2"), 2: (2, 2, "B2")}
 
 
@@ -68,7 +68,7 @@ def test_a_zeiss_plate_is_read_as_one_with_plates_true(tmp_path):
         (plate,) = f.plates
         assert plate.rows == tuple("ABCDEFGH") and plate.columns == tuple(str(c) for c in range(1, 13))
         assert plate.wells == (micro_reader.Well(1, 1, "B2"), micro_reader.Well(2, 4, "C5"))
-        # wells in row-column order, a well's scenes are its fields in scene order
+        # wells in row-column order, a well's scenes are its fields in series order
         assert f.indices == [{**ONE, "well": 0, "field": 0}, {**ONE, "well": 0, "field": 1},
                              {**ONE, "well": 1, "field": 0}]
         assert f.index_range == {"plate": 1, "acquisition": 1, "well": 2, "field": 2}
@@ -76,8 +76,8 @@ def test_a_zeiss_plate_is_read_as_one_with_plates_true(tmp_path):
         assert f.select(well=0) == f.select(plate=0, acquisition=0, well=0) == f.images[:2]
         assert [image.name.split(".czi ")[1] for image in f.images] == \
             ["well B2 field 0", "well B2 field 1", "well C5 field 0"]
-        for image, scene in zip(f.images, (1, 2, 0)):
-            np.testing.assert_array_equal(image[0, 0, 0], data[(scene, 0)])
+        for image, series in zip(f.images, (1, 2, 0)):
+            np.testing.assert_array_equal(image[0, 0, 0], data[(series, 0)])
         (c5,) = f.select(well=plate.well_index("C5"))
         np.testing.assert_array_equal(c5[0, 0, 0], data[(0, 0)])
         with pytest.raises(KeyError, match="no well 'H12'"):
@@ -91,7 +91,7 @@ def test_plates_are_opt_in(tmp_path):
     _write(path, SCENES, _plate_xml(SCENES))
     with micro_reader.open(path) as f:
         assert f.plates == []
-        assert f.indices == [{"scene": s} for s in range(3)]
+        assert f.indices == [{"series": s} for s in range(3)]
 
 
 def test_mosaic_tiles_stay_within_their_field(tmp_path):
@@ -110,15 +110,15 @@ def test_mosaic_tiles_stay_within_their_field(tmp_path):
 
 @pytest.mark.parametrize("xml", [
     _plate_xml(SCENES, template=False),                       # no plate layout
-    _plate_xml({0: (3, 5, "C5"), 1: None, 2: (2, 2, "B2")}),  # a scene outside any well
+    _plate_xml({0: (3, 5, "C5"), 1: None, 2: (2, 2, "B2")}),  # a series outside any well
     _plate_xml({0: (9, 5, "I5"), 1: (2, 2, "B2"), 2: (2, 2, "B2")}),  # a well off the plate
-], ids=["no-template", "scene-without-well", "well-off-plate"])
+], ids=["no-template", "series-without-well", "well-off-plate"])
 def test_files_that_are_not_plates_keep_their_scenes(tmp_path, xml):
     path = str(tmp_path / "scenes.czi")
     _write(path, SCENES, xml)
     with micro_reader.open(path, plates=True) as f:
         assert f.plates == []
-        assert f.indices == [{"scene": s} for s in range(3)]
+        assert f.indices == [{"series": s} for s in range(3)]
 
 
 def test_unnamed_wells_are_named_from_their_row_and_column(tmp_path):
@@ -134,7 +134,7 @@ def test_plates_true_on_a_format_without_plates_changes_nothing(tmp_path):
     path = str(tmp_path / "flat.tif")
     tifffile.imwrite(path, np.zeros((8, 9), "u1"))
     with micro_reader.open(path, plates=True) as f:
-        assert f.plates == [] and f.indices == [{"scene": 0}]
+        assert f.plates == [] and f.indices == [{"series": 0}]
 
 
 def test_row_labels():
@@ -180,7 +180,7 @@ def test_orthogonal_indices_are_picked_with_select(tmp_path):
     for v in range(2):
         for m in range(2):
             a = RNG.integers(1, 60000, (H, W)).astype("u2")
-            out.append(dict(scene=0, mosaic=m, plane={"C": 0, "V": v}, x=W * m, y=0,
+            out.append(dict(series=0, mosaic=m, plane={"C": 0, "V": v}, x=W * m, y=0,
                             height=H, width=W, dtype="u2", compression=0,
                             payload=raw_payload(a)))
             data[(v, m)] = a
@@ -214,7 +214,7 @@ def test_the_outline_of_a_plate(tmp_path):
         assert repr(f) == f.outline()                 # short enough to show whole
     with micro_reader.open(path) as f:                 # not read as a plate: scenes
         assert f.outline().splitlines()[1:] == [
-            f"  scene {s}: tiles 0-1, tczyx (1, 1, 1, {H}, {W}) uint16" for s in range(3)]
+            f"  series {s}: tiles 0-1, tczyx (1, 1, 1, {H}, {W}) uint16" for s in range(3)]
 
 
 def test_repr_shows_the_start_of_a_long_outline(tmp_path):
@@ -235,7 +235,7 @@ def test_the_outline_shows_pyramid_levels_once(tmp_path):
     _pyramid_tiff(path, data)
     for policy in ("base", "all"):                     # levels listed as images: still one line
         with micro_reader.open(path, resolutions=policy) as f:
-            assert f.outline().splitlines()[1:] == ["  scene 0: cyx (2, 96, 80) uint16, 3 levels"]
+            assert f.outline().splitlines()[1:] == ["  series 0: cyx (2, 96, 80) uint16, 3 levels"]
 
 
 def test_runs():

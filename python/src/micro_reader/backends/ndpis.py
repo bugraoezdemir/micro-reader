@@ -10,7 +10,7 @@ A pointed set, index only (docs/COMPOSITE.md): the ``.ndpis`` names its
 members, which say nothing back and open alone as ordinary NDPI slides.
 Opened, the ``.ndpis`` is one slide image with one channel per member, at
 every resolution level the members store; the members' associated pictures
-(Macro, Map) follow as further scenes, from the first member (NDP.scan writes
+(Macro, Map) follow as further series, from the first member (NDP.scan writes
 the same ones into every file).
 
 NDP.scan stores each fluorescence channel as an RGB rendering in the colour
@@ -186,16 +186,16 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base") -> _Ndpi
         first = next(m for m in members if m is not None)
         stem = os.path.splitext(os.path.basename(path))[0]
         n_levels = len(first.slide.resolutions)
-        index = {"scene": 0}
+        index = {"series": 0}
         pyramid = [_NdpisImage(members, k, path, dict(index, resolution=k) if (k or resolutions == "all")
                                else dict(index), stem) for k in range(n_levels)]
         for level in pyramid:
             level._resolutions = pyramid
         images = pyramid if resolutions == "all" else [pyramid[0]]
-        # the associated pictures, from the first member, as further scenes
+        # the associated pictures, from the first member, as further series
         for k, extra in enumerate(first.file.images[1:], 1):
             extra._position = len(images)
-            extra.index = dict(extra.index, scene=k)
+            extra.index = dict(extra.index, series=k)
             images.append(extra)
         return _NdpisFile(path, images, members)
     except BaseException:

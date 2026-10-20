@@ -17,7 +17,7 @@ are tried; two files for one name: a warning, neither is used).  Each file
 holds the z planes of one wavelength, position and timepoint: ``NZSteps``
 planes (``DoZSeries``), one for a wavelength with ``WaveDoZ<k>`` FALSE.
 
-- One micro-reader image per stage position (index ``scene``), axes
+- One micro-reader image per stage position (index ``series``), axes
   ``t c z y x``; channels are the wavelengths, named by ``WaveName<k>``.
 - Wavelengths with and without z: the image is ragged (docs/AXES.md,
   ``_fileset.ragged_field``), its planes placed by the members' own focus
@@ -525,7 +525,7 @@ class _NDFile(File):
         images = []
         for s in sorted(kept):
             name = self._image_name(s)
-            index = {"scene": s}
+            index = {"series": s}
             z_at = self._focus(kept[s]) if len(parts) > 1 else {}
 
             def make(planes, shape_tcz, chs, dz, index, readable, name=name):

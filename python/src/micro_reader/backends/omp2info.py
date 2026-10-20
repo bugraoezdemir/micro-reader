@@ -10,7 +10,7 @@ from ``areaLeft`` / ``areaTop`` (nm, stage coordinates).  The tiles are OIR
 files that store no x / y stage position themselves: the index is the only
 record of where they go.
 
-- One image per tile (``tiles="separate"``), index ``scene`` (the group) and
+- One image per tile (``tiles="separate"``), index ``series`` (the group) and
   ``tile`` (its place in the index), read from its own file (opened when first
   read); its metadata is the tile file's, with the position from the index
   (the first pixel's centre: ``areaLeft + xIndex * step`` plus half a pixel;
@@ -224,7 +224,7 @@ class _TilingFile(File):
                           info["areaTop"] + yi * info["areaHeight"] * share)
                 tile = _Tile(len(images) if tiles == "separate" else 0, self._members,
                              found[name], like, f"{where} group {g} tile {k} "
-                             f"({os.path.splitext(name)[0]})", {"scene": g, "tile": k}, corner)
+                             f"({os.path.splitext(name)[0]})", {"series": g, "tile": k}, corner)
                 placed.append((tile, xi, yi, corner))
                 if tiles == "separate":
                     images.append(tile)
@@ -234,7 +234,7 @@ class _TilingFile(File):
                 corner = (min(c[0] for *_r, c in placed), min(c[1] for *_r, c in placed))
                 images.append(_TilingMosaic(
                     len(images), [(t, round(yi * step_y), round(xi * step_x)) for t, xi, yi, _c in placed],
-                    f"{where} group {g}", {"scene": g}, corner))
+                    f"{where} group {g}", {"series": g}, corner))
         super().__init__(path, images)
 
     def _member_files(self) -> set:

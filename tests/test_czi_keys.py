@@ -17,16 +17,16 @@ H, W = 12, 16
 
 
 def _write(path, tiles):
-    """*tiles*: [(scene, mosaic or None, plane dict, (x, y))] -> {tile: array}."""
+    """*tiles*: [(series, mosaic or None, plane dict, (x, y))] -> {tile: array}."""
     out, data = [], {}
-    for scene, mosaic, plane, (x, y) in tiles:
+    for series, mosaic, plane, (x, y) in tiles:
         a = RNG.integers(1, 60000, (H, W)).astype("u2")
-        t = dict(scene=scene, plane=plane, x=x, y=y, height=H, width=W, dtype="u2",
+        t = dict(series=series, plane=plane, x=x, y=y, height=H, width=W, dtype="u2",
                  compression=0, payload=raw_payload(a))
         if mosaic is not None:
             t["mosaic"] = mosaic
         out.append(t)
-        data[(scene, mosaic, tuple(sorted(plane.items())))] = a
+        data[(series, mosaic, tuple(sorted(plane.items())))] = a
     write_czi(path, out)
     return data
 
@@ -37,8 +37,8 @@ def test_views_and_rotations_are_images_not_axes(tmp_path):
              for r in range(2) for v in range(3) for c in range(2)]
     data = _write(path, tiles)
     with micro_reader.open(path) as f:
-        assert f.index_range == {"scene": 1, "rotation": 2, "view": 3}
-        assert f.indices == [{"scene": 0, "rotation": r, "view": v}
+        assert f.index_range == {"series": 1, "rotation": 2, "view": 3}
+        assert f.indices == [{"series": 0, "rotation": r, "view": v}
                                 for r in range(2) for v in range(3)]
         for image in f.images:
             assert image.axes == "tczyx" and image.shape == (1, 2, 1, H, W)
@@ -58,9 +58,9 @@ def test_block_illumination_phase_are_indices(tmp_path):
              for b, i, h, z in itertools.product(range(2), range(2), range(3), range(2))]
     data = _write(path, tiles)
     with micro_reader.open(path) as f:
-        assert f.index_range == {"scene": 1, "illumination": 2, "phase": 3, "block": 2}
+        assert f.index_range == {"series": 1, "illumination": 2, "phase": 3, "block": 2}
         assert len(f.images) == 2 * 2 * 3
-        assert f.indices[0] == {"scene": 0, "illumination": 0, "phase": 0, "block": 0}
+        assert f.indices[0] == {"series": 0, "illumination": 0, "phase": 0, "block": 0}
         for image in f.images:
             assert image.axes == "tczyx" and image.shape == (1, 1, 2, H, W)
             i, h, b = (image.index[k] for k in ("illumination", "phase", "block"))
@@ -78,14 +78,14 @@ def test_tiles_per_scene_are_ragged_and_stitching_is_opt_in(tmp_path):
             [(1, m, {"C": 0}, (500 + W * m, 0)) for m in range(2)]
     data = _write(path, tiles)
     with micro_reader.open(path) as f:
-        assert f.indices == [{"scene": 0, "tile": m} for m in range(3)] + \
-            [{"scene": 1, "tile": m} for m in range(2)]
-        assert f.index_range == {"scene": 2, "tile": 3}
+        assert f.indices == [{"series": 0, "tile": m} for m in range(3)] + \
+            [{"series": 1, "tile": m} for m in range(2)]
+        assert f.index_range == {"series": 2, "tile": 3}
         for image in f.images:
-            s, m = image.index["scene"], image.index["tile"]
+            s, m = image.index["series"], image.index["tile"]
             np.testing.assert_array_equal(image[0, 0, 0], data[(s, m, (("C", 0),))])
     with micro_reader.open(path, tiles="mosaic") as f:
-        assert f.indices == [{"scene": 0}, {"scene": 1}]
+        assert f.indices == [{"series": 0}, {"series": 1}]
         assert f.images[0].shape[-2:] == (H, 3 * W)
         np.testing.assert_array_equal(f.images[1][0, 0, 0, :, W:], data[(1, 1, (("C", 0),))])
 
@@ -94,7 +94,7 @@ def test_single_tile_scenes_have_no_tile_level(tmp_path):
     path = str(tmp_path / "one.czi")
     _write(path, [(0, 0, {"C": 0}, (0, 0)), (1, 0, {"C": 0}, (100, 0))])
     with micro_reader.open(path) as f:
-        assert f.indices == [{"scene": 0}, {"scene": 1}]
+        assert f.indices == [{"series": 0}, {"series": 1}]
 
 
 def test_canvas_needs_a_view_when_there_are_several(tmp_path):

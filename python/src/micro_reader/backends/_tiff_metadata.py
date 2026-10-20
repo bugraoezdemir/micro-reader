@@ -209,10 +209,10 @@ def _ome_image(image, cache: dict):
     """The OME Image element of *image*'s series: the one whose planes start
     at the series' first IFD, else the one at the series' position."""
     images = _ome_images(image._tif, cache)
-    if getattr(image._series, "kind", "") == "mmstack" and "scene" in image.index:
+    if getattr(image._series, "kind", "") == "mmstack" and "series" in image.index:
         # Micro-Manager positions are one tifffile series (axis R, read as
-        # scenes); its OME-XML has one Image per position, in position order
-        n = image.index["scene"]
+        # series); its OME-XML has one Image per position, in position order
+        n = image.index["series"]
         return images[n][1] if n < len(images) else None
     first_ifd = getattr(image._series.keyframe, "index", None)
     matches = [e for ifd, e in images if ifd is not None and ifd == first_ifd]

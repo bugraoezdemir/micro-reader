@@ -30,15 +30,15 @@ def test_one_image_with_a_channel_per_member(tmp_path):
         assert [c.name for c in channels] == ["DAPI 2 (387)", "FITC 2 (485)", "TRITC 2 (560)"]
         assert [c.emission_wavelength for c in channels] == \
             [(455.0, "nanometer"), (519.0, "nanometer"), (622.0, "nanometer")]
-        # the first member's associated picture follows as a further scene
-        assert [im.index["scene"] for im in f.images] == [0, 1] and f.images[1].shape == (20, 60, 3)
+        # the first member's associated picture follows as a further series
+        assert [im.index["series"] for im in f.images] == [0, 1] and f.images[1].shape == (20, 60, 3)
 
 
 def test_all_levels_as_images(tmp_path):
     path, _, _ = write_set(str(tmp_path))
     with micro_reader.open(path, resolutions="all") as f:
-        assert [im.index for im in f.images[:2]] == [{"scene": 0, "resolution": 0},
-                                                      {"scene": 0, "resolution": 1}]
+        assert [im.index for im in f.images[:2]] == [{"series": 0, "resolution": 0},
+                                                      {"series": 0, "resolution": 1}]
 
 
 def test_members_open_alone(tmp_path):

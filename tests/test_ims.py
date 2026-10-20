@@ -118,11 +118,11 @@ def test_lz4_chunks_decoded_natively(tmp_path, shuffle, decode_threads):
     path = str(tmp_path / "lz4.ims")
     ref = write_ims_lz4(path, shuffle=shuffle)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        layout = scene._layout(0, 0)
+        series = img.images[0]
+        layout = series._layout(0, 0)
         assert layout.native and 32004 in layout.filters
         for key in _keys(ref.shape):
-            np.testing.assert_array_equal(scene[key], ref[key], err_msg=str(key))
+            np.testing.assert_array_equal(series[key], ref[key], err_msg=str(key))
 
 
 def _keys(shape, n=25, seed=3):
@@ -161,16 +161,16 @@ def test_matches_h5py_cropped(tmp_path, name, decode_threads):
     kwargs = dict(VARIANTS[name])
     ref = write_ims(str(tmp_path / "a.ims"), **kwargs)
     with micro_reader.open(str(tmp_path / "a.ims")) as img:
-        scene = img.images[0]
-        assert img.backend == "ims" and scene.axes == "tczyx"
-        assert scene.shape == ref.shape                     # real size, not padded
-        assert scene.dtype == ref.dtype.newbyteorder("=")
-        assert scene._layout(0, 0).native == (not name.endswith("_fallback"))
+        series = img.images[0]
+        assert img.backend == "ims" and series.axes == "tczyx"
+        assert series.shape == ref.shape                     # real size, not padded
+        assert series.dtype == ref.dtype.newbyteorder("=")
+        assert series._layout(0, 0).native == (not name.endswith("_fallback"))
         if name == "unwritten_chunks":                     # a mix of written and missing
-            layout = scene._layout(0, 0)
+            layout = series._layout(0, 0)
             assert (0, 0, 0) in layout.where and (0, 16, 0) not in layout.where
         for key in _keys(ref.shape):
-            got = scene[key]
+            got = series[key]
             assert got.dtype.isnative
             np.testing.assert_array_equal(got, ref[key], err_msg=f"{name} {key}")
 
@@ -178,12 +178,12 @@ def test_matches_h5py_cropped(tmp_path, name, decode_threads):
 def test_chunks_decoded_once_and_cached(tmp_path):
     write_ims(str(tmp_path / "a.ims"), compression="gzip")
     with micro_reader.open(str(tmp_path / "a.ims")) as img:
-        scene = img.images[0]
-        assert scene.read_unit == (1, 1, 4, 16, 16)
-        scene[0, 0, 0:2, 0:5, 0:5]
-        assert scene.stats.pixels_read == 4 * 16 * 16        # one chunk
-        scene[0, 0, 1:3, 6:9, 6:9]
-        assert scene.stats.pixels_read == 4 * 16 * 16        # same chunk: cached
+        series = img.images[0]
+        assert series.read_unit == (1, 1, 4, 16, 16)
+        series[0, 0, 0:2, 0:5, 0:5]
+        assert series.stats.pixels_read == 4 * 16 * 16        # one chunk
+        series[0, 0, 1:3, 6:9, 6:9]
+        assert series.stats.pixels_read == 4 * 16 * 16        # same chunk: cached
 
 
 def test_padding_never_read(tmp_path):
@@ -235,12 +235,12 @@ def test_concurrent_reads(tmp_path, decode_threads):
     keys = _keys(ref.shape, n=40, seed=9)
     errors = []
     with micro_reader.open(path) as img:
-        scene = img.images[0]
+        series = img.images[0]
 
         def worker(i):
             try:
                 for key in keys[i::4]:
-                    if not np.array_equal(scene[key], ref[key]):
+                    if not np.array_equal(series[key], ref[key]):
                         errors.append(key)
             except Exception as exc:          # noqa: BLE001
                 errors.append(exc)
@@ -271,9 +271,9 @@ def test_zstd_filter_decoded_natively(tmp_path):
     path = str(tmp_path / "zstd.ims")
     data = _write_filtered(path, 32015, zstandard.ZstdCompressor().compress)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        assert scene._layout(0, 0).native
-        np.testing.assert_array_equal(scene[0, 0], data)
+        series = img.images[0]
+        assert series._layout(0, 0).native
+        np.testing.assert_array_equal(series[0, 0], data)
 
 
 def test_missing_hdf5_filter_is_named(tmp_path):

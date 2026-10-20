@@ -32,7 +32,7 @@ def _frames(n, h=37, w=53, channels=2, samples=1, dtype="u2", seed=0):
 
 
 def _expected(frames, loops, missing=()):
-    """Per scene (XY position): t c z y x [s] from frames in loop order."""
+    """Per series (XY position): t c z y x [s] from frames in loop order."""
     frames = frames.copy()
     for i in missing:
         frames[i] = 0
@@ -105,11 +105,11 @@ def test_matches_known_data(tmp_path, name, decode_threads):
     with micro_reader.open(path) as img:
         assert img.backend == "nd2"
         assert len(img.images) == len(expected)
-        for scene, ref in zip(img.images, expected):
-            assert scene.shape == ref.shape and scene.dtype == ref.dtype
-            assert scene.axes == ("tczyxs" if ref.ndim == 6 else "tczyx")
+        for series, ref in zip(img.images, expected):
+            assert series.shape == ref.shape and series.dtype == ref.dtype
+            assert series.axes == ("tczyxs" if ref.ndim == 6 else "tczyx")
             for key in _keys(ref.shape):
-                np.testing.assert_array_equal(scene[key], ref[key], err_msg=f"{name} {key}")
+                np.testing.assert_array_equal(series[key], ref[key], err_msg=f"{name} {key}")
 
 
 #: nd2 0.11 reads padded rows with more than one channel of RGB components
@@ -149,24 +149,24 @@ def test_uncompressed_reads_only_the_rows_asked_for(tmp_path, monkeypatch):
     monkeypatch.setattr(nd2_backend, "SEPARATE_READ_BYTES", 0)
     path, expected = _write(tmp_path, "z_rgb_padded")
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        assert scene.read_unit is None
-        np.testing.assert_array_equal(scene[0, 0, 2, 10:14], expected[0][0, 0, 2, 10:14])
-        assert scene.stats.pixels_read == 4 * 53 * 3                 # 4 whole rows
-        scene.stats.reset()
-        np.testing.assert_array_equal(scene[0, 0, 2, 10:14, 5:9], expected[0][0, 0, 2, 10:14, 5:9])
-        assert scene.stats.pixels_read == 4 * 4 * 3                  # narrow: only its bytes
+        series = img.images[0]
+        assert series.read_unit is None
+        np.testing.assert_array_equal(series[0, 0, 2, 10:14], expected[0][0, 0, 2, 10:14])
+        assert series.stats.pixels_read == 4 * 53 * 3                 # 4 whole rows
+        series.stats.reset()
+        np.testing.assert_array_equal(series[0, 0, 2, 10:14, 5:9], expected[0][0, 0, 2, 10:14, 5:9])
+        assert series.stats.pixels_read == 4 * 4 * 3                  # narrow: only its bytes
 
 
 def test_lossless_frames_decoded_once(tmp_path):
     path, expected = _write(tmp_path, "lossless")
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        assert scene.read_unit == (1, 2, 1, 37, 53)
-        scene[0, 0, 1, 0:5, 0:5]
-        assert scene.stats.pixels_read == 37 * 53 * 2                # the whole frame
-        scene[0, 1, 1, 20:30, 10:40]
-        assert scene.stats.pixels_read == 37 * 53 * 2                # cached
+        series = img.images[0]
+        assert series.read_unit == (1, 2, 1, 37, 53)
+        series[0, 0, 1, 0:5, 0:5]
+        assert series.stats.pixels_read == 37 * 53 * 2                # the whole frame
+        series[0, 1, 1, 20:30, 10:40]
+        assert series.stats.pixels_read == 37 * 53 * 2                # cached
 
 
 def test_legacy_nd2_is_refused(tmp_path):
@@ -201,9 +201,9 @@ def test_concurrent_reads(tmp_path, decode_threads):
     with micro_reader.open(path) as img:
         def worker(i):
             try:
-                for p, (scene, ref) in enumerate(zip(img.images, expected)):
+                for p, (series, ref) in enumerate(zip(img.images, expected)):
                     for key in _keys(ref.shape, n=10, seed=i * 7 + p):
-                        if not np.array_equal(scene[key], ref[key]):
+                        if not np.array_equal(series[key], ref[key]):
                             errors.append((p, key))
             except Exception as exc:        # noqa: BLE001
                 errors.append(exc)
@@ -221,6 +221,6 @@ def test_uncompressed_narrow_reads_merge_rows(tmp_path):
     so whole rows are read (as in LIF); pixels stay exact."""
     path, expected = _write(tmp_path, "z_rgb_padded")
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        np.testing.assert_array_equal(scene[0, 0, 2, 10:14, 5:9], expected[0][0, 0, 2, 10:14, 5:9])
-        assert scene.stats.pixels_read == 4 * 53 * 3                 # 4 whole rows
+        series = img.images[0]
+        np.testing.assert_array_equal(series[0, 0, 2, 10:14, 5:9], expected[0][0, 0, 2, 10:14, 5:9])
+        assert series.stats.pixels_read == 4 * 53 * 3                 # 4 whole rows

@@ -321,7 +321,7 @@ class _OirImage(Image):
         the parsed structure and file handles."""
         image = copy.copy(self)
         image._lam, image._position = k, k
-        image.index = {"scene": 0, "emission": k}
+        image.index = {"series": 0, "emission": k}
         image._metadata = None
         image.stats = type(self.stats)()
         return image

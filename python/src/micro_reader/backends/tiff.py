@@ -23,12 +23,12 @@ plane (PLAN.md, "M1 design").
 Images and axes (docs/AXES.md): the array axes ``T C Z Y X S`` keep the
 series' own order (lower case; EER frames ``I`` are ``t``).  Every other
 tifffile axis makes separate images, indexed by: ``A`` (angle) view, ``R`` /
-``M`` / ``J K`` tile, LSM positions ``P`` scene, ``P`` (phase) phase, ``H``
+``M`` / ``J K`` tile, LSM positions ``P`` series, ``P`` (phase) phase, ``H``
 lifetime, ``E`` (lambda) emission, and ``I`` / ``Q`` / ``L`` / ``V`` (sequence,
 other, exposure, event) sequence; several letters of one index are counted
 as one (raveled).  ``open(path, rename={"sequence": "z"})`` reads such a
-dimension as an axis instead (plain multi-page TIFFs).  Each series is a
-scene otherwise.  Images of one series share its file handles and
+dimension as an axis instead (plain multi-page TIFFs).  Each tifffile series
+is a series (index) otherwise.  Images of one series share its file handles and
 decoded-segment cache.
 
 Resolution levels (OME-TIFF SubIFDs, SVS / NDPI-style pyramids: tifffile's
@@ -38,7 +38,7 @@ Resolution levels (OME-TIFF SubIFDs, SVS / NDPI-style pyramids: tifffile's
 Variants (``_tiff_variants``): whole-slide files (SVS, SCN, BIF, QPTIFF,
 Philips) list the series Bio-Formats lists, associated images named in
 lower case; Ventana BIF scans are composed from their overlapping tiles.
-Micro-Manager MMStack / NDTiff stage positions (``R``) are scenes, and their
+Micro-Manager MMStack / NDTiff stage positions (``R``) are series, and their
 series may span several files (uncompressed pages, each read from its file).
 
 Not yet: volumetric tiles (ImageDepth), OME series spread over several files.
@@ -69,7 +69,7 @@ MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")   # classic and BigTIFF
 CHUNK_BYTES = 4 << 20            # buffered raw rows are read this many bytes at a time
 RAW_TASK_BYTES = 8 << 20         # uncompressed strip runs are split into pool tasks of this size
 SEPARATE_READ_BYTES = 32 << 10   # bytes worth skipping rather than issuing one more read
-DECODE_CACHE_BYTES = 64 << 20    # decoded segments kept per scene
+DECODE_CACHE_BYTES = 64 << 20    # decoded segments kept per series
 STREAM_PIECE_BYTES = 8 << 20     # rows of a streamed segment decoded at a time (reserved)
 #: image codecs that decode a rectangle alone (``_area_into``)
 AREA_DECODERS = {"jpeg2k": _codecs.jpeg2k_decode_area_into, "jxl": _codecs.jxl_decode_area_into}
@@ -222,20 +222,20 @@ def unpredict(seg: np.ndarray, predictor: int) -> np.ndarray:
 
 #: tifffile axis letter -> array axis (docs/AXES.md)
 AXIS_LETTERS = {"X": "x", "Y": "y", "Z": "z", "T": "t", "C": "c", "S": "s"}
-#: tifffile axis letter -> image index (LSM ``P`` is a position: "scene");
+#: tifffile axis letter -> image index (LSM ``P`` is a position: "series");
 #: letters tifffile does not name are "sequence" too
 INDEX_LETTERS = {"A": "view", "R": "tile", "M": "tile", "J": "tile", "K": "tile",
                  "P": "phase", "H": "lifetime", "E": "emission",
                  "I": "sequence", "Q": "sequence", "L": "sequence", "V": "sequence"}
-#: indices besides "scene", in index order
-OTHER_INDICES = tuple(n for n in INDEX_NAMES if n not in ("scene", "resolution"))
+#: indices besides "series", in index order
+OTHER_INDICES = tuple(n for n in INDEX_NAMES if n not in ("series", "resolution"))
 #: this backend can make an index an axis (open(..., rename=...))
 RENAMES = True
 #: this backend can open one file of a multi-file OME-TIFF alone (open(..., multifile=False))
 MULTIFILE = True
 
 
-#: series kinds whose ``R`` is a stage position (a scene, as Bio-Formats lists
+#: series kinds whose ``R`` is a stage position (a series, as Bio-Formats lists
 #: Micro-Manager positions), not a tile
 POSITION_KINDS = ("mmstack", "ndtiff")
 
@@ -253,8 +253,8 @@ def translate_axes(axes: str, *, lsm: bool = False, eer: bool = False, where: st
         elif a == "I" and eer:
             level, letter = None, "t"
         else:
-            scene = (a == "P" and lsm) or (a == "R" and positions)
-            level = "scene" if scene else INDEX_LETTERS.get(a, "sequence")
+            position = (a == "P" and lsm) or (a == "R" and positions)
+            level = "series" if position else INDEX_LETTERS.get(a, "sequence")
             letter = None
             if level in rename:
                 level, letter = None, rename[level]
@@ -1079,7 +1079,7 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
         for pos, level in enumerate(frame):
             if level and s.shape[pos] > 1:
                 by_level.setdefault(level, []).append(pos)
-        levels.update(level for level in by_level if level != "scene")
+        levels.update(level for level in by_level if level != "series")
         plans.append((s, letters, frame, by_level))
     levels = [level for level in OTHER_INDICES if level in levels]
     if tiles == "mosaic" and "tile" in levels:
@@ -1087,7 +1087,7 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
             f"{path!r}: tiles='mosaic': micro-reader does not compose TIFF tiles "
             "(each tile is its own image)")
     listed = resolutions == "all"
-    images, scene = [], 0
+    images, first_series = [], 0
     for n, (s, letters, frame, by_level) in enumerate(plans):
         positions = [pos for pos, level in enumerate(frame) if level]
         varying = [pos for pos in positions if s.shape[pos] > 1]
@@ -1096,11 +1096,11 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
         lower = [lv for lv in list(getattr(s, "levels", None) or [s])[1:]
                  if len(lv.shape) == len(s.shape) and lv.axes == s.axes]
         level_first: dict = {}
-        scenes_here = int(np.prod([s.shape[p] for p in by_level.get("scene", [])]))
+        series_here = int(np.prod([s.shape[p] for p in by_level.get("series", [])]))
         for values in itertools.product(*(range(s.shape[p]) for p in varying)):
             fixed = {pos: 0 for pos in positions}
             fixed.update(zip(varying, values))
-            key = {"scene": scene + _ravel(fixed, by_level.get("scene", []), s.shape)}
+            key = {"series": first_series + _ravel(fixed, by_level.get("series", []), s.shape)}
             for level in levels:
                 key[level] = _ravel(fixed, by_level.get(level, []), s.shape)
             if listed:
@@ -1122,7 +1122,7 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
             if len(pyramid) > 1:
                 for member in pyramid:
                     member._resolutions = pyramid
-        scene += scenes_here
+        first_series += series_here
     images = _without_missing(images, path)
     images.sort(key=lambda im: tuple(im.index.values()))
     meta_cache: dict = {}                      # metadata parsed once per file

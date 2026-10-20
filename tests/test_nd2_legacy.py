@@ -45,15 +45,15 @@ def _expected(loops, frames):
     t, p, z = sizes.get("T", 1), sizes.get("P", 1), sizes.get("Z", 1)
     out = []
     for pos in range(p):
-        scene = np.empty((t, frames.shape[1], z) + frames.shape[2:], frames.dtype)
+        series = np.empty((t, frames.shape[1], z) + frames.shape[2:], frames.dtype)
         for ti in range(t):
             for zi in range(z):
                 index = {"T": ti, "P": pos, "Z": zi}
                 number = 0
                 for axis, count in loops:
                     number = number * count + index[axis]
-                scene[ti, :, zi] = frames[number]
-        out.append(scene)
+                series[ti, :, zi] = frames[number]
+        out.append(series)
     del shape
     return out
 
@@ -85,12 +85,12 @@ def test_matches_written_frames(tmp_path, name, decode_threads):
     with micro_reader.open(path) as img:
         assert (img.backend, img.format) == ("nd2", "nd2-legacy")
         assert len(img.images) == len(expected)
-        for scene, ref in zip(img.images, expected):
-            if scene.axes == "tczyxs":
+        for series, ref in zip(img.images, expected):
+            if series.axes == "tczyxs":
                 assert ref.ndim == 6
-            assert scene.shape == ref.shape and scene.dtype == ref.dtype
+            assert series.shape == ref.shape and series.dtype == ref.dtype
             for key in _keys(ref.shape):
-                np.testing.assert_array_equal(scene[key], ref[key], err_msg=f"{name} {key}")
+                np.testing.assert_array_equal(series[key], ref[key], err_msg=f"{name} {key}")
 
 
 @pytest.mark.parametrize("name", list(CASES))
@@ -106,8 +106,8 @@ def test_agrees_with_nd2(tmp_path, name):
     ref = ref.transpose([dims.index(a) for a in "TPCZYXS"])
     with micro_reader.open(path) as img:
         assert len(img.images) == ref.shape[1]
-        for p, scene in enumerate(img.images):
-            got = scene[...]
+        for p, series in enumerate(img.images):
+            got = series[...]
             np.testing.assert_array_equal(got if got.ndim == 6 else got[..., None], ref[:, p])
 
 
@@ -116,8 +116,8 @@ def test_reference_decoder_path(tmp_path, monkeypatch):
     path, loops, frames = _write(tmp_path, "time_positions_channels")
     monkeypatch.setattr(_codecs, "_native", None)
     with micro_reader.open(path) as img:
-        for scene, ref in zip(img.images, _expected(loops, frames)):
-            np.testing.assert_array_equal(scene[...], ref)
+        for series, ref in zip(img.images, _expected(loops, frames)):
+            np.testing.assert_array_equal(series[...], ref)
 
 
 def test_jp2_image_is_not_claimed(tmp_path):
@@ -141,11 +141,11 @@ def test_truncated_file_is_reported(tmp_path):
 def test_frames_are_decoded_once(tmp_path):
     path, _, _ = _write(tmp_path, "rgb_time")
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        scene[1, 0, 0, 0:4, 0:4]
-        first = scene.stats.pixels_read
-        scene[1, 0, 0, 5:9, 5:9]                        # same frame: cached
-        assert scene.stats.pixels_read == first == 16 * 20 * 3
+        series = img.images[0]
+        series[1, 0, 0, 0:4, 0:4]
+        first = series.stats.pixels_read
+        series[1, 0, 0, 5:9, 5:9]                        # same frame: cached
+        assert series.stats.pixels_read == first == 16 * 20 * 3
 
 
 def test_concurrent_reads(tmp_path, decode_threads):
@@ -154,9 +154,9 @@ def test_concurrent_reads(tmp_path, decode_threads):
     errors = []
     with micro_reader.open(path) as img:
         def work(seed):
-            for scene, ref in zip(img.images, expected):
+            for series, ref in zip(img.images, expected):
                 for key in _keys(ref.shape, n=5, seed=seed):
-                    if not np.array_equal(scene[key], ref[key]):
+                    if not np.array_equal(series[key], ref[key]):
                         errors.append(key)
         threads = [threading.Thread(target=work, args=(s,)) for s in range(5)]
         for th in threads:

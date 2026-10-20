@@ -53,10 +53,10 @@ def tree(tmp_path_factory):
     return root, truth
 
 
-def _expected(truth, key, scene):
-    """The written array in the scene's axes."""
+def _expected(truth, key, series):
+    """The written array in the series's axes."""
     want = truth[key]
-    return want[None] if scene.axes == "tczyx" else want[None, None]   # rgb: t c z y x s
+    return want[None] if series.axes == "tczyx" else want[None, None]   # rgb: t c z y x s
 
 
 def _keys(shape, n=12, seed=2):
@@ -84,11 +84,11 @@ def test_experiment_tree(tree, decode_threads):
     with micro_reader.open(str(root / "exp.xlef")) as img:
         assert img.backend == "lif" and img.format == "xlef"
         assert [s.name for s in img.images] == ["a", "b", "coll/d", "coll/e", "coll/f", "coll/g"]
-        for scene in img.images:
-            want = _expected(truth, scene.name[-1], scene)
-            assert scene.shape == want.shape and scene.dtype == want.dtype
+        for series in img.images:
+            want = _expected(truth, series.name[-1], series)
+            assert series.shape == want.shape and series.dtype == want.dtype
             for key in _keys(want.shape):
-                np.testing.assert_array_equal(scene[key], want[key], err_msg=f"{scene.name} {key}")
+                np.testing.assert_array_equal(series[key], want[key], err_msg=f"{series.name} {key}")
 
 
 @pytest.mark.parametrize("name,flavour,names", [
@@ -100,8 +100,8 @@ def test_opening_a_member(tree, name, flavour, names):
     with micro_reader.open(str(root / name)) as img:
         assert img.format == flavour.lower()
         assert [s.name for s in img.images] == names
-        for scene in img.images:
-            np.testing.assert_array_equal(scene[...], _expected(truth, scene.name[-1], scene))
+        for series in img.images:
+            np.testing.assert_array_equal(series[...], _expected(truth, series.name[-1], series))
 
 
 def test_agrees_with_liffile(tree):
@@ -110,11 +110,11 @@ def test_agrees_with_liffile(tree):
     path = str(root / "exp.xlef")
     with micro_reader.open(path) as img, liffile.LifFile(path) as lf:
         assert [s.name for s in img.images] == [i.path for i in lf.images]
-        for scene, ref_image in zip(img.images, lf.images):
+        for series, ref_image in zip(img.images, lf.images):
             ref = np.asarray(ref_image.asarray())
             dims = [d.lower() for d in ref_image.dims]
-            ref = ref.transpose([dims.index(a) for a in scene.axes if a in dims])
-            np.testing.assert_array_equal(scene[...].squeeze(), ref.squeeze(), err_msg=scene.name)
+            ref = ref.transpose([dims.index(a) for a in series.axes if a in dims])
+            np.testing.assert_array_equal(series[...].squeeze(), ref.squeeze(), err_msg=series.name)
 
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["lof", "legacy_lof"])
@@ -186,8 +186,8 @@ def test_sniff_claims_only_leica_xml():
 def test_close_releases_frame_files(tree, decode_threads):
     root, _ = tree
     img = micro_reader.open(str(root / "exp.xlef"))
-    for scene in img.images:
-        scene[...]
+    for series in img.images:
+        series[...]
     img.close()
     assert not img._handles and not img._tiffs
 
@@ -197,11 +197,11 @@ def test_concurrent_reads_of_frames(tree, decode_threads):
     errors = []
     with micro_reader.open(str(root / "exp.xlef")) as img:
         def work(seed):
-            for scene in img.images:
-                want = _expected(truth, scene.name[-1], scene)
+            for series in img.images:
+                want = _expected(truth, series.name[-1], series)
                 for key in _keys(want.shape, n=6, seed=seed):
-                    if not np.array_equal(scene[key], want[key]):
-                        errors.append((scene.name, key))
+                    if not np.array_equal(series[key], want[key]):
+                        errors.append((series.name, key))
         threads = [threading.Thread(target=work, args=(s,)) for s in range(5)]
         for th in threads:
             th.start()

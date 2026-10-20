@@ -31,7 +31,7 @@ def decoders(request, monkeypatch):
 
 def _read(path):
     with micro_reader.open(path) as f:
-        assert f.backend == "raster" and f.indices == [{"scene": 0}]
+        assert f.backend == "raster" and f.indices == [{"series": 0}]
         image = f.images[0]
         whole = image[...]
         part = image[2:9, 3:17]

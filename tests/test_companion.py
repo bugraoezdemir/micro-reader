@@ -126,7 +126,7 @@ def test_a_set_reads_as_one_image_with_its_metadata(tmp_path, layout, order):
     path, data = _write(str(tmp_path), layout=layout, order=order)
     with micro_reader.open(path) as f:
         assert (f.backend, f.format) == ("companion", "ome-companion")
-        assert f.indices == [{"scene": 0}]
+        assert f.indices == [{"series": 0}]
         im = f.images[0]
         assert im.axes == "tczyx" and im.shape == (2, 2, 3, Y, X) and im.dtype == np.uint16
         assert im.name == "series 0"
@@ -146,7 +146,7 @@ def test_a_set_reads_as_one_image_with_its_metadata(tmp_path, layout, order):
 def test_two_images_in_one_companion(tmp_path):
     path, data = _write(str(tmp_path), images=2, layout="stacks")
     with micro_reader.open(path) as f:
-        assert f.indices == [{"scene": 0}, {"scene": 1}]
+        assert f.indices == [{"series": 0}, {"series": 1}]
         assert [im.name for im in f.images] == ["series 0", "series 1"]
         _check(f.images[1], data, im=1)
 
@@ -164,7 +164,7 @@ def test_missing_members_read_as_zeros_and_an_image_without_files_is_left_out(tm
     with pytest.warns(micro_reader.MissingImagesWarning):
         f = micro_reader.open(path)
     with f:
-        assert f.indices == [{"scene": 0}]               # image 1 has none of its files
+        assert f.indices == [{"series": 0}]               # image 1 has none of its files
         got = f.images[0][...]
         np.testing.assert_array_equal(got[0, 1, 2], data[(0, 0, 1, 2)])
         assert not got[1].any()                          # timepoint 1's file is missing

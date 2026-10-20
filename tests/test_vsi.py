@@ -57,7 +57,7 @@ def test_a_2d_pyramid(tmp_path):
         assert sizes["x"].value == pytest.approx(0.5) and sizes["y"].value == pytest.approx(0.25)
         assert sizes["x"].unit == "micrometer"
         macro = f.images[1]
-        assert macro.index["scene"] == 1
+        assert macro.index["series"] == 1
         np.testing.assert_array_equal(np.asarray(macro[...]).reshape(12, 30), _macro())
         assert not macro.metadata.pixel_sizes
 

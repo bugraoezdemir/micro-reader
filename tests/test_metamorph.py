@@ -29,7 +29,7 @@ def test_a_full_set_reads_every_plane(tmp_path):
                             waves=[("DAPI", True), ("GFP", True)], nz=4, z_step=1.5)
     with micro_reader.open(nd) as f:
         assert (f.backend, f.format) == ("metamorph", "metamorph")
-        assert [im.index for im in f.images] == [{"scene": 0}, {"scene": 1}]
+        assert [im.index for im in f.images] == [{"series": 0}, {"series": 1}]
         assert [im.name for im in f.images] == ["exp A1", "exp B7"]
         for s, im in enumerate(f.images):
             assert im.axes == "tczyx" and im.shape == (3, 2, 4, Y, X) and im.dtype == "uint16"
@@ -167,7 +167,7 @@ def test_missing_files_read_as_zeros(tmp_path):
     message = str(rec[0].message)
     assert "1 fields miss some planes" in message and "1 fields have no files" in message
     with f:
-        assert [im.index["scene"] for im in f.images] == [0, 1]       # position c left out
+        assert [im.index["series"] for im in f.images] == [0, 1]       # position c left out
         assert not f.images[0][1].any()
         np.testing.assert_array_equal(f.images[0][0, 0, 0], _plane(data, 0, 0, 0, 0))
 

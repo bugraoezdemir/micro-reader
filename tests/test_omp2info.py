@@ -57,7 +57,7 @@ def test_tiles_are_separate_images_at_the_index_positions(tmp_path):
     with micro_reader.open(path) as f:
         assert (f.backend, f.format, len(f.images)) == ("omp2info", "omp2info", 6)
         for k, (im, (yi, xi)) in enumerate(zip(f.images, GRID)):
-            assert im.index == {"scene": 0, "tile": k}
+            assert im.index == {"series": 0, "tile": k}
             np.testing.assert_array_equal(im[...], tiles[k])
             pos = im.metadata.position                    # the first pixel's centre (Âµm)
             step = 0.95                                   # 10 % overlap: 5 % per side
@@ -90,7 +90,7 @@ def test_the_mosaic_places_the_tiles_later_on_top(tmp_path, overlap):
         expected[..., y:y + H, x:x + W] = data
     with micro_reader.open(path, tiles="mosaic") as f:
         (m,) = f.images
-        assert m.index == {"scene": 0} and m.shape == expected.shape
+        assert m.index == {"series": 0} and m.shape == expected.shape
         np.testing.assert_array_equal(m[...], expected)
         np.testing.assert_array_equal(m[0, 1, 0, 20:50, 30:70][...], expected[0, 1, 0, 20:50, 30:70])
         assert m.metadata.position["x"].to("micrometer").value == pytest.approx(LEFT / 1000 + PX / 2)

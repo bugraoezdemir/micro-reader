@@ -36,12 +36,12 @@ def test_tiff_full_resolution_by_default_with_its_pyramid(tmp_path):
         (image,) = f.images
         # every level of the pyramid has its resolution, full resolution too
         assert image.is_pyramidal
-        assert image.index == {"scene": 0, "resolution": 0}
-        assert f.index_range == {"scene": 1, "resolution": 1}      # one level listed
+        assert image.index == {"series": 0, "resolution": 0}
+        assert f.index_range == {"series": 1, "resolution": 1}      # one level listed
         levels = image.resolutions
         assert [lv.shape for lv in levels] == [(2, 96, 80), (2, 48, 40), (2, 24, 20)]
         assert levels[0] is image
-        assert [lv.index for lv in levels] == [{"scene": 0, "resolution": k} for k in range(3)]
+        assert [lv.index for lv in levels] == [{"series": 0, "resolution": k} for k in range(3)]
         assert all(lv.is_pyramidal for lv in levels)
         for k, lv in enumerate(levels):
             np.testing.assert_array_equal(lv[...], data[:, ::2 ** k, ::2 ** k])
@@ -53,8 +53,8 @@ def test_tiff_all_levels_listed_as_images(tmp_path):
     path = str(tmp_path / "pyr.ome.tif")
     _pyramid_tiff(path, data)
     with micro_reader.open(path, resolutions="all") as f:
-        assert f.indices == [{"scene": 0, "resolution": k} for k in range(3)]
-        assert f.index_range == {"scene": 1, "resolution": 3}
+        assert f.indices == [{"series": 0, "resolution": k} for k in range(3)]
+        assert f.index_range == {"series": 1, "resolution": 3}
         (level1,) = f.select(resolution=1)
         np.testing.assert_array_equal(level1[...], data[:, ::2, ::2])
         assert f.images[0].resolutions == f.images             # one pyramid, the same objects
@@ -68,7 +68,7 @@ def test_files_without_levels_are_their_own_pyramid(tmp_path):
         with micro_reader.open(path, resolutions=policy) as f:
             (image,) = f.images
             assert image.resolutions == [image] and not image.is_pyramidal
-            assert image.index == {"scene": 0}           # no pyramid in the file: no resolution
+            assert image.index == {"series": 0}           # no pyramid in the file: no resolution
 
 
 def test_axes_images_carry_the_pyramid(tmp_path):
@@ -121,35 +121,35 @@ def test_imaris_levels(tmp_path):
     _pyramid_ims(path, data)
     with micro_reader.open(path) as f:
         (image,) = f.images
-        assert image.is_pyramidal and image.index == {"scene": 0, "resolution": 0}
+        assert image.is_pyramidal and image.index == {"series": 0, "resolution": 0}
         levels = image.resolutions
         assert [lv.shape for lv in levels] == [(1, 2, 5, 21, 27), (1, 2, 5, 11, 14)]
         np.testing.assert_array_equal(levels[1][...], data[:, :, :, ::2, ::2])
     with micro_reader.open(path, resolutions="all") as f:
-        assert f.indices == [{"scene": 0, "resolution": 0}, {"scene": 0, "resolution": 1}]
+        assert f.indices == [{"series": 0, "resolution": 0}, {"series": 0, "resolution": 1}]
         np.testing.assert_array_equal(f.select(resolution=1)[0][...], data[:, :, :, ::2, ::2])
 
 
 # -- CZI: pyramid subblocks of whole scenes ----------------------------------------------
 
 def _pyramid_czi(path):
-    """One scene of 2 x 2 tiles (32 x 32, at x0=100, y0=40); the pyramid as
+    """One series of 2 x 2 tiles (32 x 32, at x0=100, y0=40); the pyramid as
     two halves at zoom 0.5 (32 x 64 stored each) and one block at 0.25.
-    Returns the full scene and each level's expected pixels."""
+    Returns the full series and each level's expected pixels."""
     from _czi_writer import raw_payload, write_czi
     full = RNG.integers(0, 4000, (64, 64)).astype("u2")
     half = RNG.integers(0, 4000, (32, 32)).astype("u2")         # the stored pyramid data
     quarter = RNG.integers(0, 4000, (16, 16)).astype("u2")
     tiles = []
     for m, (ty, tx) in enumerate([(0, 0), (0, 32), (32, 0), (32, 32)]):
-        tiles.append(dict(scene=0, mosaic=m, plane={"C": 0}, x=100 + tx, y=40 + ty,
+        tiles.append(dict(series=0, mosaic=m, plane={"C": 0}, x=100 + tx, y=40 + ty,
                           height=32, width=32, dtype="u2", compression=0,
                           payload=raw_payload(full[ty:ty + 32, tx:tx + 32])))
     for k, x in enumerate((0, 32)):                         # zoom 0.5 in two halves
-        tiles.append(dict(scene=0, plane={"C": 0}, x=100 + x, y=40, height=64, width=32,
+        tiles.append(dict(series=0, plane={"C": 0}, x=100 + x, y=40, height=64, width=32,
                           stored=(16, 32), pyramid=2, dtype="u2", compression=0,
                           payload=raw_payload(half[:, 16 * k:16 * k + 16])))
-    tiles.append(dict(scene=0, plane={"C": 0}, x=100, y=40, height=64, width=64,
+    tiles.append(dict(series=0, plane={"C": 0}, x=100, y=40, height=64, width=64,
                       stored=(16, 16), pyramid=2, dtype="u2", compression=0,
                       payload=raw_payload(quarter)))
     write_czi(path, tiles)
@@ -161,7 +161,7 @@ def test_czi_mosaic_scene_has_its_stored_pyramid(tmp_path):
     full, half, quarter = _pyramid_czi(path)
     with micro_reader.open(path, tiles="mosaic") as f:
         (image,) = f.images
-        assert image.is_pyramidal and image.index == {"scene": 0, "resolution": 0}
+        assert image.is_pyramidal and image.index == {"series": 0, "resolution": 0}
         levels = image.resolutions
         assert [lv.shape[-2:] for lv in levels] == [(64, 64), (32, 32), (16, 16)]
         assert [lv.zoom for lv in levels[1:]] == [0.5, 0.25]
@@ -169,9 +169,9 @@ def test_czi_mosaic_scene_has_its_stored_pyramid(tmp_path):
         np.testing.assert_array_equal(levels[1][0, 0, 0], half)       # both halves in place
         np.testing.assert_array_equal(levels[2][0, 0, 0], quarter)
         np.testing.assert_array_equal(levels[1][0, 0, 0, 5:20, 10:25], half[5:20, 10:25])
-        assert levels[1].origin == (50, 20)                      # the scene corner x zoom
+        assert levels[1].origin == (50, 20)                      # the series corner x zoom
     with micro_reader.open(path, tiles="mosaic", resolutions="all") as f:
-        assert f.indices == [{"scene": 0, "resolution": k} for k in range(3)]
+        assert f.indices == [{"series": 0, "resolution": k} for k in range(3)]
 
 
 def test_czi_tiles_have_no_levels(tmp_path):

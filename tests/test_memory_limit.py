@@ -254,7 +254,7 @@ def test_large_czi_subblocks_are_streamed(tmp_path, small_budget, kind):
         frame = zstandard.ZstdCompressor().compress(raw)
         payload = frame if kind == "zstd0" else bytes([3, 1, 0]) + frame
     path = str(tmp_path / "big.czi")
-    write_czi(path, [dict(scene=0, plane={"C": 0}, x=0, y=0, width=2400, height=1200,
+    write_czi(path, [dict(series=0, plane={"C": 0}, x=0, y=0, width=2400, height=1200,
                           dtype="u2", compression=5 if kind == "zstd0" else 6, payload=payload)])
     if kind == "zstd1_hilo":
         micro_reader.set_memory_limit("64MB")            # decoded whole: needs the room
@@ -442,7 +442,7 @@ def test_large_czi_image_codec_subblocks_decode_only_the_piece(tmp_path, small_b
                         lambda *a: pytest.fail("the subblock was decoded whole"))
     path = str(tmp_path / "big.czi")
     h, w = pixels.shape
-    write_czi(path, [dict(scene=0, plane={"C": 0}, x=0, y=0, width=w, height=h,
+    write_czi(path, [dict(series=0, plane={"C": 0}, x=0, y=0, width=w, height=h,
                           dtype=dtype, compression=code, payload=payload)])
     with micro_reader.open(path) as f:
         image = f.images[0]

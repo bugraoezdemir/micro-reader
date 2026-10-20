@@ -73,10 +73,10 @@ def test_every_mode_and_byte_order_reads_back(tmp_path, dtype, order):
     data = _data(dtype)
     path = write_mrc(tmp_path / "a.mrc", data, order=order)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
+        series = img.images[0]
         assert img.backend == "mrc"
-        assert scene.axes == "zyx" and scene.shape == data.shape
-        out = scene[...]
+        assert series.axes == "zyx" and series.shape == data.shape
+        out = series[...]
         assert out.dtype == np.dtype(dtype) and out.dtype.isnative
         np.testing.assert_array_equal(out, data)
 
@@ -91,9 +91,9 @@ def test_exact_rectangles_and_no_over_read(tmp_path, key, monkeypatch):
     monkeypatch.setattr(mrc_backend, "SEPARATE_READ_BYTES", 0)
     data = _data("u2")
     with micro_reader.open(write_mrc(tmp_path / "a.mrc", data)) as img:
-        scene = img.images[0]
-        np.testing.assert_array_equal(scene[key], data[key])
-        assert scene.stats.over_read == 1.0
+        series = img.images[0]
+        np.testing.assert_array_equal(series[key], data[key])
+        assert series.stats.over_read == 1.0
 
 
 def test_rows_are_returned_top_down_like_bioformats(tmp_path):
@@ -103,10 +103,10 @@ def test_rows_are_returned_top_down_like_bioformats(tmp_path):
     path = write_mrc(tmp_path / "a.mrc", data)
     stored = np.fromfile(path, dtype="<u2", offset=1024).reshape(data.shape)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        np.testing.assert_array_equal(scene[1, -1], stored[1, 0])
-        np.testing.assert_array_equal(scene[1, 0], stored[1, -1])
-        np.testing.assert_array_equal(scene[:, 5:9, 3:30], stored[:, ::-1][:, 5:9, 3:30])
+        series = img.images[0]
+        np.testing.assert_array_equal(series[1, -1], stored[1, 0])
+        np.testing.assert_array_equal(series[1, 0], stored[1, -1])
+        np.testing.assert_array_equal(series[:, 5:9, 3:30], stored[:, ::-1][:, 5:9, 3:30])
 
 
 @pytest.mark.parametrize("order", ["<", ">"])
@@ -117,20 +117,20 @@ def test_full_width_reads_across_chunk_boundaries(tmp_path, monkeypatch, order):
     monkeypatch.setattr(mrc, "CHUNK_BYTES", 5 * 53 * 2)
     data = _data("u2")
     with micro_reader.open(write_mrc(tmp_path / "a.mrc", data, order=order)) as img:
-        scene = img.images[0]
+        series = img.images[0]
         for key in [(slice(None),), (1, slice(3, 36)), (slice(1, 4), slice(0, 7)),
                     (2, slice(30, 37)), (0, slice(12, 13))]:
-            np.testing.assert_array_equal(scene[key], data[key])
-        assert scene.stats.over_read == 1.0
+            np.testing.assert_array_equal(series[key], data[key])
+        assert series.stats.over_read == 1.0
 
 
 def test_keyword_form(tmp_path):
     data = _data("u2")
     with micro_reader.open(write_mrc(tmp_path / "a.mrc", data)) as img:
-        scene = img.images[0]
-        np.testing.assert_array_equal(scene.read(z=2, x=slice(3, 9)), data[2, :, 3:9])
+        series = img.images[0]
+        np.testing.assert_array_equal(series.read(z=2, x=slice(3, 9)), data[2, :, 3:9])
         with pytest.raises(KeyError):
-            scene.read(c=0)
+            series.read(c=0)
 
 
 def test_extended_header_is_skipped(tmp_path):
@@ -164,9 +164,9 @@ def test_old_file_without_map_tag_is_found_by_extension(tmp_path):
 def test_2d_image_is_one_section(tmp_path):
     data = _data("u2", shape=(21, 34))
     with micro_reader.open(write_mrc(tmp_path / "a.mrc", data)) as img:
-        scene = img.images[0]
-        assert scene.shape == (1, 21, 34)
-        np.testing.assert_array_equal(scene[0], data)
+        series = img.images[0]
+        assert series.shape == (1, 21, 34)
+        np.testing.assert_array_equal(series[0], data)
 
 
 def test_truncated_file_is_refused(tmp_path):
@@ -285,12 +285,12 @@ def test_concurrent_reads(tmp_path, monkeypatch):
     monkeypatch.setattr(mrc_backend, "SEPARATE_READ_BYTES", 0)
     data = _data("u2", shape=(8, 256, 300))
     with micro_reader.open(write_mrc(tmp_path / "a.mrc", data)) as img:
-        scene, errors = img.images[0], []
+        series, errors = img.images[0], []
 
         def worker(z):
             try:
                 for y in range(0, 256, 32):
-                    block = scene[z, y:y + 32, 50:250]
+                    block = series[z, y:y + 32, 50:250]
                     if not np.array_equal(block, data[z, y:y + 32, 50:250]):
                         errors.append((z, y))
             except Exception as exc:        # noqa: BLE001
@@ -302,7 +302,7 @@ def test_concurrent_reads(tmp_path, monkeypatch):
         for t in threads:
             t.join()
         assert errors == []
-        assert scene.stats.reads == 64 and scene.stats.over_read == 1.0
+        assert series.stats.reads == 64 and series.stats.over_read == 1.0
 
 
 def test_narrow_reads_merge_rows(tmp_path):
@@ -310,7 +310,7 @@ def test_narrow_reads_merge_rows(tmp_path):
     included (they cost less than one more read per row); rows still bottom-up."""
     data = _data("u2", shape=(3, 64, 300))
     with micro_reader.open(write_mrc(tmp_path / "a.mrc", data)) as img:
-        scene = img.images[0]
-        np.testing.assert_array_equal(scene[1, 10:42, 50:250], data[1, 10:42, 50:250])
-        assert scene.stats.pixels_read == 31 * 300 + 200
-        np.testing.assert_array_equal(scene[:, 0:1, 7:9], data[:, 0:1, 7:9])     # one row
+        series = img.images[0]
+        np.testing.assert_array_equal(series[1, 10:42, 50:250], data[1, 10:42, 50:250])
+        assert series.stats.pixels_read == 31 * 300 + 200
+        np.testing.assert_array_equal(series[:, 0:1, 7:9], data[:, 0:1, 7:9])     # one row

@@ -1,5 +1,5 @@
 """A File's structure as text (docs/AXES.md, index architecture): a tree of
-its containment indices (plate > well > field, or scene), each leaf with
+its containment indices (plate > well > field, or series), each leaf with
 its tiles, the orthogonal indices that vary inside it, the image shape and
 the pyramid levels."""
 from __future__ import annotations
@@ -23,7 +23,7 @@ def runs(values) -> str:
 
 
 def _leaf(images) -> str:
-    """What one leaf (a field, or a scene) holds."""
+    """What one leaf (a field, or a series) holds."""
     parts = []
     tiles = [image.index["tile"] for image in images if "tile" in image.index]
     if tiles:
@@ -65,9 +65,9 @@ def outline_lines(f) -> list:
         rest = [image for image in images if "well" not in image.index]
     else:
         rest = images
-    by_scene: dict = {}
+    by_series: dict = {}
     for image in rest:
-        by_scene.setdefault(image.index.get("scene", 0), []).append(image)
-    for scene, members in sorted(by_scene.items()):
-        lines.append(f"scene {scene}: {_leaf(members)}")
+        by_series.setdefault(image.index.get("series", 0), []).append(image)
+    for series, members in sorted(by_series.items()):
+        lines.append(f"series {series}: {_leaf(members)}")
     return lines

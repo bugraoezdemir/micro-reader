@@ -3,7 +3,7 @@
 Codecs (zlib, LZW, zstd, JPEG, ...) and file reads release the GIL, so a
 single read can decode and read its pieces on all cores instead of only on
 the caller's thread.
-Shared by every scene, so the total number of decoding threads stays fixed
+Shared by every series, so the total number of decoding threads stays fixed
 however many reads run at once.
 
 Size: ``set_decode_threads(n)``, else the ``MICRO_READER_DECODE_THREADS``

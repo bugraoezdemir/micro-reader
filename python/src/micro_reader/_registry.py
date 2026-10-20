@@ -57,10 +57,10 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
     """Open *path* with the backend that recognises it (or the one named).
 
     Each image of the file is one spatial frame with axes ``t c z y x`` (+ ``s``),
-    and an index saying which: scene, tile, rotation, view, and the
+    and an index saying which: series, tile, rotation, view, and the
     dimensions sampled at the same points (illumination, phase, block,
     emission, excitation, lifetime, sequence).  *tiles*: ``"separate"`` gives
-    each mosaic tile as its own image; ``"mosaic"`` places a scene's tiles
+    each mosaic tile as its own image; ``"mosaic"`` places a series' tiles
     at their stored positions as one image (no registration, no blending),
     for formats that define how (CZI), and is an error for tiled files of
     other formats.  ``"stitched"``, its old name, still works and warns.
@@ -72,7 +72,7 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
 
     *plates* (opt-in for now, docs/HCS.md): ``True`` reads a file that is a
     plate as one: ``File.plates`` describes it, and its images are indexed by
-    well and field instead of scene.  For a file that is not a plate (or a
+    well and field instead of series.  For a file that is not a plate (or a
     format without plates) it changes nothing: ``File.plates`` stays empty.
 
     *multifile*: a file of a multi-file OME set opens as the whole set

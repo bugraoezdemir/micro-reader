@@ -97,13 +97,13 @@ def decode_threads(request):
 def test_matches_known_data(tmp_path, name, decode_threads):
     path, expected = _write(tmp_path, name)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        assert img.backend == "oir" and scene.axes == "tczyx"
-        assert scene.shape == expected.shape and scene.dtype == expected.dtype
+        series = img.images[0]
+        assert img.backend == "oir" and series.axes == "tczyx"
+        assert series.shape == expected.shape and series.dtype == expected.dtype
         for key in _keys(expected.shape):
-            np.testing.assert_array_equal(scene[key], expected[key], err_msg=f"{name} {key}")
+            np.testing.assert_array_equal(series[key], expected[key], err_msg=f"{name} {key}")
         # exact reads: never more than asked (missing planes read nothing)
-        assert scene.stats.over_read <= 1.0
+        assert series.stats.over_read <= 1.0
 
 
 @pytest.mark.skipif(oirfile is None, reason="oirfile not available (set OIRFILE_SRC)")
@@ -150,7 +150,7 @@ def test_lambda_scan_is_one_image_per_emission_band(tmp_path):
     write_oir(path, data, frame_axes={"LAMBDA": lambda lam, t, z: 500.0 + 25 * lam,
                                       "TIMELAPSE": lambda lam, t, z: 1500.0 * t})
     with micro_reader.open(path) as f:
-        assert f.indices == [{"scene": 0, "emission": k} for k in range(3)]
+        assert f.indices == [{"series": 0, "emission": k} for k in range(3)]
         for k, image in enumerate(f.images):
             assert (image.axes, image.shape) == ("tczyx", data.shape[1:])
             np.testing.assert_array_equal(image[...], data[k])
@@ -187,12 +187,12 @@ def test_concurrent_reads(tmp_path, decode_threads):
     path, expected = _write(tmp_path, "companion_file")
     keys, errors = _keys(expected.shape, n=40, seed=9), []
     with micro_reader.open(path) as img:
-        scene = img.images[0]
+        series = img.images[0]
 
         def worker(i):
             try:
                 for key in keys[i::4]:
-                    if not np.array_equal(scene[key], expected[key]):
+                    if not np.array_equal(series[key], expected[key]):
                         errors.append(key)
             except Exception as exc:        # noqa: BLE001
                 errors.append(exc)

@@ -140,14 +140,14 @@ def decoders(request, monkeypatch):
 def test_every_compression_decodes(tmp_path, name, decoders):
     path, expected, tol, code = _write(tmp_path, name)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
+        series = img.images[0]
         assert {s.compression for s in img._level0} == {code}
-        got = scene[0, 0, 0]
+        got = series[0, 0, 0]
         assert got.shape == expected.shape and got.dtype == expected.dtype
         diff = np.abs(got.astype(np.int64) - expected.astype(np.int64))
         assert diff.max() <= tol, f"{name}: max difference {diff.max()} > {tol}"
         # a region inside the tile (drawn from the cached decoded tile)
-        np.testing.assert_allclose(scene[0, 0, 0, 10:30, 20:50], got[10:30, 20:50])
+        np.testing.assert_allclose(series[0, 0, 0, 10:30, 20:50], got[10:30, 20:50])
 
 
 @pytest.mark.parametrize("name", ["jpegxr_gray16", "jpegxr_rgb"])

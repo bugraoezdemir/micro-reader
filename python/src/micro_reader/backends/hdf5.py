@@ -17,7 +17,7 @@ channels link to the ``.lux.h5`` files (the ``ims`` backend).
 **Fiji HDF5** (the Vibez plugin, ``File > Save As > HDF5``): datasets with
 ``element_size_um`` (z, y, x).  Datasets named ``t<n>/channel<n>`` (the
 plugin's default) make one ``tczyx`` image; any other such dataset is an image
-of its own (index ``scene``), ``zyx`` or ``yx`` -- more axes have no recorded
+of its own (index ``series``), ``zyx`` or ``yx`` -- more axes have no recorded
 order and are refused.  An ``element_size_um`` of exactly 1, 1, 1 is what Fiji
 writes for an image without calibration: no pixel sizes then (never 1.0).
 """
@@ -160,7 +160,7 @@ def _luxendo(h5, path, reader, resolutions) -> list:
     pyramid = []
     for r, name in enumerate(["Data"] + levels):
         ds = h5[name]
-        index = {"scene": 0, "resolution": r} if (listed or r) else {"scene": 0}
+        index = {"series": 0, "resolution": r} if (listed or r) else {"series": 0}
         pyramid.append(_StackImage(0, os.path.basename(path), index, "tczyx", [[ds]],
                                    (1, 1) + ds.shape, ds.dtype.newbyteorder("="), reader, name,
                                    meta if r == 0 else None))
@@ -208,7 +208,7 @@ def _fiji(h5, path, reader) -> list:
             meta = Metadata(pixel_sizes=_sizes(first),
                             channels=tuple(Channel() for _ in channels))
             full = (len(times), len(channels)) + (shape if len(shape) == 3 else (1,) + shape)
-            return [_StackImage(0, where, {"scene": 0}, "tczyx", datasets, full,
+            return [_StackImage(0, where, {"series": 0}, "tczyx", datasets, full,
                                 dtypes.pop(), reader, "fiji", meta)]
     images = []
     for n, name in enumerate(names):
@@ -218,7 +218,7 @@ def _fiji(h5, path, reader) -> list:
                 f"{where}: dataset {name!r} has {ds.ndim} axes; a Fiji HDF5 dataset records "
                 "no axis order beyond z, y, x")
         meta = Metadata(pixel_sizes=_sizes(ds), channels=(Channel(),))
-        images.append(_StackImage(n, f"{where} {name}", {"scene": n}, "zyx"[-ds.ndim:], [[ds]],
+        images.append(_StackImage(n, f"{where} {name}", {"series": n}, "zyx"[-ds.ndim:], [[ds]],
                                   ds.shape, ds.dtype.newbyteorder("="), reader, name, meta))
     return images
 

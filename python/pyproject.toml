@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "micro-reader"
-version = "0.0.4"
+version = "0.1.0"
 description = "Low-level, memory-bounded pixel reading for microscopy formats: read exactly the rectangle you ask for."
 readme = "README.md"
 requires-python = ">=3.11"

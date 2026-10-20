@@ -40,7 +40,7 @@ def _attachment_entry(name: str, ctype: str, position: int) -> bytes:
 
 
 def write_czi(path, tiles, metadata: str = "", attachments=()):
-    """*tiles*: [dict(scene, plane={'C': c, ...}, x, y, height, width, dtype,
+    """*tiles*: [dict(series, plane={'C': c, ...}, x, y, height, width, dtype,
     samples, compression, payload)] -- payload is the encoded subblock data
     (raw bytes stored B, G, R for colour when compression is 0).  A pyramid
     subblock also has ``stored=(width, height)`` (the pixels stored, fewer
@@ -58,7 +58,7 @@ def write_czi(path, tiles, metadata: str = "", attachments=()):
         sw, sh = t.get("stored", (t["width"], t["height"]))
         dims = [("X", t["x"], t["width"], sw), ("Y", t["y"], t["height"], sh)]
         dims += [(d, v, 1, 1) for d, v in t.get("plane", {}).items()]
-        dims += [("S", t.get("scene", 0), 1, 1)]
+        dims += [("S", t.get("series", 0), 1, 1)]
         if "mosaic" in t:
             dims += [("M", t["mosaic"], 1, 1)]
         position = len(out)

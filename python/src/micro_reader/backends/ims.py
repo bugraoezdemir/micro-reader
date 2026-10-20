@@ -13,7 +13,7 @@ Two things differ from reading the datasets through h5py:
 
 One image, full resolution, axes ``tczyx``; every ``ResolutionLevel r`` is in
 ``image.resolutions``, and an image of its own with ``resolutions="all"``
-(index ``{"scene": 0, "resolution": r}``).
+(index ``{"series": 0, "resolution": r}``).
 
 This backend also answers for HDF5 files of no layout micro-reader reads (it is
 the last HDF5 backend tried): they are refused with the datasets they hold, and
@@ -150,7 +150,7 @@ class _ImsImage(Image):
         super().__init__(level, "tczyx", (len(times), len(channels), *sizes.pop()),
                          dtypes.pop(), name=os.path.basename(path),
                          read_unit=(1, 1, *chunks) if chunks else None,
-                         index=key if key is not None else {"scene": 0})
+                         index=key if key is not None else {"series": 0})
 
     def _layout(self, t: int, c: int) -> _hdf5.Layout:
         """How the dataset of time point *t*, channel *c* is stored."""
@@ -308,8 +308,8 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base") -> _ImsF
             raise CorruptFileError(f"{path!r}: Imaris DataSet without 'ResolutionLevel 0' "
                                    f"(its levels: {shown[:8]})")
         listed = resolutions == "all"
-        pyramid = [_ImsImage(h5, reader, path, r, key={"scene": 0, "resolution": r}
-                             if (listed or r) else {"scene": 0}) for r in levels]
+        pyramid = [_ImsImage(h5, reader, path, r, key={"series": 0, "resolution": r}
+                             if (listed or r) else {"series": 0}) for r in levels]
         for image in pyramid:
             image._resolutions = pyramid
         images = pyramid if listed else pyramid[:1]

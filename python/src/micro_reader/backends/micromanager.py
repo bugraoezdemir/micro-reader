@@ -28,7 +28,7 @@ one plane, with the plane's Micro-Manager metadata as JSON in its ImageJ
   ``display_and_comments.txt``, a position folder or the acquisition folder
   -- opens the whole acquisition.  ``backend="tiff"`` reads a plane TIFF
   alone.
-- One image per stage position (index ``scene``, the Summary's order), axes
+- One image per stage position (index ``series``, the Summary's order), axes
   ``t c z y x``, sizes from the Summary (Frames, Channels, Slices).
 - Missing: a position the Summary lists without its folder is left out, a
   plane whose file is missing or not listed reads as zeros; one
@@ -531,7 +531,7 @@ class _MMFile(File):
             label = listed[k][0]
             name = base if len(listed) == 1 else f"{base} {label}"
             images.append(_MMImage(self._members, len(images), kept[k], (nt, nc, nz) + tuple(shape_yx),
-                                   dtype, name, unit, {"scene": k}, owner=self, meta=metas[k]))
+                                   dtype, name, unit, {"series": k}, owner=self, meta=metas[k]))
         return images
 
     def _time_step(self) -> Optional[float]:

@@ -6,7 +6,7 @@ OME-TIFFs: each ``TiffData`` says which file (``UUID FileName``), which pages
 ``FirstT``, counted in ``DimensionOrder``). Open the companion file.
 
 - One micro-reader image per OME ``Image``, axes ``t c z y x``, indexed by
-  ``scene`` (its place among the companion's images), stacked lazily from the
+  ``series`` (its place among the companion's images), stacked lazily from the
   member files (the file-set layer, ``_fileset``). The members are read as
   plain pages: the companion alone says what each page is.
 - Metadata: the companion's, through the OME-XML parser OME-TIFF uses. It
@@ -104,7 +104,7 @@ class _Series:
         with self._lock:
             if self._meta is None:
                 meta = ome_image_metadata(self.element, dict(self.sizes), self.sizes["c"],
-                                          {"scene": self.number},
+                                          {"series": self.number},
                                           lambda: ome_annotations(core.root))
                 meta = meta or Metadata.unknown(self.sizes["c"])
                 if "z" not in meta.pixel_sizes and self.sizes["z"] > 1:
@@ -480,7 +480,7 @@ class _CompanionFile(File):
                 shape = (s.sizes["t"], s.sizes["c"], s.sizes["z"]) + tuple(shape_yx)
                 images.append(_CompanionImage(
                     self._members, len(images), planes, shape, dtype, s.name, unit,
-                    {"scene": s.number}, core=core, series=s))
+                    {"series": s.number}, core=core, series=s))
             if not images:
                 raise CorruptFileError(f"{path!r}: none of its images has any of its files")
         except BaseException:
@@ -716,7 +716,7 @@ def _member_file(path: str, tif, core: Core, key: str, where: str):
             dtype, unit, shape_yx = members.page_info(path, next(iter(planes.values()))[1])
             image = _MemberImage(members, len(images), planes,
                                  tuple(len(r) for r in spans) + tuple(shape_yx), dtype, s.name,
-                                 unit, {"scene": len(images)}, core=core, series=s, start=start)
+                                 unit, {"series": len(images)}, core=core, series=s, start=start)
             meta = image.metadata
             drop = "".join(a for a, n, explicit in (
                 ("t", len(spans[0]), "t" in meta.pixel_sizes),

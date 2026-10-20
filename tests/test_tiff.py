@@ -116,11 +116,11 @@ def test_matches_tifffile(files, name, decode_threads):
         pytest.skip("needs imagecodecs")
     ref, axes = _reference(files[name])
     with micro_reader.open(files[name]) as img:
-        scene = img.images[0]
+        series = img.images[0]
         assert img.backend == "tiff"
-        assert scene.shape == ref.shape and scene.axes == axes and scene.dtype == ref.dtype
+        assert series.shape == ref.shape and series.axes == axes and series.dtype == ref.dtype
         for key in _keys(ref.shape):
-            got = scene[key]
+            got = series[key]
             assert got.dtype.isnative
             np.testing.assert_array_equal(got, ref[key], err_msg=f"{name} {key}")
 
@@ -133,11 +133,11 @@ def test_uncompressed_strips_read_exactly(files, name, monkeypatch):
     monkeypatch.setattr(tiff_backend, "SEPARATE_READ_BYTES", 0)
     ref, _ = _reference(files[name])
     with micro_reader.open(files[name]) as img:
-        scene = img.images[0]
-        assert scene.read_unit is None
+        series = img.images[0]
+        assert series.read_unit is None
         for key in _keys(ref.shape, seed=7):
-            scene[key]
-        assert scene.stats.over_read == 1.0
+            series[key]
+        assert series.stats.over_read == 1.0
 
 
 def test_uncompressed_single_strip_reads_only_the_rectangle(tmp_path, monkeypatch):
@@ -150,9 +150,9 @@ def test_uncompressed_single_strip_reads_only_the_rectangle(tmp_path, monkeypatc
     with tifffile.TiffFile(path) as tf:
         assert len(tf.pages[0].dataoffsets) == 1           # really one strip
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        np.testing.assert_array_equal(scene[1000:1064, 1500:1564], data[1000:1064, 1500:1564])
-        assert scene.stats.pixels_read == 64 * 64
+        series = img.images[0]
+        np.testing.assert_array_equal(series[1000:1064, 1500:1564], data[1000:1064, 1500:1564])
+        assert series.stats.pixels_read == 64 * 64
 
 
 @pytest.mark.parametrize("name", ["single_strip", "strips_37", "big_endian", "rgb_contig",
@@ -165,24 +165,24 @@ def test_uncompressed_runs_split_into_pool_tasks(files, name, decode_threads, mo
     monkeypatch.setattr(tiff, "SEPARATE_READ_BYTES", 0)   # the exact path
     ref, _ = _reference(files[name])
     with micro_reader.open(files[name]) as img:
-        scene = img.images[0]
+        series = img.images[0]
         for key in _keys(ref.shape, seed=5):
-            np.testing.assert_array_equal(scene[key], ref[key], err_msg=f"{name} {key}")
+            np.testing.assert_array_equal(series[key], ref[key], err_msg=f"{name} {key}")
         if name != "rgb_contig":                  # sample subsets over-read the samples
-            assert scene.stats.over_read == 1.0
+            assert series.stats.over_read == 1.0
 
 
 def test_compressed_read_unit_and_decode_cache(files):
     ref, _ = _reference(files["zlib_tiled"])
     with micro_reader.open(files["zlib_tiled"]) as img:
-        scene = img.images[0]
-        assert scene.read_unit == (64, 64)
-        np.testing.assert_array_equal(scene[10:20, 10:20], ref[10:20, 10:20])
-        assert scene.stats.pixels_read == 64 * 64          # one tile decoded
-        np.testing.assert_array_equal(scene[30:40, 50:60], ref[30:40, 50:60])
-        assert scene.stats.pixels_read == 64 * 64          # same tile: from the cache
-        np.testing.assert_array_equal(scene[60:70, 60:70], ref[60:70, 60:70])
-        assert scene.stats.pixels_read == 4 * 64 * 64      # touches 4 tiles, 1 cached
+        series = img.images[0]
+        assert series.read_unit == (64, 64)
+        np.testing.assert_array_equal(series[10:20, 10:20], ref[10:20, 10:20])
+        assert series.stats.pixels_read == 64 * 64          # one tile decoded
+        np.testing.assert_array_equal(series[30:40, 50:60], ref[30:40, 50:60])
+        assert series.stats.pixels_read == 64 * 64          # same tile: from the cache
+        np.testing.assert_array_equal(series[60:70, 60:70], ref[60:70, 60:70])
+        assert series.stats.pixels_read == 4 * 64 * 64      # touches 4 tiles, 1 cached
 
 
 def test_rgb_sample_subset(files):
@@ -205,9 +205,9 @@ def test_multiple_series(tmp_path):
         tw.write(c, photometric="minisblack", tile=(16, 16), metadata={"axes": "ZYX"})
     with micro_reader.open(path) as img:
         assert [s.axes for s in img.images] == ["yx", "zyx", "zyx"]
-        for scene, data in zip(img.images, (a, b, c)):
-            np.testing.assert_array_equal(scene[...], data)
-            np.testing.assert_array_equal(scene[..., 3:17, 5:25], data[..., 3:17, 5:25])
+        for series, data in zip(img.images, (a, b, c)):
+            np.testing.assert_array_equal(series[...], data)
+            np.testing.assert_array_equal(series[..., 3:17, 5:25], data[..., 3:17, 5:25])
 
 
 def test_truncated_imagej_hyperstack(tmp_path):
@@ -219,10 +219,10 @@ def test_truncated_imagej_hyperstack(tmp_path):
     with tifffile.TiffFile(path) as tf:
         assert len(tf.pages) == 1 and tf.series[0].is_truncated
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        assert scene.shape == data.shape
-        np.testing.assert_array_equal(scene[...], data)
-        np.testing.assert_array_equal(scene[4, 10:20, 5:45], data[4, 10:20, 5:45])
+        series = img.images[0]
+        assert series.shape == data.shape
+        np.testing.assert_array_equal(series[...], data)
+        np.testing.assert_array_equal(series[4, 10:20, 5:45], data[4, 10:20, 5:45])
 
 
 def test_sparse_tiles_read_as_fill(tmp_path):
@@ -352,7 +352,7 @@ def test_truncated_file_is_reported(tmp_path):
 @pytest.mark.parametrize("compression", [None, "zlib"])
 def test_close_releases_the_file(tmp_path, compression, decode_threads):
     """Windows cannot delete open files: closing must release every handle,
-    including those the decode threads keep per scene."""
+    including those the decode threads keep per series."""
     path = str(tmp_path / "a.tif")
     tifffile.imwrite(path, _data((150, 160)), compression=compression, tile=(32, 32))
     img = micro_reader.open(path)
@@ -374,10 +374,10 @@ def test_corrupt_compressed_segment_raises(tmp_path, decode_threads):
         fh.seek(offset)
         fh.write(b"\x00" * 16)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        np.testing.assert_array_equal(scene[0:64, 0:64], data[0:64, 0:64])   # intact tile
+        series = img.images[0]
+        np.testing.assert_array_equal(series[0:64, 0:64], data[0:64, 0:64])   # intact tile
         with pytest.raises(Exception):
-            scene[...]
+            series[...]
 
 
 @pytest.mark.parametrize("name", ["strips_37", "zlib_tiled", "ome_czyx_tiled", "lzw"])
@@ -386,13 +386,13 @@ def test_concurrent_reads(files, name, decode_threads):
         pytest.skip("needs imagecodecs")
     ref, _ = _reference(files[name])
     with micro_reader.open(files[name]) as img:
-        scene, errors = img.images[0], []
+        series, errors = img.images[0], []
         keys = _keys(ref.shape, n=40, seed=11)
 
         def worker(offset):
             try:
                 for key in keys[offset::4]:
-                    if not np.array_equal(scene[key], ref[key]):
+                    if not np.array_equal(series[key], ref[key]):
                         errors.append(key)
             except Exception as exc:        # noqa: BLE001
                 errors.append(exc)
@@ -412,9 +412,9 @@ def test_uncompressed_narrow_reads_merge_rows(files, name):
     more read per row, so a run of rows is one read (as in LIF); pixels stay exact."""
     ref, _ = _reference(files[name])
     with micro_reader.open(files[name]) as img:
-        scene = img.images[0]
+        series = img.images[0]
         for key in _keys(ref.shape, seed=11):
-            np.testing.assert_array_equal(scene[key], ref[key], err_msg=f"{name} {key}")
+            np.testing.assert_array_equal(series[key], ref[key], err_msg=f"{name} {key}")
 
 
 def test_uncompressed_single_strip_merged_span(tmp_path):
@@ -424,12 +424,12 @@ def test_uncompressed_single_strip_merged_span(tmp_path):
     path = str(tmp_path / "a.tif")
     tifffile.imwrite(path, data)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        np.testing.assert_array_equal(scene[1000:1064, 1500:1564], data[1000:1064, 1500:1564])
-        assert scene.stats.pixels_read == 63 * 3000 + 64
+        series = img.images[0]
+        np.testing.assert_array_equal(series[1000:1064, 1500:1564], data[1000:1064, 1500:1564])
+        assert series.stats.pixels_read == 63 * 3000 + 64
     big = _data((64, 40000))                                    # 80 KB skipped per row
     tifffile.imwrite(path, big)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        np.testing.assert_array_equal(scene[:, 100:164], big[:, 100:164])
-        assert scene.stats.pixels_read == 64 * 64              # rows read separately
+        series = img.images[0]
+        np.testing.assert_array_equal(series[:, 100:164], big[:, 100:164])
+        assert series.stats.pixels_read == 64 * 64              # rows read separately

@@ -101,7 +101,7 @@ class DecodeCache:
     Keeps a segment shared by neighbouring reads from being decoded twice.
     Segments above a quarter of ``max_bytes`` are not kept (a whole plane from
     a single-strip file would evict everything else). ``max_bytes`` caps this
-    cache (one file or scene); every cache of the process together stays within
+    cache (one file or series); every cache of the process together stays within
     :func:`cache_limit`, so many open files do not hold many times the memory."""
 
     def __init__(self, max_bytes: int):
