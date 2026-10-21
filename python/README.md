@@ -396,20 +396,20 @@ CZI pyramids belong to whole series. Separately opened CZI mosaic tiles therefor
 
 ## Mosaic tiles
 
-Mosaic tiles are separate images by default.
+Mosaic tiles are separate images by default, each with its own position.
 
-For CZI files, you can instead request stitched series:
+For CZI files and FluoView tiling sets (`.omp2info`), you can instead get one image per series, its tiles placed on one canvas:
 
 ```python
 f = micro_reader.open(
     path,
-    tiles="stitched",
+    tiles="mosaic",
 )
 ```
 
-The tiles are composed according to the format's stitching information.
+CZI tiles are placed by the file's own stitching information, FluoView tiles by the tiling set's grid (where tiles overlap, the later tile is on top; areas without a tile read as 0). Other formats with tiles raise an error for `tiles="mosaic"`.
 
-Currently, stitching is supported for **CZI only**.
+`tiles="stitched"`, the name before 0.1.0, still works and warns.
 
 ## Plates
 
@@ -513,13 +513,18 @@ The position is omitted when it cannot be determined reliably.
 | -------------------- | ----------------------------------------------------- |
 | **TIFF / BigTIFF**   | TIFF, OME-TIFF, ImageJ, LSM, STK, Micro-Manager, whole-slide TIFFs |
 | **OME companion**    | `.companion.ome` sets of OME-TIFF files               |
-| **CZI**              | Zeiss CZI, including mosaic tiles and stitched series |
+| **CZI**              | Zeiss CZI, including mosaic tiles (separate or on one canvas) |
 | **ND2**              | Nikon ND2, including legacy JPEG 2000 ND2             |
 | **Leica**            | LIF, LOF, LIFEXT, XLIF, XLEF, XLCF                    |
-| **OIR**              | Olympus / Evident FluoView                            |
+| **OIR**              | Olympus / Evident FluoView, including tiling sets (`.omp2info`) |
 | **OIB / OIF**        | Olympus FluoView FV1000 / FV1200 / FV3000             |
 | **VSI**              | Olympus / Evident cellSens and VS120 / VS200 slide scanners |
-| **Imaris**           | `.ims`, with the `[ims]` extra                        |
+| **NDPIS**            | Hamamatsu NanoZoomer fluorescence sets (one NDPI per channel) |
+| **Imaris**           | `.ims`, with the `[hdf5]` extra                       |
+| **HDF5**             | ilastik, BigDataViewer / BigStitcher, Luxendo, Fiji HDF5, with the `[hdf5]` extra |
+| **ICS / IDS**        | Image Cytometry Standard 1.0 and 2.0 (SVI Huygens and others) |
+| **MetaMorph**        | `.nd` acquisitions and their TIFF / STK files         |
+| **Micro-Manager 1.4**| image-per-file acquisitions (`metadata.txt` + one TIFF per plane) |
 | **DeltaVision**      | `.dv`, `.r3d` (softWoRx, OMX, Priism)                 |
 | **MRC**              | Common MRC modes and extended headers                 |
 | **Plates (HCS)**     | Harmony, MetaXpress, IN Cell and CellVoyager plates   |
@@ -540,13 +545,13 @@ Supported TIFF formats include:
 * Zeiss LSM
 * MetaMorph STK
 * Micro-Manager stacks (MMStack and NDTiff), also when one acquisition is spread over several files
-* Whole-slide TIFFs: Aperio SVS, Hamamatsu NDPI, Leica SCN, Ventana BIF, PerkinElmer / Akoya QPTIFF and Philips
+* Whole-slide TIFFs: Aperio SVS, Hamamatsu NDPI, Leica SCN, Ventana / Roche BIF (VENTANA DP 200, iScan Coreo), PerkinElmer / Akoya QPTIFF and Philips
 
 Micro-Manager stage positions are series. NDTiff channel names and pixel sizes come from the dataset's index and frame metadata.
 
 A whole-slide file gives the slide first, then the other pictures it stores as further series, as Bio-Formats lists them: `label` and `macro` (overview), and for some formats `thumbnail` (QPTIFF) or `probability` (BIF tissue map). Pixel sizes, positions and channel names come from each vendor's own metadata.
 
-Ventana BIF scans store overlapping tiles. They are composed as Roche's description of the format places them. Files from scanners other than the VENTANA DP 200 are not supported.
+Ventana BIF scans store overlapping tiles. VENTANA DP 200 scans are composed as Roche's description of the format places them. iScan Coreo scans, which that description does not cover, are composed as OpenSlide shows them, with one difference: each tile starts at the nearest whole pixel and keeps its stored pixels, where OpenSlide interpolates to a sub-pixel position. Areas outside the scanned regions read as 0. Layouts that were not checked on real files (other EncodeInfo versions, several focal planes, overlapping scan areas) raise an error.
 
 Compressed TIFF data is decoded only for the strips or tiles needed by the requested region.
 
@@ -651,6 +656,8 @@ These are represented using the common image/index model.
 
 Olympus / Evident FluoView OIR files are supported, including companion files and spectral scans.
 
+A multi-area tiling set is opened through its index, `.omp2info`, or its folder: one image per tile, each at the stage position the index gives it (the tiles' own files record none), or one canvas per group with `tiles="mosaic"`. Positions follow the protocol's grid, not a registration. The grid step was derived from one sample, as the backend documents.
+
 ### Olympus OIB and OIF
 
 Older FluoView files come in two forms with the same content: an OIB is one file, an OIF is a `.oif` settings file plus a `.oif.files` folder with one TIFF per plane. Both open as one `t c z y x` image, with pixel sizes, z and time steps, channel names, colours and wavelengths. Opening any file in the `.oif.files` folder opens the OIF.
@@ -668,12 +675,39 @@ Opening the `_<name>_` folder, a `stack` folder or a file in it opens the `.vsi`
 Install Imaris support with:
 
 ```bash
-pip install "micro-reader[ims]"
+pip install "micro-reader[hdf5]"
 ```
+
+(`[ims]` is the extra's former name and still works.)
 
 Imaris resolution level 0 is exposed at the actual image size, with Imaris chunk padding removed.
 
 Chunked compression is decoded in parallel.
+
+### HDF5: ilastik, BigDataViewer, Luxendo, Fiji
+
+These need the `[hdf5]` extra as well.
+
+* **ilastik**: every dataset with ilastik's `axistags` (its exports, its input files, steinbock's `img`) is one image, in the dataset's own axis order. Pixel sizes are read where ilastik recorded units (`axis_units`, since 2025-09).
+* **BigDataViewer / BigStitcher**: the XML with its HDF5 file (also partitioned). One image per tile, angle and illumination, channels on `c` and time points on `t`, with the stored resolution levels. Opening the HDF5 file opens its XML.
+* **Luxendo / Bruker light-sheet** (`.lux.h5`): one stack per file. A whole acquisition opens through the Imaris file Luxendo writes next to it.
+* **Fiji HDF5** (the Vibez plugin): datasets with `element_size_um`; `t<n>/channel<n>` datasets make one `t c z y x` image.
+
+### ICS / IDS
+
+ICS 1.0 (an `.ics` header with an `.ids` pixel file; opening either opens the image) and ICS 2.0 (one file), as written by SVI Huygens and others. Gzip-compressed pixels are read without decompressing the whole file. Images that store rows bottom-up (`coordinates cartesian`) are returned top-down, as Bio-Formats does.
+
+### MetaMorph .nd
+
+A MetaMorph multi-dimensional acquisition: an `.nd` file and the TIFF / STK files named after it. One image per stage position (`series`), `t c z y x`, channels named by the wavelengths. Opening the `.nd` file, any of its files or its folder opens the whole set. The stage coordinates the files record are kept as `Metadata.stage_position`, not as a position: which point of the field they mark is not recorded.
+
+### Micro-Manager 1.4
+
+Image-per-file acquisitions (Micro-Manager 1.4 and the 2.0 betas): a folder per stage position with a `metadata.txt` and one TIFF per plane. One image per stage position, `t c z y x`, with channel names and colours, pixel sizes and the z step. Opening any file or folder of the acquisition opens the whole acquisition.
+
+### Hamamatsu NDPIS
+
+An `.ndpis` set lists one NDPI file per fluorescence channel. Opened, it is one slide image with one channel per file, at every stored resolution level; channels are named by their filter set. Each NDPI file still opens alone as an ordinary slide.
 
 ### DeltaVision
 
