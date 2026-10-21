@@ -223,11 +223,16 @@ def czi_metadata(image, fh, root) -> Metadata:
     if not position and first is not None:
         # no stage position per subblock: the scene's, taken as the centre of
         # the whole scene (all its level-0 tiles; as Bio-Formats places it)
-        tiles = [e for e in image._czi._level0 if e.scene == first.scene]
+        tiles = [e for e in image._czi._level0 if e.series == first.series]
         x0, y0 = min(e.x for e in tiles), min(e.y for e in tiles)
         x1 = max(e.x + e.width for e in tiles)
         y1 = max(e.y + e.height for e in tiles)
         whole = replace(first, x=x0, y=y0, width=x1 - x0, height=y1 - y0)
-        position = first_pixel_position(image, scene_position(root, first.scene), whole, sizes)
-    return Metadata(pixel_sizes=sizes, position=position,
-                    channels=channels(root, image._czi._dim_starts.get("C", 0), n_c))
+        position = first_pixel_position(image, scene_position(root, first.series), whole, sizes)
+    ids = getattr(image, "_channel_ids", None)           # a part: the file's channels it holds
+    if ids is not None:
+        every = channels(root, 0, max(ids) + 1)
+        chosen = tuple(every[k] for k in ids)
+    else:
+        chosen = channels(root, image._czi._dim_starts.get("C", 0), n_c)
+    return Metadata(pixel_sizes=sizes, position=position, channels=chosen)

@@ -1,8 +1,11 @@
 """TIFF variants on synthetic files: whole-slide formats (Aperio SVS, Leica
 SCN, Ventana BIF, PerkinElmer QPTIFF, Philips) and Micro-Manager NDTiff --
 the series kept (Bio-Formats' choice per format), their names, metadata,
-BIF tile placement, series spread over several files."""
+BIF tile placement (DP 200 by its joints, iScan as OpenSlide places it), series
+spread over several files."""
 from __future__ import annotations
+
+import re
 
 import numpy as np
 import pytest
@@ -149,7 +152,9 @@ def test_scn_series_metadata(tmp_path):
             tw.write(plane, metadata=None, tile=(16, 16))
     with micro_reader.open(path) as f:
         assert f.format == "scn"
-        assert [im.name for im in f.images] == ["overview", "tissue"]
+        # the image whose view spans the whole slide is the macro (its SCN name says nothing)
+        assert [im.name for im in f.images] == ["macro", "tissue"]
+        assert f.images[0].metadata.pixel_sizes["x"] == Quantity(25000.0, "nanometer")
         np.testing.assert_array_equal(f.images[1][...], tissue)
         np.testing.assert_array_equal(f.images[1].resolutions[1][...], small)
         meta = f.images[1].metadata
@@ -330,6 +335,197 @@ def test_bif_outside_the_paper_refused(tmp_path, xml, message):
         micro_reader.open(path)
 
 
+# -- iScan BIF (Coreo / HT): areas of interest on a canvas, as OpenSlide places them ----
+
+IS_TW, IS_TH = 32, 48                         # tiles not square, as the iScan's 1024 x 1360
+IS_GRID = (6, 9)                              # the stored tile grid (rows, cols)
+#: (scanned, rows, cols, origin col, origin row, Pos-X, Pos-Y): Pos-* is the
+#: area's lower left corner, +y up; area 1 was not scanned
+IS_AREAS = [(1, 3, 3, 0, 3, 0, 30), (0, 2, 2, 0, 0, 20, 190), (1, 4, 5, 4, 0, 120, 5)]
+#: RIGHT joints cycle through (OverlapX, Confidence); one unjoined (confidence 0)
+IS_RIGHT = [(3, 100), (4, 90), (0, 0), (5, 95)]
+IS_UP = [(5, 100), (6, 80), (4, 99)]          # (OverlapY, Confidence)
+
+
+def _iscan_joints():
+    """Per area, its TileJointInfo elements (the cross components, OverlapY of
+    RIGHT and OverlapX of UP joints, are set to show they are not used)."""
+    out, k = [], 0
+    for scanned, rows, cols, *_ in IS_AREAS:
+        joints = []
+        for r in range(rows):
+            for c in range(1, cols):
+                ox, conf = IS_RIGHT[k % len(IS_RIGHT)] if scanned else (0, 0)
+                k += 1
+                joints.append(f"<TileJointInfo FlagJoined='{int(conf > 0)}' Confidence='{conf}' "
+                              f"Direction='RIGHT' Tile1='{r * cols + c}' Tile2='{r * cols + c + 1}' "
+                              f"OverlapX='{ox}' OverlapY='{2 if conf else 0}'/>")
+        for r in range(1, rows):
+            for c in range(cols):
+                oy, conf = IS_UP[(r * cols + c) % len(IS_UP)] if scanned else (0, 0)
+                joints.append(f"<TileJointInfo FlagJoined='{int(conf > 0)}' Confidence='{conf}' "
+                              f"Direction='UP' Tile1='{(r - 1) * cols + c + 1}' Tile2='{r * cols + c + 1}' "
+                              f"OverlapX='{-2 if conf else 0}' OverlapY='{oy}'/>")
+        out.append(joints)
+    return out
+
+
+def _iscan_mean(direction):
+    """The confidence-weighted mean overlap, counted from the joints written."""
+    total = weight = 0.0
+    for joints in _iscan_joints():
+        for j in joints:
+            if f"Direction='{direction}'" in j:
+                attrs = dict(a.split("='") for a in j[len("<TileJointInfo "):-3].split("' "))
+                w = float(attrs["Confidence"])
+                total += w * float(attrs["OverlapX" if direction == "RIGHT" else "OverlapY"])
+                weight += w
+    return total / weight
+
+
+def _iscan_info(version="2", direction="RIGHT", z_layers="1", origin_x=None, pos_x_last=None,
+                confidence=True):
+    areas = [list(a) for a in IS_AREAS]
+    if pos_x_last is not None:
+        areas[-1][5] = pos_x_last
+    infos, origins = [], []
+    for n, ((scanned, rows, cols, oc, orow, px, py), joints) in enumerate(zip(areas, _iscan_joints())):
+        joints = [j.replace("Direction='RIGHT'", f"Direction='{direction}'") for j in joints]
+        if not confidence:                     # no RIGHT joint with a confidence
+            joints = [re.sub(r"Confidence='\d+'", "Confidence='0'", j) if "'RIGHT'" in j else j
+                      for j in joints]
+        infos.append(f'<ImageInfo AOIScanned="{scanned}" Width="{IS_TW}" Height="{IS_TH}" '
+                     f'NumRows="{rows}" NumCols="{cols}" Pos-X="{px}" Pos-Y="{py}">'
+                     + "".join(joints) + "</ImageInfo>")
+        ox = oc * IS_TW if origin_x is None or n else origin_x
+        origins.append(f'<AOI{n} OriginX="{ox}" OriginY="{orow * IS_TH}"/>')
+    return (f"<?xml version='1.0'?><EncodeInfo Ver='{version}'><SlideInfo>"
+            f"<iScan Magnification='40' ScanRes='0.23250' Z-layers='{z_layers}' Z-spacing='1'/>"
+            "</SlideInfo><SlideStitchInfo>" + "".join(infos) + "</SlideStitchInfo><AoiOrigin>"
+            + "".join(origins) + "</AoiOrigin></EncodeInfo>")
+
+
+def _nearest(v):
+    return int(np.floor(v + 0.5))
+
+
+def _iscan_compose(stored, k):
+    """Level *k* as OpenSlide places the tiles, to the nearest pixel: each
+    scanned area's tile cells painted in order (a later tile wins), the rest 0."""
+    import math
+    f = 1 << k
+    mx, my = _iscan_mean("RIGHT"), _iscan_mean("UP")
+    scanned = [a for a in IS_AREAS if a[0]]
+    sizes = [(math.ceil(c * IS_TW - (c - 1) * mx), math.ceil(r * IS_TH - (r - 1) * my))
+             for _, r, c, *_ in scanned]
+    top = max(a[6] + h for a, (_, h) in zip(scanned, sizes))
+    width = max(a[5] + w for a, (w, _) in zip(scanned, sizes))
+    height = top - min(a[6] for a in scanned)
+    out = np.zeros((-(-height // f), -(-width // f), 3), np.uint8)
+    for (_, rows, cols, oc, orow, px, py), (_, h) in zip(scanned, sizes):
+        ax, ay = px, top - py - h
+        for r in range(rows):
+            for c in range(cols):
+                y, x = _nearest((ay + r * (IS_TH - my)) / f), _nearest((ax + c * (IS_TW - mx)) / f)
+                cell = stored[_nearest((orow + r) * IS_TH / f):_nearest((orow + r + 1) * IS_TH / f),
+                              _nearest((oc + c) * IS_TW / f):_nearest((oc + c + 1) * IS_TW / f)]
+                h_, w_ = min(cell.shape[0], out.shape[0] - y), min(cell.shape[1], out.shape[1] - x)
+                out[y:y + h_, x:x + w_] = cell[:h_, :w_]
+    return out
+
+
+def _iscan_bif(path, **xml):
+    """An iScan BIF: level 0 uncompressed, levels 1 and 2 Deflate (one stored
+    tile holds several cells there); returns the stored levels and the macro."""
+    grid = _rgb((IS_GRID[0] * IS_TH, IS_GRID[1] * IS_TW))
+    levels = [grid, grid[::2, ::2].copy(), grid[::4, ::4].copy()]
+    macro, thumb = _rgb((60, 20)), _rgb((12, 18))
+    label_xmp = b'<iScan Magnification="40" ScanRes="0.232500" Z-layers="1"/>'
+    info = _iscan_info(**xml).encode() + b"\x00"
+    software = "C:\\Program Files\\Ventana Medical Systems Inc\\iScan\\StitchEncode.exe  v0.1"
+    with tifffile.TiffWriter(path, bigtiff=True) as tw:
+        tw.write(macro, metadata=None, photometric="rgb", description="Label Image",
+                 extratags=[(700, 1, len(label_xmp), label_xmp, True)])
+        tw.write(thumb, metadata=None, photometric="rgb", description="Thumbnail", software=software)
+        for k, level in enumerate(levels):
+            extratags = [(700, 1, len(info), info, True)] if k == 0 else []
+            tw.write(level, metadata=None, tile=(IS_TH, IS_TW), photometric="rgb",
+                     compression=None if k == 0 else "zlib", software=software,
+                     description=f"level={k} mag={40 >> k} quality=90", extratags=extratags)
+    return levels, macro, thumb
+
+
+def test_iscan_bif_areas_placed_as_openslide_does(tmp_path):
+    path = str(tmp_path / "iscan.bif")
+    levels, macro, thumb = _iscan_bif(path)
+    with micro_reader.open(path) as f:
+        assert f.format == "bif"
+        assert [im.name for im in f.images] == ["Baseline", "macro", "thumbnail"]
+        im = f.images[0]
+        expected = _iscan_compose(levels[0], 0)
+        assert im.shape == expected.shape
+        np.testing.assert_array_equal(im[...], expected)
+        h, w = expected.shape[:2]
+        for y0, y1, x0, x1 in [(0, h, 0, 30), (5, 40, 55, 90), (h - 7, h, w - 33, w), (17, 18, 0, w)]:
+            np.testing.assert_array_equal(im[y0:y1, x0:x1], expected[y0:y1, x0:x1])
+        for k in (1, 2):                       # cells of a stored tile, decoded once
+            level = im.resolutions[k]
+            expected = _iscan_compose(levels[k], k)
+            assert level.shape == expected.shape
+            np.testing.assert_array_equal(level[...], expected)
+            np.testing.assert_array_equal(level[3:11, 9:30], expected[3:11, 9:30])
+        np.testing.assert_array_equal(f.images[1][...], macro)
+        np.testing.assert_array_equal(f.images[2][...], thumb)
+        assert im.metadata.pixel_sizes["x"] == Quantity(0.2325, "micrometer")
+
+
+def test_iscan_layout_from_encode_info():
+    """The layout itself: weighted mean overlaps, areas placed +y up, cells
+    at the nearest pixel, each running to where the next starts."""
+    import math
+    import types
+    import xml.etree.ElementTree as ET
+    from micro_reader.backends import _tiff_variants as tv
+    key = types.SimpleNamespace(tilewidth=IS_TW, tilelength=IS_TH, imagewidth=IS_GRID[1] * IS_TW,
+                                imagelength=IS_GRID[0] * IS_TH)
+    layouts = tv.iscan_layouts(ET.fromstring(_iscan_info()), key, ["level=0", "level=1"], "test")
+    mx, my = _iscan_mean("RIGHT"), _iscan_mean("UP")
+    assert mx != int(mx) and my != int(my)             # fractional: rounding is exercised
+    first, second = layouts[0].areas
+    w0 = math.ceil(3 * IS_TW - 2 * mx)
+    h0, h2 = math.ceil(3 * IS_TH - 2 * my), math.ceil(4 * IS_TH - 3 * my)
+    top = max(30 + h0, 5 + h2)
+    assert layouts[0].height == top - 5 and layouts[0].width == 120 + math.ceil(5 * IS_TW - 4 * mx)
+    assert first.cols[0] == (0, _nearest(IS_TW - mx), 0)
+    assert first.rows[0] == (top - 30 - h0, top - 30 - h0 + _nearest(IS_TH - my), 3 * IS_TH)
+    assert first.cols[-1][1] - first.cols[-1][0] == IS_TW            # the last cell is whole
+    assert second.cols[0][0] == 120 and second.rows[0][0] == top - 5 - h2
+    assert layouts[1].width == -(-layouts[0].width // 2) and layouts[1].fill is None
+    # (composed start, end, stored start): halves round up; at a lower level the
+    # positions and stored cells are divided; cells narrowed to nothing are left
+    # out; a cell runs to where the next starts, even past its stored cell
+    assert tv._cells(0, 2, 4, 3.5, 0, 1) == ((0, 1, 0), (1, 5, 4))
+    assert tv._cells(10, 3, 16, 3.4, 2, 2) == ((5, 11, 16), (11, 18, 24), (18, 26, 32))
+    assert tv._cells(0, 3, 4, 3.75, 0, 2) == ((0, 2, 4),)
+    assert tv._cells(0, 2, 4, -1.0, 0, 1) == ((0, 5, 0), (5, 9, 4))
+
+
+@pytest.mark.parametrize("xml, message", [
+    ({"version": "1"}, "version '1'"),
+    ({"version": "3"}, "version '3'"),
+    ({"direction": "LEFT"}, "direction 'LEFT'"),
+    ({"z_layers": "3"}, "focal planes"),
+    ({"origin_x": 8}, "inside a tile"),
+    ({"pos_x_last": 10}, "overlap"),
+    ({"confidence": False}, "no RIGHT tile joint with a confidence"),
+])
+def test_iscan_bif_unchecked_files_refused(tmp_path, xml, message):
+    path = str(tmp_path / "iscan.bif")
+    _iscan_bif(path, **xml)
+    with pytest.raises(UnsupportedFormatError, match=message):
+        micro_reader.open(path)
+
+
 # -- Micro-Manager NDTiff ---------------------------------------------------------------
 
 def _plane(p, t, c, z, shape=(24, 40)):
@@ -350,9 +546,9 @@ def test_ndtiff_positions_are_scenes(tmp_path, per_file):
     assert len(paths) == (1 if per_file is None else 5)
     with micro_reader.open(paths[0]) as f:
         assert f.format == "ndtiff"
-        assert [im.index["scene"] for im in f.images] == [0, 1]
+        assert [im.index["series"] for im in f.images] == [0, 1]
         for im in f.images:
-            p = im.index["scene"]
+            p = im.index["series"]
             a = im.as_axes("tczyx")
             assert a.shape == (3, 2, 2, 24, 40)
             whole = a[...]

@@ -12,7 +12,7 @@ height, width and bits per component.
 Frames run over the experiment loops, outermost first (time, XY position,
 Z), loops of one element left out; loop counts follow the text description
 where it names them (some files store more frames than the loops hold).
-Images are the XY positions (index ``scene``); axes ``tczyx`` plus ``s`` for RGB, as the modern
+Images are the XY positions (index ``series``); axes ``tczyx`` plus ``s`` for RGB, as the modern
 ND2 backend has them.  Codestreams are decoded whole (micro-reader's JPEG
 2000 decoder, on the decode pool) and kept in a bounded cache.
 

@@ -1,6 +1,6 @@
 """Scenes presented with chosen axes: ``Image.as_axes`` and ``open(axes=...)``.
 
-The view logic on an array-backed scene (every axis layout, every policy,
+The view logic on an array-backed series (every axis layout, every policy,
 checked against numpy), then through real backends (TIFF, MRC, ND2 RGB)."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from micro_reader import Image
 
 
 class ArrayImage(Image):
-    """A scene over an in-memory array, counting what it reads."""
+    """A series over an in-memory array, counting what it reads."""
 
     def __init__(self, data, axes, unit=None):
         self.data = np.asarray(data)
@@ -86,9 +86,9 @@ def test_rgb_without_channels_folds_to_three_channels():
 
 
 def test_axis_that_does_not_fit_is_named():
-    scene = ArrayImage(np.zeros((2, 3, 4, 5)), "tzyx")
+    series = ArrayImage(np.zeros((2, 3, 4, 5)), "tzyx")
     with pytest.raises(ValueError, match=r"'t'"):
-        scene.as_axes("zyx")
+        series.as_axes("zyx")
     with pytest.raises(ValueError, match="samples='channels'"):
         ArrayImage(np.zeros((4, 5, 3)), "yxs").as_axes("tczyx")
 
@@ -99,18 +99,18 @@ def test_axis_that_does_not_fit_is_named():
     ("zzyx", {}, "each once"),
 ])
 def test_bad_requests_are_errors(axes, kwargs, match):
-    scene = ArrayImage(np.zeros((2, 3, 4, 5)), "czyx")
+    series = ArrayImage(np.zeros((2, 3, 4, 5)), "czyx")
     with pytest.raises(ValueError, match=match):
-        scene.as_axes(axes, **kwargs)
+        series.as_axes(axes, **kwargs)
 
 
 def test_as_axes_has_no_select_or_rename():
     """Non-standard dimensions are image indices now, not axes to fix or name."""
-    scene = ArrayImage(np.zeros((2, 4, 5)), "zyx")
+    series = ArrayImage(np.zeros((2, 4, 5)), "zyx")
     with pytest.raises(TypeError):
-        scene.as_axes("tczyx", select={"z": 0})
+        series.as_axes("tczyx", select={"z": 0})
     with pytest.raises(TypeError):
-        scene.as_axes("tczyx", rename={"z": "t"})
+        series.as_axes("tczyx", rename={"z": "t"})
 
 
 def test_reads_stay_exact_and_units_follow():
@@ -168,7 +168,7 @@ def test_open_rename_makes_an_index_an_axis(tmp_path):
         for page in data:
             tw.write(page, metadata=None)
     with micro_reader.open(path) as f:
-        assert f.index_range == {"scene": 1, "sequence": 4}
+        assert f.index_range == {"series": 1, "sequence": 4}
         assert all(image.axes == "yx" for image in f.images)
         np.testing.assert_array_equal(f.select(sequence=2)[0][...], data[2])
     with micro_reader.open(path, rename={"sequence": "z"}) as f:
@@ -178,7 +178,7 @@ def test_open_rename_makes_an_index_an_axis(tmp_path):
 
 
 @pytest.mark.parametrize("rename,match", [
-    ({"scene": "z"}, "not an index that can become an axis"),
+    ({"series": "z"}, "not an index that can become an axis"),
     ({"sequence": "y"}, "not 't', 'c' or 'z'"),
     ({"sequence": "z", "phase": "z"}, "two indices onto one axis"),
 ])
@@ -234,10 +234,10 @@ def test_squeeze_drops_size_one_axes_but_not_the_plane():
 
 def test_squeeze_named_axes_only():
     data = RNG.integers(0, 1000, (1, 3, 1, 6, 7))
-    scene = ArrayImage(data, "tczyx")
-    _check(scene.squeeze("t"), data[0])
+    series = ArrayImage(data, "tczyx")
+    _check(series.squeeze("t"), data[0])
     with pytest.raises(ValueError, match="has 3, not 1"):
-        scene.squeeze("c")
+        series.squeeze("c")
 
 
 def test_squeeze_a_view_rebuilds_over_the_source():
@@ -273,7 +273,7 @@ def test_open_canonical_squeezed(tmp_path):
 
 def test_indices_select_and_range():
     from micro_reader import File
-    keys = [{"scene": 0, "tile": 0}, {"scene": 0, "tile": 1}, {"scene": 1, "tile": 0}]
+    keys = [{"series": 0, "tile": 0}, {"series": 0, "tile": 1}, {"series": 1, "tile": 0}]
     images = []
     for i, key in enumerate(keys):
         image = ArrayImage(np.zeros((2, 3)), "yx")
@@ -281,9 +281,9 @@ def test_indices_select_and_range():
         images.append(image)
     f = File("x", images)
     assert f.indices == keys
-    assert f.index_range == {"scene": 2, "tile": 2}    # widest range: scene 0 has 2 tiles, scene 1 one
-    assert f.select(scene=0) == images[:2]
-    assert f.select(scene=1, tile=0) == [images[2]]
+    assert f.index_range == {"series": 2, "tile": 2}    # widest range: series 0 has 2 tiles, series 1 one
+    assert f.select(series=0) == images[:2]
+    assert f.select(series=1, tile=0) == [images[2]]
     assert images[1].as_axes("canonical").index == keys[1]           # axes images keep it
     with pytest.raises(KeyError, match="unknown indices"):
         f.select(position=0)
@@ -315,10 +315,10 @@ def test_resolution_index_follows_the_file_not_the_image():
     in their index (the file has that dimension), the flat one 0."""
     from micro_reader import File
     pyramidal, level1, flat = (ArrayImage(np.zeros((4, 4)), "yx") for _ in range(3))
-    pyramidal.index, level1.index = {"scene": 0}, {"scene": 0, "resolution": 1}
+    pyramidal.index, level1.index = {"series": 0}, {"series": 0, "resolution": 1}
     pyramidal._resolutions = level1._resolutions = [pyramidal, level1]
-    flat.index = {"scene": 1}
+    flat.index = {"series": 1}
     f = File("x", [pyramidal, flat])
     assert pyramidal.is_pyramidal and not flat.is_pyramidal
-    assert f.indices == [{"scene": 0, "resolution": 0}, {"scene": 1, "resolution": 0}]
-    assert level1.index == {"scene": 0, "resolution": 1}
+    assert f.indices == [{"series": 0, "resolution": 0}, {"series": 1, "resolution": 0}]
+    assert level1.index == {"series": 0, "resolution": 1}

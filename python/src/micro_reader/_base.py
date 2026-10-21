@@ -1,6 +1,6 @@
 """The interface every backend implements: a File holding Images.
 
-Each image is one spatial frame of the file; its index says which (scene,
+Each image is one spatial frame of the file; its index says which (series,
 tile, rotation, view: see docs/AXES.md)."""
 from __future__ import annotations
 
@@ -11,6 +11,99 @@ from typing import Optional, Sequence
 import numpy as np
 
 from ._index import normalise_index
+
+#: the old name of the index ``series`` (micro-reader < 0.1.0).  Never reused:
+#: an index holding it, and every read of it, raises (``ImageIndex``).
+_OLD_SERIES = "scene"
+_RENAMED = "the image index 'scene' is now called 'series' (micro-reader 0.1.0); use 'series'"
+
+
+class ImageIndex(dict):
+    """An image's index (``Image.index``): a dict that refuses the old name
+    of the index series (``_OLD_SERIES``, renamed in micro-reader 0.1.0).
+    Storing that key raises ``KeyError``, and so do reading or deleting it with ``[]``,
+    ``.get``, ``in``, ``.pop`` and ``del``, each naming "series" -- where a plain
+    dict would say nothing (``.get``, ``in``).  ``copy()``, ``|`` and
+    pickling keep the type.  Copies made with ``dict(index)`` or
+    ``{**index}`` are plain dicts and are not guarded.  Kept until no
+    supported eubi-bridge release needs it and three micro-reader minor
+    releases have passed (CHANGELOG.md, 0.1.0)."""
+
+    __slots__ = ()
+
+    def __init__(self, *args, **kwargs):
+        dict.__init__(self, *args, **kwargs)
+        if dict.__contains__(self, _OLD_SERIES):
+            raise KeyError(_RENAMED)
+
+    @classmethod
+    def fromkeys(cls, keys, value=None):
+        return cls(dict.fromkeys(keys, value))
+
+    def __setitem__(self, key, value):
+        if key == _OLD_SERIES:
+            raise KeyError(_RENAMED)
+        dict.__setitem__(self, key, value)
+
+    def update(self, *args, **kwargs):
+        other = dict(*args, **kwargs)
+        if _OLD_SERIES in other:
+            raise KeyError(_RENAMED)
+        dict.update(self, other)
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+    def setdefault(self, key, default=None):
+        if key == _OLD_SERIES:
+            raise KeyError(_RENAMED)
+        return dict.setdefault(self, key, default)
+
+    def __getitem__(self, key):
+        if key == _OLD_SERIES:
+            raise KeyError(_RENAMED)
+        return dict.__getitem__(self, key)
+
+    def get(self, key, default=None):
+        if key == _OLD_SERIES:
+            raise KeyError(_RENAMED)
+        return dict.get(self, key, default)
+
+    def __contains__(self, key):
+        if key == _OLD_SERIES:
+            raise KeyError(_RENAMED)
+        return dict.__contains__(self, key)
+
+    def pop(self, key, *default):
+        if key == _OLD_SERIES:
+            raise KeyError(_RENAMED)
+        return dict.pop(self, key, *default)
+
+    def __delitem__(self, key):
+        if key == _OLD_SERIES:
+            raise KeyError(_RENAMED)
+        dict.__delitem__(self, key)
+
+    def copy(self) -> "ImageIndex":
+        return ImageIndex(self)
+
+    def __or__(self, other):
+        if not isinstance(other, dict):
+            return NotImplemented
+        out = ImageIndex(self)
+        out.update(other)
+        return out
+
+    def __ror__(self, other):
+        if not isinstance(other, dict):
+            return NotImplemented
+        out = ImageIndex(other)
+        out.update(self)
+        return out
+
+    def __reduce__(self):               # pickle / deepcopy keep the type
+        return ImageIndex, (dict(self),)
 
 
 @dataclass
@@ -63,10 +156,10 @@ class Image:
         self.shape = tuple(int(n) for n in shape)
         self.dtype = np.dtype(dtype).newbyteorder("=")
         self.name = name if name is not None else f"image{position}"
-        #: which image of the file: {"scene": .., "tile": .., "rotation": ..,
+        #: which image of the file: {"series": .., "tile": .., "rotation": ..,
         #: "view": .., "resolution": ..} -- only the indices the file has
-        #: (plates: "well", "field", ... instead of "scene"; see INDEX_NAMES)
-        self.index = dict(index) if index is not None else {"scene": self._position}
+        #: (plates: "well", "field", ... instead of "series"; see INDEX_NAMES)
+        self.index = ImageIndex(index if index is not None else {"series": self._position})
         self._resolutions: Optional[list] = None
         #: a ragged image's rectangular parts / a part's whole (see ``parts``)
         self._parts: Optional[list] = None
@@ -76,6 +169,17 @@ class Image:
         #: the backend reads at once (e.g. a compressed tile or strip).
         self.read_unit = None if read_unit is None else tuple(int(n) for n in read_unit)
         self.stats = ReadStats()
+
+    @property
+    def index(self) -> ImageIndex:
+        """Which image of the file this is (an ``ImageIndex``).  Assigning a
+        plain mapping stores a copy as an ``ImageIndex``; an ``ImageIndex`` is
+        kept as it is."""
+        return self._index
+
+    @index.setter
+    def index(self, value) -> None:
+        self._index = value if isinstance(value, ImageIndex) else ImageIndex(value)
 
     @property
     def ndim(self) -> int:
@@ -230,13 +334,13 @@ class Image:
 #: the indices that say which image of a file an image is, outermost first.
 #: Arrays have only t c z y x (+ s); every other dimension is an index:
 #: plate, acquisition (imaging run), well and field for plates (docs/HCS.md;
-#: on a plate, well and field take the place of scene), illumination
+#: on a plate, well and field take the place of series), illumination
 #: (light-sheet sides), phase, block (CZI), emission / excitation (spectral
 #: scans; the wavelength in the image's metadata), lifetime (FLIM bins) and
 #: sequence (a dimension the file does not name; open(...,
 #: rename={"sequence": "z"}) makes it an axis)
 INDEX_NAMES = ("plate", "acquisition", "well", "field",
-               "scene", "tile", "rotation", "view", "illumination", "phase", "block",
+               "series", "tile", "rotation", "view", "illumination", "phase", "block",
                "emission", "excitation", "lifetime", "sequence", "part", "resolution")
 #: the indices of plates (docs/HCS.md), on every image of a plate;
 #: ``plate`` and ``acquisition`` are 0 when a file holds one of each
@@ -312,27 +416,42 @@ class File:
     @property
     def index_range(self) -> dict:
         """The widest range of each index in the file: how many distinct
-        values it takes, e.g. ``{"scene": 2, "tile": 5}``.  Not a total and
-        not a shape: with 3 tiles in scene 0 and 5 in scene 1, tile indices
-        run 0-2 and 0-4, so the range is 5 (not 8, and scene 0 has only 3).
+        values it takes, e.g. ``{"series": 2, "tile": 5}``.  Not a total and
+        not a shape: with 3 tiles in series 0 and 5 in series 1, tile indices
+        run 0-2 and 0-4, so the range is 5 (not 8, and series 0 has only 3).
         Tile, rotation, view, well and field indices count from 0, so the
-        values are ``range(n)``; scene indices are the file's own (a CZI's
-        may skip numbers), so for scenes it is the number of distinct
+        values are ``range(n)``; series indices are the file's own (a CZI's
+        may skip numbers), so for series it is the number of distinct
         values.  A well index is a place in ``plates[p].wells``."""
-        counts = {}
-        for name in INDEX_NAMES:
-            values = {image.index[name] for image in self.images if name in image.index}
-            if values:
-                counts[name] = len(values)
-        return counts
+        # one pass over the indices, through dict's own methods: the
+        # ImageIndex checks would cost more than the loop (100,000 images)
+        seen: dict = {}
+        items = dict.items
+        for image in self.images:
+            for name, value in items(image.index):
+                values = seen.get(name)
+                if values is None:
+                    seen[name] = {value}
+                else:
+                    values.add(value)
+        return {name: len(seen[name]) for name in INDEX_NAMES if name in seen}
 
     def select(self, **index) -> list:
-        """The images whose index matches, e.g. ``select(scene=1, view=0)``."""
+        """The images whose index matches, e.g. ``select(series=1, view=0)``."""
         unknown = set(index) - set(INDEX_NAMES)
         if unknown:
+            if _OLD_SERIES in unknown:
+                raise KeyError(_RENAMED)
             raise KeyError(f"unknown indices {sorted(unknown)}; the indices are {INDEX_NAMES}")
-        return [image for image in self.images
-                if all(image.index.get(name) == value for name, value in index.items())]
+        get, wanted, out = dict.get, tuple(index.items()), []
+        for image in self.images:              # dict.get: not ImageIndex's checks
+            key = image.index
+            for name, value in wanted:
+                if not get(key, name) == value:
+                    break
+            else:
+                out.append(image)
+        return out
 
     def _member_files(self) -> set:
         """The other files this file's images are read from -- a file set's
@@ -346,6 +465,12 @@ class File:
                     out.update(paths())
         out.discard(self.path)
         return out
+
+    def _side_files(self) -> set:
+        """Files that belong to this file set without being read as its images
+        (CellVoyager correction images) -- for ``group_files``, which lists them
+        among the set's parts.  They still open alone.  Empty by default."""
+        return set()
 
     def check_members(self) -> int:
         """For a file set (a plate, an OME companion set): open every member
@@ -374,8 +499,28 @@ class File:
                                    f"not fit the index: {shown}")
         return checked
 
+    def _every_image(self) -> list:
+        """Every image this file gave out, each once: ``images``, their
+        resolution levels and the parts of ragged / mixed-type images (also
+        the levels ``resolutions="base"`` leaves out of ``images``).  An
+        axes image (``open(axes=...)``) counts as the native image it shows."""
+        out, seen = [], set()
+        todo = [getattr(image, "source", image) for image in reversed(self.images)]
+        while todo:
+            image = todo.pop()
+            if id(image) in seen:
+                continue
+            seen.add(id(image))
+            out.append(image)
+            todo.extend(reversed([m for m in image.resolutions + image.parts
+                                  if id(m) not in seen]))
+        return out
+
     def close(self) -> None:
-        for image in self.images:
+        """Close every image the file gave out (``_every_image``): reading
+        any of them afterwards -- a resolution level or a part too -- raises
+        ``ValueError``."""
+        for image in self._every_image():
             image.close()
 
     def __enter__(self) -> "File":
@@ -386,7 +531,7 @@ class File:
 
     def outline(self) -> str:
         """The file's structure (docs/AXES.md): its plates, wells and fields,
-        or its scenes, each with its tiles, the orthogonal indices that vary
+        or its series, each with its tiles, the orthogonal indices that vary
         in it (``x view 2``), the image shape and the pyramid levels."""
         from ._outline import outline_lines
         return "\n".join([self._header()] + ["  " + line for line in outline_lines(self)])

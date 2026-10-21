@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import builtins
 import os
+import warnings
 from typing import Optional
 
 from ._base import SAMPLED_INDICES, File
 from . import _parts
-from ._errors import UnsupportedFormatError
-from .backends import (companion, czi, cv7000, dv, harmony, ims, incell, lif, metaxpress, mrc,
-                       nd2, oif, oir, raster, tiff, vsi)
+from ._errors import CorruptFileError, OpenInstead, UnsupportedFormatError
+from .backends import (bdv, companion, czi, cv7000, dv, harmony, hdf5, ics, ilastik, ims, incell,
+                       lif, metamorph, metaxpress, micromanager, mrc, nd2, ndpis, oif, oir,
+                       omp2info, raster, tiff, vsi)
 
 #: Tried in order: VSI before TIFF (a .vsi is a TIFF with a metadata tree);
 #: magic numbers before MRC, which may also match by
@@ -19,15 +21,29 @@ from .backends import (companion, czi, cv7000, dv, harmony, ims, incell, lif, me
 #: ``sniff(head: bytes, path: str) -> bool`` and
 #: ``open(path, tiles="separate", resolutions="base") -> File``; a backend
 #: that declares ``RENAMES`` / ``PLATES`` also takes ``rename=`` / ``plates=``.
-BACKENDS = [vsi, tiff, czi, ims, nd2, oir, oif, lif, harmony, metaxpress, incell, cv7000, companion,
-            raster, dv, mrc]
+#: HDF5 files by their structure (_hdf5.kind): BigDataViewer (also its XML),
+#: ilastik, Luxendo / Fiji HDF5 (hdf5), then ims, which also refuses every other HDF5
+#: file with what it holds.  MetaMorph ``.nd`` sets by their ``"NDInfoFile"`` line;
+#: their TIFF / STK files are parts (``metamorph.owner``, asked after ``tiff.owner``
+#: in this order, docs/COMPOSITE.md rule 5).  ICS headers by their ``ics_version`` line;
+#: ``.ids`` pixel files and Huygens Remote Manager's side files are their parts.  Hamamatsu
+#: ``.ndpis`` set files by their ``[NanoZoomer Digital Pathology Image Set]`` line.
+#: Micro-Manager image-per-file acquisitions by a ``metadata.txt`` starting with its
+#: ``"Summary"``; their plane TIFFs, other positions' ``metadata.txt`` and folders are
+#: parts (``micromanager.owner``, after ``tiff.owner``: MMStack names never collide).
+BACKENDS = [vsi, tiff, czi, bdv, ilastik, hdf5, ims, nd2, oir, omp2info, oif, lif, harmony,
+            metaxpress, metamorph, micromanager, incell, cv7000, companion, ndpis, ics, raster, dv, mrc]
 
 #: Bytes read from the start of the file for sniffing.
 HEAD_BYTES = 1024
 
-#: mosaic tiles as separate images (default) or composed, where the format
-#: defines how (CZI); see docs/AXES.md
-TILE_POLICIES = ("separate", "stitched")
+#: mosaic tiles as separate images (default) or placed as one mosaic, where
+#: the format defines how (CZI); see docs/AXES.md.  "mosaic", not "stitched":
+#: tiles are put at their stored positions, nothing is registered or blended
+#: (docs/PROCESSED.md, "Spatial operations")
+TILE_POLICIES = ("separate", "mosaic")
+#: old names still accepted, with a DeprecationWarning
+DEPRECATED_TILE_POLICIES = {"stitched": "mosaic"}
 
 #: resolution levels: full resolution only (default), or every level as its
 #: own image indexed by "resolution" (image.resolutions gives a pyramid either way)
@@ -41,12 +57,13 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
     """Open *path* with the backend that recognises it (or the one named).
 
     Each image of the file is one spatial frame with axes ``t c z y x`` (+ ``s``),
-    and an index saying which: scene, tile, rotation, view, and the
+    and an index saying which: series, tile, rotation, view, and the
     dimensions sampled at the same points (illumination, phase, block,
     emission, excitation, lifetime, sequence).  *tiles*: ``"separate"`` gives
-    each mosaic tile as its own image; ``"stitched"`` composes a scene's
-    tiles, for formats that define how (CZI), and is an error for tiled files
-    of other formats.
+    each mosaic tile as its own image; ``"mosaic"`` places a series' tiles
+    at their stored positions as one image (no registration, no blending),
+    for formats that define how (CZI), and is an error for tiled files of
+    other formats.  ``"stitched"``, its old name, still works and warns.
 
     *rename* makes an index an array axis, for files that do not say what a
     dimension is: ``rename={"sequence": "z"}`` reads a plain multi-page TIFF
@@ -55,17 +72,29 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
 
     *plates* (opt-in for now, docs/HCS.md): ``True`` reads a file that is a
     plate as one: ``File.plates`` describes it, and its images are indexed by
-    well and field instead of scene.  For a file that is not a plate (or a
+    well and field instead of series.  For a file that is not a plate (or a
     format without plates) it changes nothing: ``File.plates`` stays empty.
 
-    *multifile*: a multi-file OME-TIFF -- one whose OME-XML lists planes in
-    other files -- opens as the whole set (``True``, the default), or with
-    only the planes stored in it (``False``), as the block of the set's
-    image they form, its metadata from its own XML.  Not affected: parts of
-    composite formats (an OIR continuation, an OIF plane, a VSI ``.ets``:
-    pieces of one image, docs/COMPOSITE.md); Micro-Manager stacks, though
-    OME-TIFFs, because they split their files by size, mid-timepoint, so a
-    file is no block of the image; single-file OME-TIFFs.
+    *multifile*: a file of a multi-file OME set opens as the whole set
+    (``True``, the default) or alone (``False``):
+
+    - an OME-TIFF whose OME-XML lists planes in other files: the whole set,
+      or only the planes stored in it, as the block of the set's image they
+      form, its metadata from its own XML;
+    - a member whose OME-XML is a ``BinaryOnly`` stub pointing to a metadata
+      file (an OME companion, or another OME-TIFF): the set, as if that file
+      were opened -- ``File.path`` is the metadata file and its metadata wins;
+      a metadata file that cannot be followed (missing, unreadable, not
+      listing the file) is a ``CorruptFileError``.  ``False``: the file alone,
+      as its block of the set's image, with the metadata file's metadata
+      (docs/COMPANION.md, CO-2; a loud warning when it cannot be followed).
+
+    Missing members of a set warn and the rest reads, as for every file set.
+    Not affected: parts of composite formats (an OIR continuation, an OIF
+    plane, a VSI ``.ets``: pieces of one image, docs/COMPOSITE.md);
+    Micro-Manager stacks, though OME-TIFFs, because they split their files by
+    size, mid-timepoint, so a file is no block of the image; single-file
+    OME-TIFFs.
 
     *axes* (``"canonical"``, or letters such as ``"tczyx"``), *samples* and
     *squeeze* present every image as ``Image.as_axes`` does.  Each image's
@@ -76,6 +105,11 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
     the image it is a part of, or the one image it holds (docs/COMPOSITE.md).
     ``File.path`` is then the main file, ``File.opened`` the *path* given.
     A *backend* named explicitly reads *path* itself."""
+    if tiles in DEPRECATED_TILE_POLICIES:
+        warnings.warn(f"tiles={tiles!r} is deprecated: use tiles="
+                      f"{DEPRECATED_TILE_POLICIES[tiles]!r} (the tiles are placed at their "
+                      "stored positions, not stitched)", DeprecationWarning, stacklevel=2)
+        tiles = DEPRECATED_TILE_POLICIES[tiles]
     if tiles not in TILE_POLICIES:
         raise ValueError(f"tiles={tiles!r}: one of {TILE_POLICIES}")
     if resolutions not in RESOLUTION_POLICIES:
@@ -116,7 +150,8 @@ def _check_rename(rename: Optional[dict]) -> dict:
 
 
 def _open(path: str, backend: Optional[str], tiles: str, resolutions: str,
-          rename: dict, plates: bool = False, multifile: bool = True) -> File:
+          rename: dict, plates: bool = False, multifile: bool = True,
+          instead_of: Optional[str] = None) -> File:
     def call(module):
         options = {}
         if rename and getattr(module, "RENAMES", False):
@@ -125,7 +160,18 @@ def _open(path: str, backend: Optional[str], tiles: str, resolutions: str,
             options["plates"] = True
         if not multifile and getattr(module, "MULTIFILE", False):
             options["multifile"] = False
-        return module.open(path, tiles, resolutions, **options)
+        try:
+            return module.open(path, tiles, resolutions, **options)
+        except OpenInstead as instead:
+            # a member of a set: the set's metadata file opens it (multifile=True),
+            # with the same options; once -- a metadata file is no member itself
+            if instead_of is not None:
+                raise CorruptFileError(
+                    f"{instead_of!r} points to {path!r} for its metadata, which points on to "
+                    f"{instead.path!r}: a chain of metadata files is not supported. "
+                    f"multifile=False opens {instead_of!r} alone.") from None
+            return _open(instead.path, None, tiles, resolutions, rename, plates, multifile,
+                         instead_of=path)
 
     if backend is not None:
         for module in BACKENDS:

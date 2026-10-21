@@ -20,24 +20,26 @@ TWO_D = [(1, 1, "BFP", 405, "BP445/45", [-3.0]), (2, 2, "GFP", 488, "BP525/50", 
 
 
 def _write(folder, actions=TWO_D, wells=((2, 2), (3, 5)), fields=2, times=1, skip=(),
-           timelines=1, errors=(), pixel=(0.65, 0.65), mes=True):
+           timelines=1, errors=(), pixel=(0.65, 0.65), mes=True, layout=(16, 24)):
     """*wells*: 1-based (row, column); *skip*: (row, col, field, t, action, z)
-    not written.  -> {(row, col, field, t, action, z): array}."""
+    not written; *layout*: the (rows, columns) the plate files describe.
+    -> {(row, col, field, t, action, z): array}."""
+    rows, columns = layout
     os.makedirs(folder, exist_ok=True)
     chans = "".join(
         f'<bts:MeasurementChannel bts:Ch="{ch}" bts:HorizontalPixelDimension="{pixel[0] if ch == 1 else pixel[1]}" '
         f'bts:VerticalPixelDimension="{pixel[0] if ch == 1 else pixel[1]}" bts:HorizontalPixels="{X}" '
         f'bts:VerticalPixels="{Y}" />' for _a, ch, *_ in actions)
     with open(os.path.join(folder, "MeasurementDetail.mrf"), "w", encoding="utf-8") as fh:
-        fh.write(f'<?xml version="1.0" encoding="utf-8"?><bts:MeasurementDetail bts:RowCount="16" '
-                 f'bts:ColumnCount="24" bts:MeasurementSettingFileName="s.mes" {NS}>'
+        fh.write(f'<?xml version="1.0" encoding="utf-8"?><bts:MeasurementDetail bts:RowCount="{rows}" '
+                 f'bts:ColumnCount="{columns}" bts:MeasurementSettingFileName="s.mes" {NS}>'
                  f'<bts:MeasurementSamplePlate bts:Name="P1" bts:WellPlateFileName="P1.wpi" />'
                  f"{chans}</bts:MeasurementDetail>")
     with open(os.path.join(folder, "P1.wpi"), "w", encoding="utf-8") as fh:
         fh.write(f'<?xml version="1.0" encoding="utf-8"?>\n<bts:WellPlate bts:Name="P1" '
-                 f'bts:Columns="24" bts:Rows="16" {NS}></bts:WellPlate>')
+                 f'bts:Columns="{columns}" bts:Rows="{rows}" {NS}></bts:WellPlate>')
     with open(os.path.join(folder, "s.wpp"), "w", encoding="utf-8") as fh:
-        fh.write(f'<?xml version="1.0" encoding="utf-8"?>\n<bts:WellPlateProduct\n  bts:Rows="16" {NS} />')
+        fh.write(f'<?xml version="1.0" encoding="utf-8"?>\n<bts:WellPlateProduct\n  bts:Rows="{rows}" {NS} />')
     if mes:
         lights = "".join(f'<bts:LightSource bts:Name="{nm}nm" bts:WaveLength="{nm}" />'
                          for _a, _c, _t, nm, _f, _z in actions)
@@ -94,6 +96,19 @@ def test_a_measurement_opens_from_each_entry_file(tmp_path, entry):
             np.testing.assert_array_equal(image[0, a, 0], data[(3, 5, 2, 1, a + 1, 1)])
 
 
+def test_wells_outside_the_described_layout_grow_it(tmp_path):
+    """A slide holder described as 1 x 4 slides whose records address a well
+    of the slide in it (C05, zenodo-12795729): the layout holds the well."""
+    _write(str(tmp_path), wells=((3, 5),), fields=1, layout=(1, 4))
+    with pytest.warns(micro_reader.PlateLayoutWarning, match=r"1 x 4 layout, but wells C5"):
+        f = micro_reader.open(str(tmp_path / "MeasurementData.mlf"))
+    with f:
+        plate = f.plates[0]
+        assert (plate.rows, plate.columns) == (("A", "B", "C"), ("1", "2", "3", "4", "5"))
+        well = plate.wells[0]
+        assert (well.name, plate.rows[well.row], plate.columns[well.column]) == ("C5", "C", "5")
+
+
 def test_metadata_channels_pixel_sizes_and_position(tmp_path):
     _write(str(tmp_path))
     with micro_reader.open(tmp_path / "P1.wpi") as f:
@@ -108,6 +123,19 @@ def test_metadata_channels_pixel_sizes_and_position(tmp_path):
         assert md.position["x"].value == pytest.approx(200.0 - (X - 1) / 2 * 0.65)
         assert md.position["y"].value == pytest.approx(100.0 - (Y - 1) / 2 * 0.65)
         assert md.position["z"].value == -3.0
+
+
+def test_default_targets_are_named_by_their_light_source(tmp_path):
+    """The software's default Target "Microscope Image" names nothing (BIA
+    S-BIAD1013 / S-BIAD3934): the light source does, plus the filter when two
+    channels share one."""
+    default = "Microscope Image"
+    actions = [(1, 1, default, 405, "BP445/45", [-3.0]), (2, 2, default, 488, "BP525/50", [-3.0]),
+               (3, 3, default, 488, "BP600/37", [-3.0]), (4, 4, "GFP", 561, "BP617/67", [-3.0])]
+    _write(str(tmp_path), actions=actions, wells=((2, 2),), fields=1)
+    with micro_reader.open(tmp_path / "P1.wpi") as f:
+        assert [c.name for c in f.images[0].metadata.channels] == [
+            "405nm", "488nm BP525/50", "488nm BP600/37", "GFP"]
 
 
 def test_timepoints_and_a_settings_file_that_is_missing(tmp_path):

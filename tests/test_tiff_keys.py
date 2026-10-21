@@ -17,7 +17,8 @@ RNG = np.random.default_rng(7)
 def _write(path, data, axes):
     tifffile.imwrite(path, data, metadata={"axes": axes}, photometric="minisblack")
     with tifffile.TiffFile(path) as tif:                    # the writer keeps the letters
-        assert tif.series[0].axes == axes
+        # (tifffile 2026.6+ leaves out letters of size 1: AZYX with A = 1 reads as ZYX)
+        assert tif.series[0].axes in (axes, "".join(a for a, n in zip(axes, data.shape) if n > 1))
 
 
 def test_lifetime_and_lambda_are_indices(tmp_path):
@@ -25,9 +26,9 @@ def test_lifetime_and_lambda_are_indices(tmp_path):
     path = str(tmp_path / "flim.tif")
     _write(path, data, "HEZYX")
     with micro_reader.open(path) as f:
-        assert f.index_range == {"scene": 1, "emission": 2, "lifetime": 3}
-        assert f.indices[:2] == [{"scene": 0, "emission": 0, "lifetime": 0},
-                                 {"scene": 0, "emission": 0, "lifetime": 1}]
+        assert f.index_range == {"series": 1, "emission": 2, "lifetime": 3}
+        assert f.indices[:2] == [{"series": 0, "emission": 0, "lifetime": 0},
+                                 {"series": 0, "emission": 0, "lifetime": 1}]
         for image in f.images:
             assert image.axes == "zyx"
             k, e = image.index["lifetime"], image.index["emission"]
@@ -40,7 +41,7 @@ def test_angles_are_views(tmp_path):
     path = str(tmp_path / "angles.tif")
     _write(path, data, "ATZYX")
     with micro_reader.open(path) as f:
-        assert f.indices == [{"scene": 0, "view": 0}, {"scene": 0, "view": 1}]
+        assert f.indices == [{"series": 0, "view": 0}, {"series": 0, "view": 1}]
         for v, image in enumerate(f.images):
             assert image.axes == "tzyx"
             np.testing.assert_array_equal(image[...], data[v])
@@ -52,12 +53,12 @@ def test_tile_grid_is_one_tile_level(tmp_path):
     path = str(tmp_path / "grid.tif")
     _write(path, data, "JKYX")
     with micro_reader.open(path) as f:
-        assert f.indices == [{"scene": 0, "tile": m} for m in range(8)]
+        assert f.indices == [{"series": 0, "tile": m} for m in range(8)]
         for image in f.images:
             j, k = divmod(image.index["tile"], 4)
             np.testing.assert_array_equal(image[...], data[j, k])
     with pytest.raises(UnsupportedFormatError, match="does not compose TIFF tiles"):
-        micro_reader.open(path, tiles="stitched")
+        micro_reader.open(path, tiles="mosaic")
 
 
 def test_untiled_series_of_a_tiled_file_get_tile_0(tmp_path):
@@ -68,10 +69,10 @@ def test_untiled_series_of_a_tiled_file_get_tile_0(tmp_path):
         tw.write(tiles, metadata={"axes": "RYX"}, photometric="minisblack")
         tw.write(plain, metadata={"axes": "YX"}, photometric="minisblack")
     with micro_reader.open(path) as f:
-        assert f.indices == [{"scene": 0, "tile": 0}, {"scene": 0, "tile": 1},
-                                {"scene": 1, "tile": 0}]
-        np.testing.assert_array_equal(f.select(scene=0, tile=1)[0][...], tiles[1])
-        np.testing.assert_array_equal(f.select(scene=1)[0][...], plain)
+        assert f.indices == [{"series": 0, "tile": 0}, {"series": 0, "tile": 1},
+                                {"series": 1, "tile": 0}]
+        np.testing.assert_array_equal(f.select(series=0, tile=1)[0][...], tiles[1])
+        np.testing.assert_array_equal(f.select(series=1)[0][...], plain)
 
 
 def test_single_angle_is_not_a_level(tmp_path):
@@ -79,7 +80,7 @@ def test_single_angle_is_not_a_level(tmp_path):
     path = str(tmp_path / "one.tif")
     _write(path, data, "AZYX")
     with micro_reader.open(path) as f:
-        assert f.indices == [{"scene": 0}] and f.images[0].axes == "zyx"
+        assert f.indices == [{"series": 0}] and f.images[0].axes == "zyx"
 
 
 def test_two_unknown_axes_are_one_sequence(tmp_path):
@@ -88,12 +89,12 @@ def test_two_unknown_axes_are_one_sequence(tmp_path):
     path = str(tmp_path / "iq.tif")
     _write(path, data, "IQYX")
     with micro_reader.open(path) as f:
-        assert f.index_range == {"scene": 1, "sequence": 6}
+        assert f.index_range == {"series": 1, "sequence": 6}
         np.testing.assert_array_equal(f.select(sequence=4)[0][...], data[1, 1])
 
 
 @pytest.mark.parametrize("axes,kw,letters,levels", [
-    ("PTZCYX", dict(lsm=True), [None, "t", "z", "c", "y", "x"], ["scene"] + [None] * 5),
+    ("PTZCYX", dict(lsm=True), [None, "t", "z", "c", "y", "x"], ["series"] + [None] * 5),
     ("PZYX", {}, [None, "z", "y", "x"], ["phase"] + [None] * 3),        # OME phase
     ("IYX", dict(eer=True), ["t", "y", "x"], [None] * 3),               # EER frames
     ("IYX", {}, [None, "y", "x"], ["sequence", None, None]),

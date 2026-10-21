@@ -43,7 +43,8 @@ class FileGroup:
     where the main file is, or should be.  *format*: the backend that reads
     the group.  *parts*: the given files that belong to *main* (not *main*
     itself); for an index, other index files of the same images (CellVoyager
-    ``.wpi`` / ``.mrf`` / ``.mlf``).  *members* (index): every file its
+    ``.wpi`` / ``.mrf`` / ``.mlf``) and its side files (CellVoyager correction
+    images; they still open alone).  *members* (index): every file its
     images are read from.  *notes* (index): what opening it said -- missing
     files, or why it could not be read."""
     kind: str
@@ -148,32 +149,36 @@ def group_files(paths: Union[str, os.PathLike, Iterable]) -> Grouping:
         module = next((m for m in modules if m.sniff(head, path)), None)
         if module is None:
             continue
-        members, notes = frozenset(), []
+        members, sides, notes = frozenset(), frozenset(), []
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             try:
                 with open_file(path, backend=module.NAME) as f:
                     members = frozenset(f._member_files())
+                    sides = frozenset(f._side_files())
             except Exception as exc:             # noqa: BLE001 - reported on the group
                 notes.append(f"cannot be read: {type(exc).__name__}: {exc}")
         notes = [str(w.message) for w in caught] + notes
         found.append((rank[module.NAME], path, key, module, frozenset(map(_key, members)),
-                      members, tuple(notes)))
+                      members, tuple(notes), sides))
     member_keys = set().union(*(f[4] for f in found)) if found else set()
     consumed = set(member_keys)
     by_members: dict = {}                        # the same members: one set of images
     groups = []
     for entry in sorted(found, key=lambda f: (f[0], f[2])):
-        _rank, path, key, module, keys, members, notes = entry
+        _rank, path, key, module, keys, members, notes, sides = entry
         consumed.add(key)
         if key in member_keys:
             continue                             # named by another index: one of its members
+        # side files (correction images) given here are the set's parts, not singles
+        side_parts = [files[k][0] for k in map(_key, sides) if k in files and k not in member_keys]
+        consumed.update(map(_key, side_parts))
         twin = by_members.get(keys) if keys else None
         if twin is not None:
-            twin["parts"].append(path)
+            twin["parts"] += [path] + [p for p in side_parts if p not in twin["parts"]]
             continue
         group = {"kind": INDEX, "main": path, "expected": path, "format": module.NAME,
-                 "parts": [], "members": members, "notes": notes}
+                 "parts": side_parts, "members": members, "notes": notes}
         if keys:
             by_members[keys] = group
         groups.append(group)

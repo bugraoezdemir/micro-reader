@@ -158,7 +158,7 @@ CZI_XML = (
 def _czi_tile(x, mosaic, stage_x):
     from _czi_writer import raw_payload
     tile = np.zeros((8, 10), np.uint8)
-    return dict(scene=0, mosaic=mosaic, plane={"C": 0, "T": 0}, x=x, y=0, width=10, height=8,
+    return dict(series=0, mosaic=mosaic, plane={"C": 0, "T": 0}, x=x, y=0, width=10, height=8,
                 dtype="u1", compression=0, payload=raw_payload(tile),
                 tags={"StageXPosition": stage_x, "StageYPosition": 200.4})
 
@@ -169,7 +169,7 @@ def test_czi(tmp_path):
     # two tiles side by side; Zeiss records the stage position of each
     # tile's centre: tile 0 centred at 100.5 um, 10 pixels of 0.1 um further 101.5
     write_czi(path, [_czi_tile(0, 0, 100.5), _czi_tile(10, 1, 101.5)], metadata=CZI_XML)
-    with micro_reader.open(path, tiles="stitched") as f:
+    with micro_reader.open(path, tiles="mosaic") as f:
         meta = f.images[0].metadata
     _close(meta.pixel_sizes["x"], 0.1, "micrometer")
     _close(meta.pixel_sizes["t"], 2.5, "second")
@@ -232,7 +232,7 @@ def test_nd2(tmp_path):
               plane_fields={0: {"sDescription": "GFP", "uiColor": 0x00FF00,
                                 "pFilterPath": band}})
     with micro_reader.open(path) as f:
-        meta = f.select(scene=1)[0].metadata
+        meta = f.select(series=1)[0].metadata
     _close(meta.pixel_sizes["x"], 0.5, "micrometer")
     _close(meta.pixel_sizes["z"], 1.0, "micrometer")
     _close(meta.pixel_sizes["t"], 100.0, "millisecond")       # the file's unit (D1)
@@ -298,7 +298,7 @@ def test_ome_modulo_lambda_values(tmp_path):
     tifffile.imwrite(path, np.zeros((3, 4, 6), np.uint8), photometric="minisblack",
                      description=OME_MODULO, metadata=None)
     with micro_reader.open(path) as f:
-        assert f.indices == [{"scene": 0, "emission": k} for k in range(3)]
+        assert f.indices == [{"series": 0, "emission": k} for k in range(3)]
         values = [image.metadata.index_values["emission"] for image in f.images]
     assert [q.value for q in values] == [500.0, 510.0, 520.0]
     assert {q.unit for q in values} == {"nanometer"}
@@ -316,22 +316,22 @@ def test_lif_lambda_values(tmp_path):
 
 
 def test_czi_scene_position_places_tiles_by_their_pixels(tmp_path):
-    """Without stage positions per subblock, the scene's XML position is the
-    centre of the whole scene; each tile is placed by its own pixels (once
-    every tile got the scene's centre)."""
+    """Without stage positions per subblock, the series's XML position is the
+    centre of the whole series; each tile is placed by its own pixels (once
+    every tile got the series's centre)."""
     from _czi_writer import raw_payload, write_czi
     xml = CZI_XML.replace(
         "</Dimensions>",
         '<S><Scenes><Scene Index="0"><Positions><Position X="50" Y="20" Z="0"/>'
         "</Positions></Scene></Scenes></S></Dimensions>")
-    tiles = [dict(scene=0, mosaic=m, plane={"C": 0, "T": 0}, x=x, y=0, width=10, height=8,
+    tiles = [dict(series=0, mosaic=m, plane={"C": 0, "T": 0}, x=x, y=0, width=10, height=8,
                   dtype="u1", compression=0, payload=raw_payload(np.zeros((8, 10), np.uint8)))
              for m, x in ((0, 0), (1, 10))]
     path = tmp_path / "a.czi"
     write_czi(path, tiles, metadata=xml)
     with micro_reader.open(path) as f:
         first, second = (f.select(tile=k)[0].metadata.position for k in (0, 1))
-    # the scene spans 20 x 8 pixels of 0.1 um centred at (50, 20)
+    # the series spans 20 x 8 pixels of 0.1 um centred at (50, 20)
     _close(first["x"], 50 - 9.5 * 0.1, "micrometer")
     _close(second["x"], 50 + 0.5 * 0.1, "micrometer")
     _close(first["y"], 20 - 3.5 * 0.1, "micrometer")
@@ -345,6 +345,6 @@ def test_nd2_without_camera_matrix_has_no_position(tmp_path):
     path = tmp_path / "a.nd2"
     write_nd2(path, np.zeros((2, 8, 10, 1, 1), np.uint16), [("P", 2)])
     with micro_reader.open(path) as f:
-        meta = f.select(scene=1)[0].metadata
+        meta = f.select(series=1)[0].metadata
     assert meta.position == {}
     _close(meta.pixel_sizes["x"], 0.5, "micrometer")

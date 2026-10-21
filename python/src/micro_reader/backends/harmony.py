@@ -29,6 +29,7 @@ itself are parts of ``Images/Index.idx.xml`` and open it.
 from __future__ import annotations
 
 import os
+import re
 import xml.etree.ElementTree as ET
 
 from .. import _parts
@@ -36,46 +37,81 @@ from .._base import File
 from .._errors import CorruptFileError, UnsupportedFormatError
 from .._fileset import Members, PlaneImage, keep_fields
 from .._metadata import Channel, Metadata, quantity
-from .._plate import Plate, Well, row_label
+from .._plate import Plate, Well, layout, row_label
 
 NAME = "harmony"
 #: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
 SET_INDEX = True
 
 
-#: where a measurement folder keeps its index, and its side folders (lower case)
-INDEX_NAMES = (os.path.join("Images", "Index.idx.xml"), os.path.join("Images", "Index.xml"))
-SIDE_FOLDERS = ("assaylayout", "ffc_profile")
+#: where a measurement folder keeps its index (letter case aside: the "hs"
+#: archive of Harmony 5.2 / 6 writes ``images/index.xml``), and its side
+#: folders (lower case): classic ``Assaylayout`` / ``FFC_Profile``, hs
+#: ``flatfieldcorrection`` / ``index`` (measurement descriptions)
+IMAGES_FOLDERS = ("Images", "images")
+INDEX_FILES = ("Index.idx.xml", "Index.xml", "index.xml", "index.idx.xml")
+SIDE_FOLDERS = ("assaylayout", "ffc_profile", "flatfieldcorrection", "index")
+#: plane files: members of the index, opened as themselves (never parts)
+PLANE_SUFFIXES = (".tif", ".tiff")
 
 
 def _measurement_index(measurement: str):
-    """The index file of the measurement folder *measurement*, or None
-    (exact names: no folder listing)."""
-    for name in INDEX_NAMES:
-        path = os.path.join(measurement, name)
-        if os.path.isfile(path):
-            return path
+    """The index file of the measurement folder *measurement*, or None (the
+    spellings above only: ``owner`` runs on every open, so no folder listing)."""
+    for folder in IMAGES_FOLDERS:
+        images = os.path.join(measurement, folder)
+        if os.path.isdir(images):
+            for name in INDEX_FILES:
+                path = os.path.join(images, name)
+                if os.path.isfile(path):
+                    return _spelled(path)
     return None
 
 
+def _spelled(path: str) -> str:
+    """*path* with its folder's and file's names as stored (a case-insensitive
+    file system finds ``Index.xml`` for ``index.xml``)."""
+    folder, name = os.path.split(path)
+    measurement, images = os.path.split(folder)
+    try:
+        images = next((e for e in os.listdir(measurement) if e.lower() == images.lower()), images)
+        folder = os.path.join(measurement, images)
+        with os.scandir(folder) as entries:
+            name = next((e.name for e in entries if e.name.lower() == name.lower()), name)
+    except OSError:
+        pass
+    return os.path.join(folder, name)
+
+
 def may_own(folder: str, name: str, folders) -> bool:
-    """``group_files``' cheap test (reads nothing): a file in an
-    ``Assaylayout`` or ``FFC_Profile`` folder may be a part."""
-    return folders.base(folder).lower() in SIDE_FOLDERS
+    """``group_files``' cheap test (reads nothing): a file in a side folder,
+    in a measurement folder (next to ``Images``) or, unless it is a plane,
+    in ``Images`` may be a part."""
+    base = folders.base(folder).lower()
+    return base in SIDE_FOLDERS or "images" in folders.names(folder) or \
+        (base == "images" and not name.lower().endswith(PLANE_SUFFIXES))
 
 
 def owner(path: str, head):
-    """The side folders of a measurement, their files and the measurement
-    folder itself are parts of its index (module docstring)."""
+    """A measurement folder, its side folders and their files, the other
+    files in it (hs: the measurement's own description) and the files in
+    ``Images`` that are not planes are parts of its index (module docstring)."""
     path = os.path.abspath(path)
+    parent = os.path.dirname(path)
     if os.path.isdir(path):
         if os.path.basename(path).lower() in SIDE_FOLDERS:
             path = os.path.dirname(path)
         index = _measurement_index(path)
-    elif os.path.basename(os.path.dirname(path)).lower() in SIDE_FOLDERS:
-        index = _measurement_index(os.path.dirname(os.path.dirname(path)))
+    elif os.path.basename(parent).lower() in SIDE_FOLDERS:
+        index = _measurement_index(os.path.dirname(parent))
+    elif os.path.basename(parent).lower() == "images":
+        if path.lower().endswith(PLANE_SUFFIXES):
+            return None
+        index = _measurement_index(os.path.dirname(parent))
+        if index is not None and os.path.normcase(index) == os.path.normcase(path):
+            return None                              # the index itself
     else:
-        return None
+        index = _measurement_index(parent)
     return _parts.Part(index, index) if index is not None else None
 
 
@@ -84,8 +120,13 @@ def may_index(name: str) -> bool:
     return name.lower().endswith(('.xml',))
 
 
+#: the index namespace ends in ``HarmonyV<n>``: ``.../PEHH/HarmonyV4`` .. ``V6``,
+#: Harmony 5.2's ``43B2A954-E3C3-47E1-B392-6635266B0DD3/HarmonyV7``
+NAMESPACE = re.compile(rb'xmlns="[^"]*/HarmonyV\d+"')
+
+
 def sniff(head: bytes, path: str) -> bool:
-    return b"EvaluationInputData" in head and b"PEHH/Harmony" in head
+    return b"EvaluationInputData" in head and NAMESPACE.search(head) is not None
 
 
 def _text(e, name):
@@ -99,6 +140,26 @@ def _int(e, name):
         return int(value)
     except (TypeError, ValueError):
         raise CorruptFileError(f"Harmony index: an <Image> without a whole-number <{name}>")
+
+
+def _fill_from_maps(root) -> None:
+    """Harmony 5.2 / 6 indexes (V6, V7) keep what every plane of a channel
+    shares -- image size, pixel size, channel name, wavelengths -- once, in
+    ``Maps/Map/Entry[@ChannelID]``, no longer in each ``<Image>``.  Each
+    ``<Image>`` gets the entries of its channel it lacks (its own values
+    win; among the Maps, the first that has a value)."""
+    per_channel: dict = {}
+    for entry in root.findall("{*}Maps/{*}Map/{*}Entry"):
+        values = per_channel.setdefault(entry.get("ChannelID"), {})
+        for child in entry:
+            values.setdefault(child.tag.split("}", 1)[-1], child)
+    if not per_channel:
+        return
+    for e in root.findall("{*}Images/{*}Image"):
+        values = per_channel.get(_text(e, "ChannelID"))
+        if values:
+            have = {child.tag.split("}", 1)[-1] for child in e}
+            e.extend(child for name, child in values.items() if name not in have)
 
 
 def _value(e, name, positive=True):
@@ -184,7 +245,8 @@ class _HarmonyFile(File):
             root = ET.parse(path).getroot()
         except ET.ParseError as exc:
             raise CorruptFileError(f"{path!r}: not readable XML ({exc})") from None
-        version = root.tag.split("}", 1)[0].rsplit("/", 1)[-1]           # HarmonyV4 / V5
+        _fill_from_maps(root)
+        version = root.tag.split("}", 1)[0].rsplit("/", 1)[-1]           # HarmonyV4 .. V7
         self.format = "harmony-" + version.replace("Harmony", "").lower()  # harmony-v4
         plates = root.findall("{*}Plates/{*}Plate")
         if len(plates) != 1:
@@ -238,9 +300,8 @@ class _HarmonyFile(File):
                 {"plate": 0, "acquisition": 0, "well": number[(r, c)], "field": f - 1},
                 # every listed plane's <Image> (metadata), whether its file is there or not
                 entries={position[p]: e for p, e in listed[(r, c, f)].items() if p in position}))
-        plate = Plate(name=plate_name,
-                      rows=tuple(row_label(r) for r in range(rows)),
-                      columns=tuple(str(c + 1) for c in range(columns)),
+        row_names, column_names = layout(rows, columns, wells_rc, path)
+        plate = Plate(name=plate_name, rows=row_names, columns=column_names,
                       wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))
         super().__init__(path, images, plates=[plate])
 

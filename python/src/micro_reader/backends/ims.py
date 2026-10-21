@@ -1,4 +1,4 @@
-"""Imaris (.ims): HDF5 with a fixed layout (``[ims]`` extra, h5py).
+"""Imaris (.ims): HDF5 with a fixed layout (``[hdf5]`` extra, h5py).
 
     /DataSet/ResolutionLevel r/TimePoint t/Channel c/Data      3D (Z, Y, X), chunked
     /DataSet/ResolutionLevel r/TimePoint t/Channel c  .attrs   ImageSizeZ/Y/X
@@ -9,82 +9,37 @@ Two things differ from reading the datasets through h5py:
   chunks (a 424 x 424 image stored as 512 x 512, zeros beyond); the real size
   is in the ``ImageSize`` attributes.  Images have the real size, as
   Bio-Formats and Imaris show it.
-- **Chunks are read and decoded here, in parallel.**  h5py runs every HDF5
-  call -- decompression included -- under one global lock, so threads do not
-  speed it up.  h5py only tells us where each chunk is (``chunk_iter``); the
-  chunks are then read with per-thread file handles and decompressed on the
-  shared decode pool.  Filters handled: deflate (gzip), shuffle, Fletcher-32,
-  LZ4 (ImarisWriter), zstd.  A dataset with any other filter (szip, ...) or no chunking is read
-  through h5py instead: correct, just not parallel.
+- **Chunks are read and decoded here, in parallel** (``_hdf5.ChunkReader``).
 
 One image, full resolution, axes ``tczyx``; every ``ResolutionLevel r`` is in
 ``image.resolutions``, and an image of its own with ``resolutions="all"``
-(index ``{"scene": 0, "resolution": r}``).
+(index ``{"series": 0, "resolution": r}``).
+
+This backend also answers for HDF5 files of no layout micro-reader reads (it is
+the last HDF5 backend tried): they are refused with the datasets they hold, and
+without h5py every HDF5 file comes here to say which extra to install.
 """
 from __future__ import annotations
 
-import builtins
 import os
-import threading
-import zlib
+import re
+import warnings
 
 import numpy as np
 
-from .. import _codecs, _memory, _pool
+from .. import _parts
 from .._base import File, Image
-from .._errors import CorruptFileError, MicroReaderError, UnsupportedFormatError
-from .._io import DecodeCache, ThreadHandles
+from .._errors import CorruptFileError, MissingImagesWarning, UnsupportedFormatError
 from .._metadata import Channel, Metadata, Quantity, color_hex, quantity
+from . import _hdf5
+from ._hdf5 import attr_text as _attr_str
 
 NAME = "ims"
-HDF5_MAGIC = b"\x89HDF\r\n\x1a\n"
-DECODE_CACHE_BYTES = 64 << 20
-FILTER_DEFLATE, FILTER_SHUFFLE, FILTER_FLETCHER32 = 1, 2, 3
-FILTER_LZ4 = 32004                   # HDF Group registered filter; ImarisWriter writes it
-FILTER_ZSTD = 32015                  # registered zstd filter: one zstd frame per chunk
-SUPPORTED_FILTERS = {FILTER_DEFLATE, FILTER_SHUFFLE, FILTER_FLETCHER32, FILTER_LZ4, FILTER_ZSTD}
-#: registered HDF5 filters h5py cannot apply without plugins (named in errors)
-FILTER_NAMES = {4: "szip", 307: "bzip2", 32001: "Blosc", 32004: "LZ4", 32008: "bitshuffle",
-                32013: "zfp", 32015: "zstd", 32017: "SZ", 32026: "Blosc2"}
-
-
-def _lz4_unframe(data: bytes, path: str) -> bytes:
-    """HDF5's LZ4 filter (H5Zlz4.c): big-endian original size (8 bytes) and
-    block size (4), then per block its compressed size (4) and the LZ4
-    block -- stored as is when the compressed size equals the block size."""
-    total = int.from_bytes(data[:8], "big")
-    block = min(int.from_bytes(data[8:12], "big"), total) or total
-    out = np.empty(total, np.uint8)
-    pos, done = 12, 0
-    while done < total:
-        size = min(block, total - done)
-        stored = int.from_bytes(data[pos:pos + 4], "big")
-        pos += 4
-        if pos + stored > len(data):
-            raise CorruptFileError(f"{path!r}: LZ4 chunk ends early")
-        if stored == size:
-            out[done:done + size] = np.frombuffer(data, np.uint8, size, pos)
-        else:
-            _codecs.lz4_block_decompress_into(memoryview(data)[pos:pos + stored],
-                                              out[done:done + size])
-        pos += stored
-        done += size
-    return out.tobytes()
 
 
 def sniff(head: bytes, path: str) -> bool:
-    # the HDF5 superblock sits at 0, or after a user block of 512 * 2**n bytes
-    return head[:8] == HDF5_MAGIC or head[512:520] == HDF5_MAGIC
-
-
-def _attr_str(attrs, key):
-    """Imaris attributes are arrays of 1-byte strings."""
-    if key not in attrs:
-        return None
-    value = attrs[key]
-    if isinstance(value, np.ndarray):
-        return b"".join(v if isinstance(v, bytes) else str(v).encode() for v in value).decode()
-    return value.decode() if isinstance(value, bytes) else str(value)
+    # every HDF5 file the other HDF5 backends (tried before this one) did not take
+    return _hdf5.is_hdf5(head)
 
 
 def _image_size(ds) -> tuple:
@@ -109,93 +64,77 @@ def _numbered(group, prefix) -> list:
     return found
 
 
-class _Layout:
-    """How one ``Data`` dataset is stored: where each chunk is and how to
-    decode it; or ``native = False`` to read it through h5py."""
-
-    def __init__(self, ds):
-        self.path = ds.file.filename
-        self.dtype = ds.dtype                       # file byte order
-        self.fill = ds.fillvalue
-        self.chunks = ds.chunks
-        dcpl = ds.id.get_create_plist()
-        self.filters = [dcpl.get_filter(i)[0] for i in range(dcpl.get_nfilters())]
-        self.native = bool(self.chunks) and set(self.filters) <= SUPPORTED_FILTERS
-        self.chunk_nbytes = int(np.prod(self.chunks)) * self.dtype.itemsize if self.chunks else 0
-        self.where: dict = {}                       # chunk origin -> (byte offset, size, filter mask)
-        if self.native:
-            ds.id.chunk_iter(lambda info: self.where.__setitem__(
-                tuple(info.chunk_offset), (info.byte_offset, info.size, info.filter_mask)))
-            shift = self._userblock_shift(ds)
-            if shift is None:
-                self.native, self.where = False, {}  # positions unknown: read through h5py
-            elif shift:
-                self.where = {k: (o + shift, n, m) for k, (o, n, m) in self.where.items()}
-
-    def _userblock_shift(self, ds):
-        """Bytes to add to the chunk offsets HDF5 reports.  Before HDF5
-        1.14.6 (seen with 1.14.2) they leave out a user block at the start of
-        the file; later versions include it.  One chunk's stored bytes
-        (read_direct_chunk) are compared with the file at both positions;
-        None when neither matches."""
-        userblock = ds.file.id.get_create_plist().get_userblock()
-        if not userblock or not self.where:
-            return 0
-        origin, (offset, size, _) = next(iter(self.where.items()))
-        _, stored = ds.id.read_direct_chunk(origin)
-        stored = bytes(stored)
-        with builtins.open(self.path, "rb") as fh:
-            for shift in (0, userblock):
-                fh.seek(offset + shift)
-                if fh.read(len(stored)) == stored:
-                    return shift
+def _linked(group, name: str):
+    """The dataset *name*, or None when it is missing -- also when a link on
+    the way leads to a file that is not there."""
+    try:
+        return group[name] if name in group else None
+    except (KeyError, OSError):
         return None
 
-    def decode(self, data: bytes, mask: int) -> np.ndarray:
-        """Undo the filter pipeline (in reverse; bit i of *mask* set means
-        filter i was skipped for this chunk)."""
-        for i in reversed(range(len(self.filters))):
-            if mask & (1 << i):
-                continue
-            fid = self.filters[i]
-            if fid == FILTER_DEFLATE:
-                data = zlib.decompress(data, 15, self.chunk_nbytes)
-            elif fid == FILTER_LZ4:
-                data = _lz4_unframe(data, self.path)
-            elif fid == FILTER_ZSTD:
-                out = np.empty(self.chunk_nbytes, np.uint8)
-                _codecs.zstd_decompress_into(data, out)
-                data = out.tobytes()
-            elif fid == FILTER_SHUFFLE:
-                item = self.dtype.itemsize
-                if item > 1:
-                    b = np.frombuffer(data, np.uint8)
-                    n = len(b) // item
-                    data = b[:n * item].reshape(item, n).T.tobytes() + bytes(b[n * item:])
-            elif fid == FILTER_FLETCHER32:
-                data = data[:-4]                    # checksum; not verified
-        if len(data) != self.chunk_nbytes:
-            raise CorruptFileError(f"chunk decodes to {len(data)} bytes, "
-                                   f"expected {self.chunk_nbytes}")
-        return np.frombuffer(data, self.dtype).reshape(self.chunks)
+
+def _link_target(group, t: int, c: int) -> str:
+    """Where ``TimePoint t / Channel c`` (or its Data) links to, for messages."""
+    import h5py
+    try:
+        for name in (f"TimePoint {t}/Channel {c}", f"TimePoint {t}/Channel {c}/Data"):
+            parent, last = name.rsplit("/", 1)
+            link = group[parent].get(last, getlink=True)
+            if isinstance(link, h5py.ExternalLink):
+                return link.filename
+    except (KeyError, OSError):
+        pass
+    return f"TimePoint {t}/Channel {c}"
+
+
+#: FileConverter's multi-file Imaris: <name>.ims (or .h5) links each time
+#: point / channel to <name>--C<cc>--T<ttttt>.h5
+PART_NAME = re.compile(r"^(?P<stem>.+)--C\d+--T\d+\.h5$", re.IGNORECASE)
+
+
+def may_own(folder: str, name: str, folders) -> bool:
+    """``group_files``' cheap test: a part file of a multi-file Imaris set."""
+    m = PART_NAME.match(name)
+    names = folders.names(folder) if m else ()
+    return bool(m) and any(m["stem"].lower() + s in names for s in (".ims", ".h5"))
+
+
+def owner(path: str, head):
+    """A part file ``<name>--Cxx--Txxxxx.h5`` belongs to ``<name>.ims`` (or the
+    ``.h5`` copy FileConverter also writes); it is no image on its own."""
+    m = PART_NAME.match(os.path.basename(path))
+    if not m or head is None:
+        return None
+    folder = os.path.dirname(path)
+    for suffix in (".ims", ".h5"):
+        main = _parts.find(folder, m["stem"] + suffix)
+        if main is not None:
+            return _parts.Part(main, main)
+    return _parts.Part(None, os.path.join(folder, m["stem"] + ".ims"))
 
 
 class _ImsImage(Image):
     """One resolution level: all time points and channels, axes 'tczyx'."""
 
-    def __init__(self, h5, path: str, level: int = 0, key: dict = None):
+    def __init__(self, h5, reader: _hdf5.ChunkReader, path: str, level: int = 0,
+                 key: dict = None):
         base = f"DataSet/ResolutionLevel {level}"
         if base not in h5:
             raise UnsupportedFormatError(f"{path!r}: HDF5 file without Imaris {base!r}")
         group = h5[base]
         times = _numbered(group, "TimePoint")
         channels = _numbered(group[f"TimePoint {times[0]}"], "Channel")
-        try:
-            self._datasets = [[group[f"TimePoint {t}/Channel {c}/Data"] for c in channels]
-                              for t in times]
-        except KeyError as exc:
-            raise UnsupportedFormatError(f"{path!r}: incomplete Imaris data ({exc})") from exc
-        all_ds = [ds for row in self._datasets for ds in row]
+        #: [t][c] -> dataset, or None: a part of a multi-file Imaris set (an
+        #: external link: FileConverter's <name>--Cxx--Txxxxx.h5, Luxendo's
+        #: .lux.h5) that is missing reads as zeros
+        self._datasets = [[_linked(group, f"TimePoint {t}/Channel {c}/Data") for c in channels]
+                          for t in times]
+        self.missing = [(t, c) for t, row in enumerate(self._datasets)
+                        for c, ds in enumerate(row) if ds is None]
+        all_ds = [ds for row in self._datasets for ds in row if ds is not None]
+        if not all_ds:
+            raise CorruptFileError(f"{path!r}: none of its Imaris data is there (missing "
+                                   f"parts, e.g. {_link_target(group, times[0], channels[0])!r})")
         sizes = {_image_size(ds) for ds in all_ds}
         dtypes = {ds.dtype.newbyteorder("=") for ds in all_ds}
         if len(sizes) != 1 or len(dtypes) != 1:
@@ -204,104 +143,46 @@ class _ImsImage(Image):
         self._path = path
         self._h5 = h5
         self._channel_ids = channels
-        self._lock = threading.Lock()               # h5py objects: one caller at a time
-        self._layouts: dict = {}
-        self._handles = ThreadHandles(path)
-        #: decoded chunks kept for reuse (``decode_cache.max_bytes`` to resize)
-        self.decode_cache = DecodeCache(DECODE_CACHE_BYTES)
+        self._reader = reader
+        self._level = level
         self._closed = False
         chunks = all_ds[0].chunks
         super().__init__(level, "tczyx", (len(times), len(channels), *sizes.pop()),
                          dtypes.pop(), name=os.path.basename(path),
                          read_unit=(1, 1, *chunks) if chunks else None,
-                         index=key if key is not None else {"scene": 0})
+                         index=key if key is not None else {"series": 0})
 
-    def _layout(self, t: int, c: int) -> _Layout:
-        layout = self._layouts.get((t, c))
-        if layout is None:
-            with self._lock:
-                layout = self._layouts.get((t, c))
-                if layout is None:
-                    layout = self._layouts[(t, c)] = _Layout(self._datasets[t][c])
-        return layout
+    def _layout(self, t: int, c: int) -> _hdf5.Layout:
+        """How the dataset of time point *t*, channel *c* is stored."""
+        return self._reader.layout((self._level, t, c), self._datasets[t][c])
+
+    @property
+    def decode_cache(self):
+        """Decoded chunks kept for reuse, shared by the file's levels."""
+        return self._reader.cache
 
     def _read_block(self, block):
         if self._closed:
             raise ValueError("this Imaris image has been closed: its file was closed "
                              "(File.close() or the end of a with block)")
         ts, cs, zs, ys, xs = block
-        out = np.empty(tuple(s.stop - s.start for s in block), dtype=self.dtype)
+        make = np.zeros if self.missing else np.empty
+        out = make(tuple(s.stop - s.start for s in block), dtype=self.dtype)
         read, jobs = 0, []
         for t in range(ts.start, ts.stop):
             for c in range(cs.start, cs.stop):
-                dest = out[t - ts.start, c - cs.start]
-                layout = self._layout(t, c)
-                if not layout.native:               # other filters / not chunked: h5py
-                    with self._lock:
-                        try:
-                            dest[...] = self._datasets[t][c][zs, ys, xs]
-                        except OSError as exc:
-                            raise self._filter_error(layout, exc) from exc
-                    read += dest.size
-                    continue
-                self._plan(t, c, layout, zs, ys, xs, dest, jobs)
-        return out, read + _pool.run(self._tasks(jobs))
-
-    def _filter_error(self, layout, exc: Exception) -> Exception:
-        """h5py's read failed: name the HDF5 filters it could not apply."""
-        missing = [f for f in layout.filters if f not in SUPPORTED_FILTERS and f != 32000]
-        if not missing:
-            return CorruptFileError(f"{self._path!r}: {exc}")
-        names = ", ".join(f"{FILTER_NAMES.get(f, 'unknown')} ({f})" for f in missing)
-        return UnsupportedFormatError(
-            f"{self._path!r}: HDF5 filter {names} is not an Imaris one; h5py applies it "
-            f"with the hdf5plugin package (pip install hdf5plugin). h5py said: {exc}")
-
-    def _plan(self, t, c, layout, zs, ys, xs, dest, jobs) -> None:
-        """Every chunk the rectangle touches: missing ones (never written)
-        take the fill value here, the others become jobs."""
-        cz, cy, cx = layout.chunks
-        for oz in range(zs.start // cz * cz, zs.stop, cz):
-            for oy in range(ys.start // cy * cy, ys.stop, cy):
-                for ox in range(xs.start // cx * cx, xs.stop, cx):
-                    z0, z1 = max(zs.start, oz), min(zs.stop, oz + cz)
-                    y0, y1 = max(ys.start, oy), min(ys.stop, oy + cy)
-                    x0, x1 = max(xs.start, ox), min(xs.stop, ox + cx)
-                    dst = dest[z0 - zs.start:z1 - zs.start, y0 - ys.start:y1 - ys.start,
-                               x0 - xs.start:x1 - xs.start]
-                    part = (slice(z0 - oz, z1 - oz), slice(y0 - oy, y1 - oy),
-                            slice(x0 - ox, x1 - ox))
-                    where = layout.where.get((oz, oy, ox))
-                    if where is None:
-                        dst[...] = layout.fill
-                    else:
-                        jobs.append(((t, c, oz, oy, ox), layout, where, dst, part))
-
-    def _tasks(self, jobs):
-        for key, layout, where, dst, part in jobs:
-            chunk = self.decode_cache.get(key)
-            if chunk is not None:
-                dst[...] = chunk[part]
-                continue
-            yield lambda job=(key, layout, where, dst, part): self._decode_into(*job)
-
-    def _decode_into(self, key, layout, where, dst, part) -> int:
-        """Read, decode and copy one chunk (on a pool thread)."""
-        offset, size, mask = where
-        with _memory.reserve(layout.chunk_nbytes, f"{self._path!r}: an HDF5 chunk {layout.chunks}"):
-            chunk = layout.decode(self._handles.read(offset, size), mask)
-        dst[...] = chunk[part]
-        self.decode_cache.put(key, chunk)
-        return chunk.size
+                if self._datasets[t][c] is None:
+                    continue                    # a missing part: zeros
+                read += self._reader.plan((self._level, t, c), self._datasets[t][c],
+                                          (zs, ys, xs), out[t - ts.start, c - cs.start], jobs)
+        return out, read + self._reader.run(jobs)
 
     def close(self) -> None:
         self._closed = True
-        self._handles.close()
-        self.decode_cache.clear()
-
+        self._reader.close()
 
     def _read_metadata(self):
-        with self._lock:
+        with self._reader.lock:
             return _metadata(self._h5, self.shape, self._channel_ids)
 
 
@@ -371,39 +252,80 @@ def _time_points(attrs) -> list:
 class _ImsFile(File):
     backend = NAME
 
-    def __init__(self, path, images, h5):
+    def __init__(self, path, images, h5, reader):
         super().__init__(path, images)
         self._h5 = h5
+        self._reader = reader
 
     def close(self) -> None:
         super().close()
+        self._reader.close()
         self._h5.close()
 
 
+#: the HDF5 layouts another backend reads (``_hdf5.kind``): what the file is, and
+#: which backend reads it -- for ``backend="ims"`` on such a file
+OTHER_LAYOUTS = {"bdv": ("a BigDataViewer HDF5 file", "bdv"),
+                 "ilastik": ("an ilastik HDF5 file", "ilastik"),
+                 "luxendo": ("a Luxendo HDF5 file", "hdf5"),
+                 "fiji-hdf5": ("a Fiji HDF5 file", "hdf5")}
+
+
+def _refuse(h5, path: str, found) -> UnsupportedFormatError:
+    """The error for an HDF5 file that is not Imaris: the layout it is and the
+    backend that reads it, or that micro-reader reads none of its layout."""
+    if found == "ilastik-project":
+        return UnsupportedFormatError(
+            f"{path!r} is an ilastik project (.ilp), not an image: open the data it was "
+            "made from, or the files ilastik exported")
+    if found in OTHER_LAYOUTS:
+        what, backend = OTHER_LAYOUTS[found]
+        return UnsupportedFormatError(
+            f"{path!r} is {what}, not an Imaris file: the {backend!r} backend reads it "
+            f"(backend={backend!r}, or no backend= to choose by content)")
+    shown = "; ".join(_hdf5.datasets(h5, 8)) or "no datasets"
+    return UnsupportedFormatError(
+        f"{path!r}: an HDF5 file of no layout micro-reader reads (Imaris, ilastik, "
+        f"BigDataViewer, Luxendo, Fiji HDF5). Its datasets: {shown}")
+
+
 def open(path: str, tiles: str = "separate", resolutions: str = "base") -> _ImsFile:  # noqa: A001 - backend protocol name
-    try:
-        import h5py
-    except ImportError as exc:
-        raise MicroReaderError(
-            "reading Imaris needs the [ims] extra: pip install 'micro-reader[ims]'") from exc
+    h5py = _hdf5.h5py_module("reading HDF5 files (Imaris, ilastik, BigDataViewer)")
     try:
         h5 = h5py.File(path, "r")
     except OSError as exc:
         raise CorruptFileError(f"{path!r}: {exc}") from exc
+    reader = _hdf5.ChunkReader(path)
     try:
+        found = _hdf5.classify(h5)
+        if found != "ims":
+            raise _refuse(h5, path, found)
         levels = sorted(int(name.rsplit(" ", 1)[1]) for name in h5.get("DataSet", {})
-                        if name.startswith("ResolutionLevel "))
-        if not levels:
-            raise UnsupportedFormatError(f"{path!r}: HDF5 file without Imaris resolution levels")
+                        if name.startswith("ResolutionLevel ")
+                        and name.rsplit(" ", 1)[1].isdigit())
+        if 0 not in levels:                     # e.g. only "ResolutionLevel x" groups
+            shown = sorted(name for name in h5["DataSet"] if name.startswith("ResolutionLevel "))
+            raise CorruptFileError(f"{path!r}: Imaris DataSet without 'ResolutionLevel 0' "
+                                   f"(its levels: {shown[:8]})")
         listed = resolutions == "all"
-        pyramid = [_ImsImage(h5, path, r, key={"scene": 0, "resolution": r}
-                            if (listed or r) else {"scene": 0}) for r in levels]
+        pyramid = [_ImsImage(h5, reader, path, r, key={"series": 0, "resolution": r}
+                             if (listed or r) else {"series": 0}) for r in levels]
         for image in pyramid:
             image._resolutions = pyramid
         images = pyramid if listed else pyramid[:1]
         for n, image in enumerate(images):
             image._position = n
+        lost = pyramid[0].missing
+        if lost:
+            t, c = lost[0]
+            group = h5["DataSet/ResolutionLevel 0"]
+            warnings.warn(MissingImagesWarning(
+                f"{path!r}: {len(lost)} of {pyramid[0].shape[0] * pyramid[0].shape[1]} time "
+                f"point / channel parts are missing (e.g. "
+                f"{_link_target(group, t, pyramid[0]._channel_ids[c])!r}): read as zeros"),
+                stacklevel=4)
     except BaseException:
+        reader.close()
         h5.close()
         raise
-    return _ImsFile(path, images, h5)
+    return _ImsFile(path, images, h5, reader)

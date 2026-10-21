@@ -122,6 +122,35 @@ def lz4_block_decompress_into(data, out: np.ndarray, *, native: bool | None = No
         raise CorruptFileError(f"LZ4 data decodes to {written} bytes, expected {out.nbytes}")
 
 
+def lzf_available() -> bool:
+    """Whether LZF can be decoded here: the native module, or imagecodecs."""
+    if _use_native(None, "lzf_decompress_into"):
+        return True
+    try:
+        import imagecodecs
+    except ImportError:
+        return False
+    return bool(getattr(getattr(imagecodecs, "LZF", None), "available", False))
+
+
+def lzf_decompress_into(data, out: np.ndarray, *, native: bool | None = None) -> None:
+    """LZF data (liblzf's format, no header; h5py's HDF5 filter 32000) -> *out*,
+    exactly its size."""
+    if _use_native(native, "lzf_decompress_into"):
+        try:
+            written = _native.lzf_decompress_into(data, memoryview(out).cast("B"))
+        except ValueError as exc:
+            raise CorruptFileError(f"corrupt LZF data: {exc}") from exc
+    else:
+        codecs = _imagecodecs("LZF data")
+        try:                                            # straight into *out*: no copies
+            written = len(codecs.lzf_decode(data, header=False, out=out.reshape(-1).view(np.uint8)))
+        except Exception as exc:                        # noqa: BLE001
+            raise CorruptFileError(f"corrupt LZF data: {exc}") from exc
+    if written != out.nbytes:
+        raise CorruptFileError(f"LZF data decodes to {written} bytes, expected {out.nbytes}")
+
+
 def _check_written(written: int, out: np.ndarray, what: str, partial: bool) -> int:
     if written > out.nbytes or (written < out.nbytes and not partial):
         raise CorruptFileError(f"{what} data decodes to {written} bytes, expected {out.nbytes}")
@@ -132,7 +161,12 @@ def _fill_partial(out: np.ndarray, raw, what: str, partial: bool) -> int:
     """A reference decoder's bytes -> *out*.  With *partial*, a shorter
     result fills the start of *out* (TIFF readers accept short segments)
     and a longer one is cut; returns the bytes written."""
-    raw = memoryview(bytes(raw)).cast("B")
+    try:
+        # the decoder's own buffer, not a copy of it: a copy is one more decoded
+        # block alive at once, beyond the memory the caller reserved
+        raw = memoryview(raw).cast("B")
+    except (TypeError, ValueError):                    # not a contiguous buffer
+        raw = memoryview(bytes(raw)).cast("B")
     view = memoryview(out).cast("B")
     if not partial:
         _check_written(len(raw), out, what, partial)
@@ -171,7 +205,10 @@ def zlib_decompress_into(data, out: np.ndarray, *, partial: bool = False,
         return _check_written(written, out, "deflate", partial)
     import zlib
     try:
-        raw = zlib.decompress(bytes(data))
+        # at most one byte more than *out* holds: a stream claiming more (damaged
+        # data) is caught without inflating all of it into memory
+        # zlib reads any bytes-like input in place: no copy of the stored bytes
+        raw = zlib.decompressobj().decompress(data, out.nbytes + 1)
     except zlib.error as exc:
         raise CorruptFileError(f"corrupt deflate data: {exc}") from exc
     return _fill_partial(out, raw, "deflate", partial)
@@ -323,9 +360,10 @@ def jpeg_decode_into(data, out: np.ndarray, *, colour: str = "auto",
     samples]) little-endian, colour in R, G, B order.  Returns (width,
     height, samples, bits).  *colour*: "auto" (the JPEG's own markers),
     "ycbcr", or "rgb" (stored without a colour transform: TIFF Photometric
-    RGB).  Lossy JPEG may differ from other decoders by a few grey levels
-    (allowed by the JPEG standard); lossless is exact.  12-bit lossy JPEG
-    goes to imagecodecs."""
+    RGB).  Baseline and extended 8-bit JPEG decode to libjpeg-turbo's pixels
+    (imagecodecs, tifffile, Pillow), bit for bit; progressive JPEG may differ
+    from them by a few grey levels (allowed by the JPEG standard); lossless is
+    exact.  12-bit lossy JPEG goes to imagecodecs."""
     if _use_native(native, "jpeg_decode_into") and not _is_12bit_lossy_jpeg(data):
         try:
             return _native.jpeg_decode_into(data, memoryview(out).cast("B"), colour)

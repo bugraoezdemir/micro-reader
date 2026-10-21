@@ -32,9 +32,9 @@ and the dimensions (``DimID``, ``NumberOfElements``, byte stride
 little-endian.
 
 Images (docs/AXES.md): the Leica images in document order (nested analysis
-results included), as readlif and Bio-Formats list them, are the scenes;
+results included), as readlif and Bio-Formats list them, are the series;
 each of their tiles, rotations and emission / excitation wavelengths
-(lambda scans) is its own image, indexed by ``{"scene": n, "tile": m,
+(lambda scans) is its own image, indexed by ``{"series": n, "tile": m,
 "rotation": r, "emission": l, "excitation": e}`` (an index only where some
 image of the file has more than one; the wavelength of an emission /
 excitation index in the image's ``metadata.index_values``).  Axes: ``t c z
@@ -235,24 +235,24 @@ class _FrameBlock:
             source.readinto(local, piece)
             return
         if kind == "tiff":
-            scene, lead, page_bytes = source
+            tiff_image, lead, page_bytes = source
             pages = max(1, int(np.prod(lead, dtype=np.int64)))
             total = pages * page_bytes
-            factor = 3 if total == 3 * frame_size and scene.shape[-1] == 3 else 1
+            factor = 3 if total == 3 * frame_size and tiff_image.shape[-1] == 3 else 1
             if total != frame_size * factor:
                 raise CorruptFileError(f"{self.where}: frame {path!r} holds {total} bytes, "
                                        f"the XLIF says {frame_size}")
             # only the page rows the piece covers, read through the TIFF
             # backend (exact rectangles; compressed strips / tiles cached there)
             per_page = page_bytes // factor
-            row_bytes = per_page // scene.shape[len(lead)]
+            row_bytes = per_page // tiff_image.shape[len(lead)]
             done = 0
             while done < piece.nbytes:
                 k, into = divmod(local + done, per_page)
                 n = min(piece.nbytes - done, per_page - into)
                 r0, r1 = into // row_bytes, (into + n - 1) // row_bytes + 1
                 index = tuple(int(i) for i in np.unravel_index(k, lead)) if lead else ()
-                rows = scene[index + (slice(r0, r1),)]
+                rows = tiff_image[index + (slice(r0, r1),)]
                 if factor == 3:
                     rows = rows[..., 0]
                 raw = np.ascontiguousarray(rows.astype(rows.dtype.newbyteorder("<"),
@@ -490,15 +490,15 @@ class _LifFile(File):
             # indices: those some image of the file has more than one of
             levels = [level for level in OTHER_INDICES
                       if any(lay.size.get(level, 1) > 1 for lay in layouts)]
-            if tiles == "stitched" and "tile" in levels:
+            if tiles == "mosaic" and "tile" in levels:
                 raise UnsupportedFormatError(
-                    f"{path!r}: tiles='stitched': micro-reader does not compose Leica tiles "
+                    f"{path!r}: tiles='mosaic': micro-reader does not compose Leica tiles "
                     "(each tile is its own image; image.metadata.position gives its place)")
             images = []
             for n, ((name, element, block, _), layout) in enumerate(zip(entries, layouts)):
                 for values in itertools.product(*(range(layout.size.get(level, 1))
                                                   for level in levels)):
-                    key = {"scene": n, **dict(zip(levels, values))}
+                    key = {"series": n, **dict(zip(levels, values))}
                     images.append(_LifImage(len(images), element, name, block, layout, key))
         except BaseException:
             self._close_files()
@@ -660,7 +660,7 @@ class _LifFile(File):
 
     def _frame_source(self, path: str, where: str):
         """(kind, source) for a frame file: ("lof", its _FileBlock),
-        ("tiff", (scene, lead shape, page bytes)) or ("image", decoder)."""
+        ("tiff", (tiff_image, lead shape, page bytes)) or ("image", decoder)."""
         ext = os.path.splitext(path)[1].lower()
         if ext == ".lof":
             if path not in self._lofs:
@@ -676,11 +676,11 @@ class _LifFile(File):
             from . import tiff as tiff_backend
             img = tiff_backend.open(path)
             self._tiffs.append(img)
-            scene = img.images[0]
-            lead = tuple(scene._lead_shape)
-            page_shape = scene.shape[len(lead):]
-            page_bytes = int(np.prod(page_shape, dtype=np.int64)) * scene.dtype.itemsize
-            return "tiff", (scene, lead, page_bytes)
+            tiff_image = img.images[0]
+            lead = tuple(tiff_image._lead_shape)
+            page_shape = tiff_image.shape[len(lead):]
+            page_bytes = int(np.prod(page_shape, dtype=np.int64)) * tiff_image.dtype.itemsize
+            return "tiff", (tiff_image, lead, page_bytes)
         if ext in IMAGE_FRAMES:
             return "image", _image_reader(path, where)
         raise UnsupportedFormatError(f"{where}: frame file type {ext!r} ({path!r})")

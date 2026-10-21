@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
+import warnings
 
 import numpy as np
 import pytest
@@ -10,7 +11,8 @@ import pytest
 h5py = pytest.importorskip("h5py")
 
 import micro_reader  # noqa: E402
-from micro_reader import UnsupportedFormatError  # noqa: E402
+from micro_reader import CorruptFileError, MissingImagesWarning, UnsupportedFormatError  # noqa: E402
+from _hdf5_writer import write_ims_luxendo, write_ims_multifile  # noqa: E402
 
 
 def _char(value):
@@ -61,8 +63,8 @@ VARIANTS = {
     "time_channels":   {"compression": "gzip", "n_t": 3, "n_c": 4},
     "odd_chunks":      {"compression": "gzip", "chunks": (3, 7, 10)},
     "unwritten_chunks": {"compression": "gzip", "skip_chunks": True},
+    "lzf":             {"compression": "lzf"},
     # not handled natively: must fall back to h5py and still be right
-    "lzf_fallback":    {"compression": "lzf"},
     "contiguous_fallback": {"chunks": None},
 }
 
@@ -116,11 +118,11 @@ def test_lz4_chunks_decoded_natively(tmp_path, shuffle, decode_threads):
     path = str(tmp_path / "lz4.ims")
     ref = write_ims_lz4(path, shuffle=shuffle)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        layout = scene._layout(0, 0)
+        series = img.images[0]
+        layout = series._layout(0, 0)
         assert layout.native and 32004 in layout.filters
         for key in _keys(ref.shape):
-            np.testing.assert_array_equal(scene[key], ref[key], err_msg=str(key))
+            np.testing.assert_array_equal(series[key], ref[key], err_msg=str(key))
 
 
 def _keys(shape, n=25, seed=3):
@@ -137,6 +139,15 @@ def _keys(shape, n=25, seed=3):
     return keys
 
 
+@pytest.fixture(autouse=True)
+def native_chunks(monkeypatch):
+    """Decode even the tests' tiny chunks here (real files' small chunks go
+    through h5py: _hdf5.Layout.prefer_native)."""
+    from micro_reader.backends import _hdf5
+    monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK", 0)
+    monkeypatch.setattr(_hdf5, "NATIVE_MIN_CHUNK_SCALEOFFSET", 0)
+
+
 @pytest.fixture(params=[1, 4], ids=["serial", "pool"])
 def decode_threads(request):
     old = micro_reader.decode_threads()
@@ -150,16 +161,16 @@ def test_matches_h5py_cropped(tmp_path, name, decode_threads):
     kwargs = dict(VARIANTS[name])
     ref = write_ims(str(tmp_path / "a.ims"), **kwargs)
     with micro_reader.open(str(tmp_path / "a.ims")) as img:
-        scene = img.images[0]
-        assert img.backend == "ims" and scene.axes == "tczyx"
-        assert scene.shape == ref.shape                     # real size, not padded
-        assert scene.dtype == ref.dtype.newbyteorder("=")
-        assert scene._layout(0, 0).native == (not name.endswith("_fallback"))
+        series = img.images[0]
+        assert img.backend == "ims" and series.axes == "tczyx"
+        assert series.shape == ref.shape                     # real size, not padded
+        assert series.dtype == ref.dtype.newbyteorder("=")
+        assert series._layout(0, 0).native == (not name.endswith("_fallback"))
         if name == "unwritten_chunks":                     # a mix of written and missing
-            layout = scene._layout(0, 0)
+            layout = series._layout(0, 0)
             assert (0, 0, 0) in layout.where and (0, 16, 0) not in layout.where
         for key in _keys(ref.shape):
-            got = scene[key]
+            got = series[key]
             assert got.dtype.isnative
             np.testing.assert_array_equal(got, ref[key], err_msg=f"{name} {key}")
 
@@ -167,12 +178,12 @@ def test_matches_h5py_cropped(tmp_path, name, decode_threads):
 def test_chunks_decoded_once_and_cached(tmp_path):
     write_ims(str(tmp_path / "a.ims"), compression="gzip")
     with micro_reader.open(str(tmp_path / "a.ims")) as img:
-        scene = img.images[0]
-        assert scene.read_unit == (1, 1, 4, 16, 16)
-        scene[0, 0, 0:2, 0:5, 0:5]
-        assert scene.stats.pixels_read == 4 * 16 * 16        # one chunk
-        scene[0, 0, 1:3, 6:9, 6:9]
-        assert scene.stats.pixels_read == 4 * 16 * 16        # same chunk: cached
+        series = img.images[0]
+        assert series.read_unit == (1, 1, 4, 16, 16)
+        series[0, 0, 0:2, 0:5, 0:5]
+        assert series.stats.pixels_read == 4 * 16 * 16        # one chunk
+        series[0, 0, 1:3, 6:9, 6:9]
+        assert series.stats.pixels_read == 4 * 16 * 16        # same chunk: cached
 
 
 def test_padding_never_read(tmp_path):
@@ -224,12 +235,12 @@ def test_concurrent_reads(tmp_path, decode_threads):
     keys = _keys(ref.shape, n=40, seed=9)
     errors = []
     with micro_reader.open(path) as img:
-        scene = img.images[0]
+        series = img.images[0]
 
         def worker(i):
             try:
                 for key in keys[i::4]:
-                    if not np.array_equal(scene[key], ref[key]):
+                    if not np.array_equal(series[key], ref[key]):
                         errors.append(key)
             except Exception as exc:          # noqa: BLE001
                 errors.append(exc)
@@ -260,9 +271,9 @@ def test_zstd_filter_decoded_natively(tmp_path):
     path = str(tmp_path / "zstd.ims")
     data = _write_filtered(path, 32015, zstandard.ZstdCompressor().compress)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        assert scene._layout(0, 0).native
-        np.testing.assert_array_equal(scene[0, 0], data)
+        series = img.images[0]
+        assert series._layout(0, 0).native
+        np.testing.assert_array_equal(series[0, 0], data)
 
 
 def test_missing_hdf5_filter_is_named(tmp_path):
@@ -272,3 +283,130 @@ def test_missing_hdf5_filter_is_named(tmp_path):
     with micro_reader.open(path) as img:
         with pytest.raises(UnsupportedFormatError, match=r"Blosc \(32001\).*hdf5plugin"):
             img.images[0][...]
+
+
+# -- multi-file Imaris sets (external links) ------------------------------------
+
+def test_multifile_set_reads_its_parts(tmp_path, decode_threads):
+    """FileConverter's multi-file Imaris (S-BIAD13 3x3Bin.ims): every
+    TimePoint / Channel group is an external link into a part file
+    ``<name>--Cxx--Txxxxx.h5``; the master reads as one image, all levels."""
+    data = write_ims_multifile(tmp_path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", MissingImagesWarning)       # nothing is missing
+        f = micro_reader.open(tmp_path / "set.ims")
+    with f:
+        image = f.images[0]
+        assert (f.backend, image.axes, image.shape) == ("ims", "tczyx", data.shape)
+        for key in _keys(data.shape):
+            np.testing.assert_array_equal(image[key], data[key], err_msg=str(key))
+        level = image.resolutions[1]
+        assert level.shape == (2, 2, 3, 10, 12)
+        np.testing.assert_array_equal(level[...], data[..., ::2, ::2])
+        assert [ch.name for ch in image.metadata.channels] == ["ch0", "ch1"]
+
+
+def test_multifile_missing_parts_read_as_zeros(tmp_path, decode_threads):
+    """A multi-file Imaris set copied without some of its part files (an
+    incomplete download): the missing time point / channel parts read as
+    zeros, with a MissingImagesWarning naming one, instead of refusing it."""
+    data = write_ims_multifile(tmp_path, skip=[(1, 1), (0, 1)])
+    with pytest.warns(MissingImagesWarning,
+                      match=r"2 of 4 time point / channel parts are missing.*set--C01--T0000"):
+        f = micro_reader.open(tmp_path / "set.ims")
+    with f:
+        image = f.images[0]
+        assert image.shape == data.shape
+        assert not image.read(t=1, c=1).any() and not image.read(t=0, c=1).any()
+        for key in _keys(data.shape):
+            np.testing.assert_array_equal(image[key], data[key], err_msg=str(key))
+        assert not image.resolutions[1].read(t=0, c=1).any()        # other levels too
+        np.testing.assert_array_equal(image.resolutions[1].read(t=1, c=0),
+                                      data[1, 0, :, ::2, ::2])
+
+
+def test_multifile_all_parts_missing_is_refused(tmp_path):
+    """Only the master of a multi-file set: nothing to read, the error names a part."""
+    write_ims_multifile(tmp_path, skip=[(t, c) for t in range(2) for c in range(2)])
+    with pytest.raises(CorruptFileError, match=r"none of its Imaris data.*set--C00--T00000\.h5"):
+        micro_reader.open(tmp_path / "set.ims")
+
+
+def test_luxendo_link_only_ims(tmp_path, decode_threads):
+    """Luxendo's ``imaris.ims`` (S-BIAD3686): real Channel groups whose Data is
+    an external link to a raw ``.lux.h5`` stack; a missing stack reads as
+    zeros, the warning names its file."""
+    data = write_ims_luxendo(tmp_path)
+    with micro_reader.open(tmp_path / "imaris.ims") as f:
+        image = f.images[0]
+        assert (f.backend, image.shape) == ("ims", data.shape)
+        for key in _keys(data.shape):
+            np.testing.assert_array_equal(image[key], data[key], err_msg=str(key))
+    lost = tmp_path / "lost"
+    lost.mkdir()
+    data = write_ims_luxendo(lost, skip=[(1, 0)])
+    with pytest.warns(MissingImagesWarning,
+                      match=r"1 of 4 .*stack_0-Zstack_channel_0/Cam_long_00001\.lux\.h5"):
+        f = micro_reader.open(lost / "imaris.ims")
+    with f:
+        image = f.images[0]
+        assert not image.read(t=1, c=0).any()
+        np.testing.assert_array_equal(image[...], data)
+
+
+def test_multifile_part_opens_its_master(tmp_path):
+    """Opening a part file ``<name>--C00--T00000.h5`` opens the whole set:
+    ``<name>.ims``, else the ``<name>.h5`` copy FileConverter also writes;
+    with neither, the error names the master it expects."""
+    data = write_ims_multifile(tmp_path)
+    part = tmp_path / "set--C01--T00000.h5"
+    with micro_reader.open(part) as f:
+        assert f.path.endswith("set.ims") and f.opened.endswith("set--C01--T00000.h5")
+        np.testing.assert_array_equal(f.images[0][...], data)
+    os.remove(tmp_path / "set.ims")
+    with micro_reader.open(part) as f:
+        assert f.path.endswith("set.h5")
+        np.testing.assert_array_equal(f.images[0][...], data)
+    os.remove(tmp_path / "set.h5")
+    with pytest.raises(CorruptFileError, match=r"part of .*set\.ims"):
+        micro_reader.open(part)
+
+
+def test_multifile_may_own_reads_nothing(tmp_path, monkeypatch):
+    """group_files' cheap test is a name rule over the folder listing: no file
+    is opened.  A part name counts only with its master beside it."""
+    import builtins
+    from micro_reader import _groups, _parts
+    from micro_reader.backends import ims
+    write_ims_multifile(tmp_path)
+    (tmp_path / "other--C00--T00000.h5").write_bytes(b"")        # no other.ims / other.h5
+
+    def refuse(*args, **kwargs):
+        raise AssertionError(f"may_own read a file: {args}")
+    monkeypatch.setattr(builtins, "open", refuse)
+    monkeypatch.setattr(_parts, "read_head", refuse)
+    folders = _groups._Folders()
+    folder = str(tmp_path)
+    owned = {n: ims.may_own(folder, n, folders) for n in sorted(os.listdir(tmp_path))}
+    assert owned == {"other--C00--T00000.h5": False, "set--C00--T00000.h5": True,
+                     "set--C00--T00001.h5": True, "set--C01--T00000.h5": True,
+                     "set--C01--T00001.h5": True, "set.h5": False, "set.ims": False}
+    assert ims.may_own(folder, "SET--c00--t00000.H5", folders)              # any letter case
+
+
+def test_multifile_group_files(tmp_path, monkeypatch):
+    """group_files puts the part files in one group with the master; only the
+    parts (the files a name rule matched) have their first bytes read."""
+    from micro_reader import _parts
+    write_ims_multifile(tmp_path)
+    reads = []
+    real = _parts.read_head
+    monkeypatch.setattr(_parts, "read_head", lambda p: reads.append(os.path.basename(p)) or real(p))
+    g = micro_reader.group_files(str(tmp_path))
+    (group,) = g.groups
+    parts = sorted(n for n in os.listdir(tmp_path) if "--C" in n)
+    assert (group.kind, group.format) == ("composite", "ims")
+    assert os.path.samefile(group.main, tmp_path / "set.ims")
+    assert [os.path.basename(p) for p in group.parts] == parts
+    assert [os.path.basename(p) for p in g.singles] == ["set.h5"]           # the copy
+    assert sorted(reads) == parts

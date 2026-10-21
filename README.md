@@ -23,6 +23,14 @@ pip install "micro-reader[ims]"      # Imaris (.ims)
 pip install "micro-reader[codecs]"   # additional codecs
 ```
 
+## Compatibility with eubi-bridge
+
+micro-reader 0.1.0 renamed the image index `scene` to `series`. eubi-bridge 0.1.3 to 0.2.x and eubi-bridge-lite below 0.3.0 still read `scene`, so `import micro_reader` refuses to load next to them. It raises an `ImportError` that names the installed eubi version and the two ways out: upgrade eubi (`pip install -U 'eubi-bridge>=0.3.0'`, or the same for `eubi-bridge-lite`), or keep that eubi with the micro-reader it was built for (`pip install 'micro-reader<0.1'`). The check reads the versions of the installed packages; it never imports eubi. An editable install of eubi is checked like any other: its recorded version can be out of date, so the message then says to reinstall it.
+
+To skip the check, set the environment variable `MICRO_READER_SKIP_EUBI_CHECK=1`. Only the value `1` skips it; any other value keeps the check. micro-reader then warns once that the check was skipped. This is meant for work on an eubi checkout, not for normal use.
+
+The check will be removed when every eubi-bridge / eubi-bridge-lite line below 0.3.0 has left the support window, checked by the release version matrix; not before.
+
 ## Quick start
 
 ```python
@@ -64,7 +72,7 @@ print(image.stats.over_read)
 
 * **File**: the opened microscopy file
 * **Image**: one image or frame that can be read as an array
-* **Index**: identifies images that are separated by dimensions such as scene, tile, view, or emission wavelength
+* **Index**: identifies images that are separated by dimensions such as series, tile, view, or emission wavelength
 
 The key distinction is:
 
@@ -117,7 +125,7 @@ Each image has an index describing where it came from:
 
 ```python
 image.index
-# {"scene": 0, "tile": 3, "view": 0}
+# {"series": 0, "tile": 3, "view": 0}
 ```
 
 You can inspect all indices in the file:
@@ -130,10 +138,10 @@ f.index_range
 And select images by index:
 
 ```python
-f.select(scene=1, view=0)
+f.select(series=1, view=0)
 ```
 
-This returns the images matching the requested indices. For example, if a file contains several scenes, tiles, and views, selecting `scene=1, view=0` returns the tiles belonging to that scene and view.
+This returns the images matching the requested indices. For example, if a file contains several series, tiles, and views, selecting `series=1, view=0` returns the tiles belonging to that series and view.
 
 ### Available index dimensions
 
@@ -144,7 +152,7 @@ plate
 acquisition
 well
 field
-scene
+series
 tile
 rotation
 view
@@ -288,13 +296,13 @@ For example, a plain multi-page TIFF may contain 80 pages without saying whether
 f = micro_reader.open("stack.tif")
 
 print(f.index_range)
-# {"scene": 1, "sequence": 80}
+# {"series": 1, "sequence": 80}
 
 print(len(f.images))
 # 80
 
 print(f.images[0].index)
-# {"scene": 0, "sequence": 0}
+# {"series": 0, "sequence": 0}
 
 print(f.images[0].axes)
 # yx
@@ -340,10 +348,10 @@ Each image of a pyramidal file carries its resolution level in its index. In thi
 
 ```python
 print(f.index_range)
-# {"scene": 4, "resolution": 1}
+# {"series": 4, "resolution": 1}
 
 print(f.images[0].index)
-# {"scene": 0, "resolution": 0}
+# {"series": 0, "resolution": 0}
 ```
 
 `index_range` shows `"resolution": 1` because only the full-resolution level is in `f.images`.
@@ -351,15 +359,15 @@ print(f.images[0].index)
 Lower-resolution versions are available through the image via `image.resolutions`:
 
 ```python
-image_scene0 = f.images[0]
+image_series0 = f.images[0]
 
-image_scene0.is_pyramidal
+image_series0.is_pyramidal
 # True
 
-img_scene0_level2 = image_scene0.resolutions[2]  # a lower-resolution image
+img_series0_level2 = image_series0.resolutions[2]  # a lower-resolution image
 
-img_scene0_level2.index
-# {"scene": 0, "resolution": 2}
+img_series0_level2.index
+# {"series": 0, "resolution": 2}
 ```
 
 If you prefer to expose every resolution level as an image directly under the `File` object:
@@ -371,26 +379,26 @@ f = micro_reader.open(
 )
 
 print(f.index_range)
-# {"scene": 4, "resolution": 6}
+# {"series": 4, "resolution": 6}
 
-img_scene0_level2 = f.select(scene=0, resolution=2)[0]
+img_series0_level2 = f.select(series=0, resolution=2)[0]
 ```
 
 Supported pyramids include:
 
 * **Imaris**: all stored levels
 * **TIFF**: OME-TIFF and whole-slide pyramids (SVS, NDPI, SCN, BIF, QPTIFF, Philips)
-* **CZI**: stored pyramids of whole scenes
+* **CZI**: stored pyramids of whole series
 
 Other formats expose a single resolution level.
 
-CZI pyramids belong to whole scenes. Separately opened CZI mosaic tiles therefore do not have their own resolution levels.
+CZI pyramids belong to whole series. Separately opened CZI mosaic tiles therefore do not have their own resolution levels.
 
 ## Mosaic tiles
 
 Mosaic tiles are separate images by default.
 
-For CZI files, you can instead request stitched scenes:
+For CZI files, you can instead request stitched series:
 
 ```python
 f = micro_reader.open(
@@ -424,7 +432,7 @@ f.select(well=plate.well_index("B2"))
 
 `f.outline()` shows the plates, wells and fields of a file.
 
-Zeiss CZI plates are read as plates with `plates=True`, and as scenes otherwise:
+Zeiss CZI plates are read as plates with `plates=True`, and as series otherwise:
 
 ```python
 f = micro_reader.open("plate.czi", plates=True)
@@ -505,7 +513,7 @@ The position is omitted when it cannot be determined reliably.
 | -------------------- | ----------------------------------------------------- |
 | **TIFF / BigTIFF**   | TIFF, OME-TIFF, ImageJ, LSM, STK, Micro-Manager, whole-slide TIFFs |
 | **OME companion**    | `.companion.ome` sets of OME-TIFF files               |
-| **CZI**              | Zeiss CZI, including mosaic tiles and stitched scenes |
+| **CZI**              | Zeiss CZI, including mosaic tiles and stitched series |
 | **ND2**              | Nikon ND2, including legacy JPEG 2000 ND2             |
 | **Leica**            | LIF, LOF, LIFEXT, XLIF, XLEF, XLCF                    |
 | **OIR**              | Olympus / Evident FluoView                            |
@@ -534,9 +542,9 @@ Supported TIFF formats include:
 * Micro-Manager stacks (MMStack and NDTiff), also when one acquisition is spread over several files
 * Whole-slide TIFFs: Aperio SVS, Hamamatsu NDPI, Leica SCN, Ventana BIF, PerkinElmer / Akoya QPTIFF and Philips
 
-Micro-Manager stage positions are scenes. NDTiff channel names and pixel sizes come from the dataset's index and frame metadata.
+Micro-Manager stage positions are series. NDTiff channel names and pixel sizes come from the dataset's index and frame metadata.
 
-A whole-slide file gives the slide first, then the other pictures it stores as further scenes, as Bio-Formats lists them: `label` and `macro` (overview), and for some formats `thumbnail` (QPTIFF) or `probability` (BIF tissue map). Pixel sizes, positions and channel names come from each vendor's own metadata.
+A whole-slide file gives the slide first, then the other pictures it stores as further series, as Bio-Formats lists them: `label` and `macro` (overview), and for some formats `thumbnail` (QPTIFF) or `probability` (BIF tissue map). Pixel sizes, positions and channel names come from each vendor's own metadata.
 
 Ventana BIF scans store overlapping tiles. They are composed as Roche's description of the format places them. Files from scanners other than the VENTANA DP 200 are not supported.
 
@@ -570,13 +578,15 @@ An OME companion file (`.companion.ome`) describes images stored in separate TIF
 f = micro_reader.open("data.companion.ome")
 ```
 
-Opening one of the TIFF files on its own reads only that file, with its pixel sizes, channels and position taken from the companion. If the companion is missing, the file is read without pixel sizes, with a `CompanionWarning`. A TIFF whose metadata lives in another OME-TIFF (instead of a `.companion.ome`) takes it from that file in the same way.
-
-Some OME-TIFF sets keep the full OME-XML in their TIFF files instead of a companion. Opening one of those files reads the whole set. To read only the planes stored in that file, with the set's metadata:
+Opening one of the TIFF files of the set also reads the whole set, as if the companion had been opened: `f.path` is then the companion, and the companion's metadata is used. To read only that file, with its pixel sizes, channels and position taken from the companion:
 
 ```python
-f = micro_reader.open("set_t001.ome.tif", multifile=False)
+f = micro_reader.open("data_t001.ome.tif", multifile=False)
 ```
+
+If the companion is missing or does not list the file, opening the whole set raises an error that names `multifile=False`. With `multifile=False` the file is then read without pixel sizes, with a `CompanionWarning`. A TIFF whose metadata lives in another OME-TIFF (instead of a `.companion.ome`) works the same way, with that OME-TIFF in the companion's place.
+
+Some OME-TIFF sets keep the full OME-XML in their TIFF files instead of a companion. Opening one of those files also reads the whole set, and `multifile=False` reads only the planes stored in that file, with the set's metadata.
 
 Micro-Manager stacks always open whole, also with `multifile=False`: they split their files by size, so one file does not hold a complete part of the image.
 
@@ -585,12 +595,12 @@ Micro-Manager stacks always open whole, also with `multifile=False`: they split 
 CZI files support:
 
 * mosaic tiles
-* scenes
+* series
 * views
 * rotations
 * RGB
 * large files
-* stored scene pyramids
+* stored series pyramids
 
 CZI-specific operations include:
 

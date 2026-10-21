@@ -126,7 +126,7 @@ def test_a_set_reads_as_one_image_with_its_metadata(tmp_path, layout, order):
     path, data = _write(str(tmp_path), layout=layout, order=order)
     with micro_reader.open(path) as f:
         assert (f.backend, f.format) == ("companion", "ome-companion")
-        assert f.indices == [{"scene": 0}]
+        assert f.indices == [{"series": 0}]
         im = f.images[0]
         assert im.axes == "tczyx" and im.shape == (2, 2, 3, Y, X) and im.dtype == np.uint16
         assert im.name == "series 0"
@@ -146,7 +146,7 @@ def test_a_set_reads_as_one_image_with_its_metadata(tmp_path, layout, order):
 def test_two_images_in_one_companion(tmp_path):
     path, data = _write(str(tmp_path), images=2, layout="stacks")
     with micro_reader.open(path) as f:
-        assert f.indices == [{"scene": 0}, {"scene": 1}]
+        assert f.indices == [{"series": 0}, {"series": 1}]
         assert [im.name for im in f.images] == ["series 0", "series 1"]
         _check(f.images[1], data, im=1)
 
@@ -164,7 +164,7 @@ def test_missing_members_read_as_zeros_and_an_image_without_files_is_left_out(tm
     with pytest.warns(micro_reader.MissingImagesWarning):
         f = micro_reader.open(path)
     with f:
-        assert f.indices == [{"scene": 0}]               # image 1 has none of its files
+        assert f.indices == [{"series": 0}]               # image 1 has none of its files
         got = f.images[0][...]
         np.testing.assert_array_equal(got[0, 1, 2], data[(0, 0, 1, 2)])
         assert not got[1].any()                          # timepoint 1's file is missing
@@ -297,7 +297,7 @@ def test_few_members_stay_open_and_threads_read_safely(tmp_path, monkeypatch):
         assert len(f._members._open) <= 2
 
 
-# -- CO-2: one member file, its metadata from its companion ----------------------
+# -- CO-2, multifile=False: one member file, its metadata from its companion -------
 
 def _member(folder, number=0):
     return os.path.join(folder, f"img0_part{number:03d}.tif")
@@ -305,7 +305,7 @@ def _member(folder, number=0):
 
 def test_a_plane_opened_alone_takes_its_metadata_from_the_companion(tmp_path):
     path, data = _write(str(tmp_path), dpi96=True)       # its 96 dpi is no pixel size
-    with micro_reader.open(_member(str(tmp_path), 4)) as f:
+    with micro_reader.open(_member(str(tmp_path), 4), multifile=False) as f:
         assert f.backend == "tiff" and f.companion == path
         im = f.images[0]
         # plane 4 in XYZCT order: z 1, c 1, t 0; t, c and z are explicit, so kept
@@ -320,18 +320,18 @@ def test_a_plane_opened_alone_takes_its_metadata_from_the_companion(tmp_path):
 
 def test_only_axes_the_companion_says_something_about_are_added(tmp_path):
     path, _data = _write(str(tmp_path), physical_z=False, time=False)
-    with micro_reader.open(_member(str(tmp_path))) as f:
+    with micro_reader.open(_member(str(tmp_path)), multifile=False) as f:
         assert f.images[0].axes == "cyx"                 # channel information only
     path, _data = _write(str(tmp_path / "bare"), physical_z=False, time=False,
                          channel_info=False)
-    with micro_reader.open(_member(str(tmp_path / "bare"))) as f:
+    with micro_reader.open(_member(str(tmp_path / "bare")), multifile=False) as f:
         im = f.images[0]
         assert im.axes == "yx" and im.metadata.pixel_sizes["x"].value == 0.5
 
 
 def test_a_multi_page_member_opens_as_its_block_of_the_image(tmp_path):
     path, data = _write(str(tmp_path), layout="stacks")  # one file per t: 2 c x 3 z pages
-    with micro_reader.open(_member(str(tmp_path), 1)) as f:
+    with micro_reader.open(_member(str(tmp_path), 1), multifile=False) as f:
         im = f.images[0]
         assert im.axes == "tczyx" and im.shape == (1, 2, 3, Y, X)
         got = im[...]
@@ -345,7 +345,7 @@ def test_without_its_companion_a_stub_opens_plainly_with_a_loud_warning(tmp_path
     path, data = _write(str(tmp_path), dpi96=True)
     os.remove(path)
     with pytest.warns(micro_reader.CompanionWarning, match="is not there"):
-        f = micro_reader.open(_member(str(tmp_path)))
+        f = micro_reader.open(_member(str(tmp_path)), multifile=False)
     with f:
         im = f.images[0]
         assert im.axes == "yx" and im.metadata.pixel_sizes == {}   # never the 96 dpi
@@ -361,7 +361,7 @@ def test_a_member_is_recognised_when_a_check_passes(tmp_path, own, points_to, re
     path, _data = _write(str(tmp_path), own=own, points_to=points_to)
     with warnings.catch_warnings(record=True) as told:
         warnings.simplefilter("always")
-        f = micro_reader.open(_member(str(tmp_path)))
+        f = micro_reader.open(_member(str(tmp_path)), multifile=False)
     with f:
         assert (getattr(f, "companion", None) == path) is bool(recognised)
         refused = [w for w in told if issubclass(w.category, micro_reader.CompanionWarning)]
@@ -378,7 +378,7 @@ def test_a_stub_may_point_to_an_ome_tiff(tmp_path):
                      description=xml.encode("utf-8"), metadata=None)   # the master: XML + plane 0
     with warnings.catch_warnings():
         warnings.simplefilter("error", micro_reader.CompanionWarning)
-        f = micro_reader.open(_member(str(tmp_path), 1))
+        f = micro_reader.open(_member(str(tmp_path), 1), multifile=False)
     with f:
         assert os.path.samefile(f.companion, _member(str(tmp_path), 0))
         im = f.images[0]
@@ -442,7 +442,7 @@ def test_a_renamed_member_is_found_by_its_uuid(tmp_path):
     path, data = _write(str(tmp_path), own="listed", points_to="this")
     renamed = os.path.join(str(tmp_path), "renamed.tif")
     os.rename(_member(str(tmp_path)), renamed)
-    with micro_reader.open(renamed) as f:
+    with micro_reader.open(renamed, multifile=False) as f:
         assert f.companion == path
         np.testing.assert_array_equal(f.images[0][0, 0, 0], data[(0, 0, 0, 0)])
 
@@ -451,7 +451,7 @@ def test_an_absolute_pointer_that_does_not_exist_falls_back_to_the_folder(tmp_pa
     gone = os.path.join(os.path.abspath(os.sep), "acquisition-pc-x7", "set.companion.ome")
     path, _data = _write(str(tmp_path), metadata_file=gone)
     with pytest.warns(micro_reader.CompanionWarning, match="does not exist"):
-        f = micro_reader.open(_member(str(tmp_path)))
+        f = micro_reader.open(_member(str(tmp_path)), multifile=False)
     with f:
         assert f.companion == path
 
@@ -459,7 +459,7 @@ def test_an_absolute_pointer_that_does_not_exist_falls_back_to_the_folder(tmp_pa
 def test_a_companion_that_does_not_fit_the_file_is_not_used(tmp_path):
     _path, _data = _write(str(tmp_path), member_shape=(Y, X + 1))
     with pytest.warns(micro_reader.CompanionWarning, match="another size"):
-        f = micro_reader.open(_member(str(tmp_path)))
+        f = micro_reader.open(_member(str(tmp_path)), multifile=False)
     with f:
         assert f.images[0].axes == "yx" and f.images[0].metadata.pixel_sizes == {}
 
@@ -483,4 +483,100 @@ def test_pages_that_are_not_one_block_are_refused(tmp_path):
         fh.write(text)
     companion._cores.clear()
     with pytest.raises(micro_reader.UnsupportedFormatError, match="not one block"):
+        micro_reader.open(_member(str(tmp_path)), multifile=False)
+
+
+# -- multifile=True (the default): a member opens its whole set ---------------------
+# (docs/COMPANION.md, "DECIDED: multifile chooses between CO-1 and CO-2")
+
+@pytest.mark.parametrize("own, points_to", [("listed", "this"), ("other", "this")])
+def test_a_member_opens_the_whole_set_as_its_companion_would(tmp_path, own, points_to):
+    path, data = _write(str(tmp_path), own=own, points_to=points_to, dpi96=True)
+    member = _member(str(tmp_path), 4)
+    with micro_reader.open(member) as f, micro_reader.open(path) as g:
+        assert f.backend == "companion" and f.path == path and f.opened == member
+        (im,) = f.images
+        assert im.shape == g.images[0].shape == (2, 2, 3, Y, X)
+        _check(im, data)
+        # the companion's metadata wins (it is opened as the companion)
+        assert im.metadata.pixel_sizes == g.images[0].metadata.pixel_sizes
+        assert [c.name for c in im.metadata.channels] == ["ch0", "ch1"]
+
+
+def _master_set(folder, compressed_members=False):
+    """A set whose full OME-XML is in the first member (no .companion.ome), the
+    others BinaryOnly stubs pointing to it; every file one uncompressed strip
+    unless *compressed_members*.  -> (master path, data)."""
+    path, data = _write(folder, metadata_file="img0_part000.tif")
+    xml = open(path, encoding="utf-8").read()
+    os.remove(path)
+    for g in range(12):
+        p = _member(folder, g)
+        with tifffile.TiffFile(p) as tif:
+            plane, desc = tif.pages[0].asarray(), tif.pages[0].description
+        if g == 0:
+            tifffile.imwrite(p, plane, description=xml.encode("utf-8"), metadata=None)
+        elif not compressed_members:
+            tifffile.imwrite(p, plane, description=desc.encode("utf-8"), metadata=None)
+    return _member(folder, 0), data
+
+
+def test_a_member_pointing_to_an_ome_tiff_opens_that_files_set(tmp_path):
+    master, data = _master_set(str(tmp_path))
+    with micro_reader.open(_member(str(tmp_path), 1)) as f:
+        assert os.path.samefile(f.path, master) and f.backend == "tiff"
+        assert f.images[0].shape[:3] == (2, 2, 3)
+        _check(f.images[0], data)
+
+
+def test_a_set_whose_files_are_stored_differently_is_refused_not_misread(tmp_path):
+    """Real-data round: pages of a multi-file OME-TIFF are decoded as its first
+    page is; members stored otherwise (here tiled zlib after an uncompressed
+    master) read as wrong pixels before, and are refused now."""
+    master, data = _master_set(str(tmp_path), compressed_members=True)
+    with micro_reader.open(master) as f:
+        np.testing.assert_array_equal(f.images[0][0, 0, 0], data[(0, 0, 0, 0)])
+        with pytest.raises(micro_reader.UnsupportedFormatError, match="stored differently"):
+            f.images[0][0, 0, 1]
+
+
+@pytest.mark.parametrize("break_it, why", [
+    ("remove", "is not there"),
+    ("garble", "cannot be read"),
+    ("other set", "describes another set"),
+    ("size", "another size"),
+])
+def test_a_metadata_file_that_cannot_be_followed_is_an_error(tmp_path, break_it, why):
+    kw = {"own": "other", "points_to": "other"} if break_it == "other set" else \
+         {"member_shape": (Y, X + 1)} if break_it == "size" else {}
+    path, _data = _write(str(tmp_path), **kw)
+    if break_it == "remove":
+        os.remove(path)
+    elif break_it == "garble":
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("<OME")
+    companion._cores.clear()
+    with pytest.raises(micro_reader.CorruptFileError, match=f"{why}.*multifile=False"):
         micro_reader.open(_member(str(tmp_path)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", micro_reader.CompanionWarning)
+        with micro_reader.open(_member(str(tmp_path)), multifile=False) as f:   # the file alone
+            assert f.images[0].axes == "yx"
+
+
+def test_a_missing_member_warns_and_the_rest_reads(tmp_path):
+    """Missing MEMBERS are no error (a subset, as for every file set): only a
+    metadata file that cannot be followed is."""
+    path, data = _write(str(tmp_path), skip={(0, 7)})
+    with pytest.warns(micro_reader.MissingImagesWarning):
+        f = micro_reader.open(_member(str(tmp_path), 4))
+    with f:
+        assert f.path == path
+        got = f.images[0][...]
+        np.testing.assert_array_equal(got[0, 0, 1], data[(0, 0, 0, 1)])
+
+
+def test_a_member_without_a_stub_opens_as_it_is(tmp_path):
+    path, _data = _write(str(tmp_path), own="listed", points_to=None)
+    with micro_reader.open(_member(str(tmp_path))) as f:
+        assert f.backend == "tiff" and f.path == _member(str(tmp_path))

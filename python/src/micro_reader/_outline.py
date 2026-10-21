@@ -1,5 +1,5 @@
 """A File's structure as text (docs/AXES.md, index architecture): a tree of
-its containment indices (plate > well > field, or scene), each leaf with
+its containment indices (plate > well > field, or series), each leaf with
 its tiles, the orthogonal indices that vary inside it, the image shape and
 the pyramid levels."""
 from __future__ import annotations
@@ -23,7 +23,7 @@ def runs(values) -> str:
 
 
 def _leaf(images) -> str:
-    """What one leaf (a field, or a scene) holds."""
+    """What one leaf (a field, or a series) holds."""
     parts = []
     tiles = [image.index["tile"] for image in images if "tile" in image.index]
     if tiles:
@@ -42,7 +42,9 @@ def _leaf(images) -> str:
     if levels > 1:
         parts.append(f"{levels} levels")
     if first.is_ragged:
-        parts.append("ragged: " + " + ".join(str(p.shape) for p in first.parts))
+        typed = len({p.dtype for p in first.parts}) > 1      # parts of different pixel types
+        parts.append(("parts: " if typed else "ragged: ") + " + ".join(
+            f"{p.shape} {p.dtype}" if typed else str(p.shape) for p in first.parts))
     return ", ".join(parts)
 
 
@@ -63,9 +65,9 @@ def outline_lines(f) -> list:
         rest = [image for image in images if "well" not in image.index]
     else:
         rest = images
-    by_scene: dict = {}
+    by_series: dict = {}
     for image in rest:
-        by_scene.setdefault(image.index.get("scene", 0), []).append(image)
-    for scene, members in sorted(by_scene.items()):
-        lines.append(f"scene {scene}: {_leaf(members)}")
+        by_series.setdefault(image.index.get("series", 0), []).append(image)
+    for series, members in sorted(by_series.items()):
+        lines.append(f"series {series}: {_leaf(members)}")
     return lines

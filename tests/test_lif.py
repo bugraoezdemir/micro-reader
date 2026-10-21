@@ -98,10 +98,10 @@ def test_matches_written_data(tmp_path, name, decode_threads):
     with micro_reader.open(path) as img:
         assert img.backend == "lif"
         assert [(s.name, s.axes) for s in img.images] == [(n, a) for n, a, _ in expected]
-        for scene, (_, _, ref) in zip(img.images, expected):
-            assert scene.shape == ref.shape and scene.dtype == ref.dtype
+        for series, (_, _, ref) in zip(img.images, expected):
+            assert series.shape == ref.shape and series.dtype == ref.dtype
             for key in _keys(ref.shape):
-                got = scene[key]
+                got = series[key]
                 assert got.dtype.isnative
                 np.testing.assert_array_equal(got, ref[key], err_msg=f"{name} {key}")
 
@@ -120,14 +120,14 @@ def test_agrees_with_readlif(tmp_path, name):
     with micro_reader.open(path) as img:
         assert list(dict.fromkeys(s.name for s in img.images)) == \
             [i["name"] for i in lf.image_list]
-        for scene in img.images:
-            i, m = scene.index["scene"], scene.index.get("tile")
-            for t in range(scene.shape[0]):
-                for c in range(scene.shape[1]):
-                    for z in range(scene.shape[2]):
+        for series in img.images:
+            i, m = series.index["series"], series.index.get("tile")
+            for t in range(series.shape[0]):
+                for c in range(series.shape[1]):
+                    for z in range(series.shape[2]):
                         kw = {"m": m} if m is not None else {}
                         ref = np.asarray(lf.get_image(i).get_frame(z=z, t=t, c=c, **kw))
-                        got = scene.read(t=t, c=c, z=z)
+                        got = series.read(t=t, c=c, z=z)
                         if got.dtype == np.float16:
                             got = got.view(np.uint16)
                         np.testing.assert_array_equal(got, ref, err_msg=f"{name} {i} {t} {c} {z}")
@@ -150,14 +150,14 @@ def test_rgb_samples_follow_the_channel_tags(tmp_path):
 def test_tiles_are_images_with_positions(tmp_path):
     path, _ = _write(tmp_path, "tiles")
     with micro_reader.open(path) as img:
-        assert img.indices == [{"scene": 0, "tile": m} for m in range(3)]
+        assert img.indices == [{"series": 0, "tile": m} for m in range(3)]
         with pytest.warns(DeprecationWarning, match="metadata.position"):
             assert [s.tile_position for s in img.images] == [(0, 0, 0.0, 0.0), (1, 0, 1e-4, 0.0),
                                                              (2, 0, 2e-4, 0.0)]
         # the replacement: each tile's position, along the image's axes (um)
         assert [round(s.metadata.position["x"].value) for s in img.images] == [0, 100, 200]
     with pytest.raises(UnsupportedFormatError, match="does not compose Leica tiles"):
-        micro_reader.open(path, tiles="stitched")
+        micro_reader.open(path, tiles="mosaic")
 
 
 def test_untiled_images_of_a_tiled_file_get_tile_0(tmp_path):
@@ -166,10 +166,10 @@ def test_untiled_images_of_a_tiled_file_get_tile_0(tmp_path):
     path = str(tmp_path / "mixed.lif")
     write_lif(path, [image("plain", u8), image("scan", tiles, "tczmyx")])
     with micro_reader.open(path) as img:
-        assert img.indices == [{"scene": 0, "tile": 0}, {"scene": 1, "tile": 0},
-                                  {"scene": 1, "tile": 1}]
-        assert img.index_range == {"scene": 2, "tile": 2}
-        np.testing.assert_array_equal(img.select(scene=1, tile=1)[0][...], tiles[:, :, :, 1])
+        assert img.indices == [{"series": 0, "tile": 0}, {"series": 1, "tile": 0},
+                                  {"series": 1, "tile": 1}]
+        assert img.index_range == {"series": 2, "tile": 2}
+        np.testing.assert_array_equal(img.select(series=1, tile=1)[0][...], tiles[:, :, :, 1])
 
 
 def _patch(path, old, new):
@@ -185,7 +185,7 @@ def test_rotations_are_images(tmp_path):
     path, expected = _write(tmp_path, "tiles")
     _patch(path, 'DimID="10"', 'DimID="6" ')                     # same length
     with micro_reader.open(path) as img:
-        assert img.indices == [{"scene": 0, "rotation": r} for r in range(3)]
+        assert img.indices == [{"series": 0, "rotation": r} for r in range(3)]
         for r, image_ in enumerate(img.images):
             np.testing.assert_array_equal(image_[...], expected[r][2])
 
@@ -193,10 +193,10 @@ def test_rotations_are_images(tmp_path):
 def test_lambda_scans_are_emission_and_excitation_indices(tmp_path):
     path, expected = _write(tmp_path, "time_lambda")
     with micro_reader.open(path) as img:
-        assert img.indices == [{"scene": 0, "emission": k} for k in range(4)]
+        assert img.indices == [{"series": 0, "emission": k} for k in range(4)]
     _patch(path, 'DimID="5"', 'DimID="9"')
     with micro_reader.open(path) as img:
-        assert img.indices == [{"scene": 0, "excitation": k} for k in range(4)]
+        assert img.indices == [{"series": 0, "excitation": k} for k in range(4)]
         for k, image_ in enumerate(img.images):
             assert image_.axes == "tczyx"
             np.testing.assert_array_equal(image_[...], expected[k][2])
@@ -206,9 +206,9 @@ def test_reads_only_the_rows_asked(tmp_path):
     """A window is one contiguous read from its first to its last pixel."""
     path, expected = _write(tmp_path, "stack_12bit")
     with micro_reader.open(path) as img:
-        scene = img.images[0]
-        np.testing.assert_array_equal(scene[1, 2, 3, 5:9, 4:10], expected[0][2][1, 2, 3, 5:9, 4:10])
-        assert scene.stats.pixels_read == 3 * 30 + 6       # rows 5..8, columns 4..9
+        series = img.images[0]
+        np.testing.assert_array_equal(series[1, 2, 3, 5:9, 4:10], expected[0][2][1, 2, 3, 5:9, 4:10])
+        assert series.stats.pixels_read == 3 * 30 + 6       # rows 5..8, columns 4..9
 
 
 def test_unsupported_dimension_is_named(tmp_path):
@@ -259,11 +259,11 @@ def test_concurrent_reads(tmp_path, decode_threads):
     ref = expected[0][2]
     errors = []
     with micro_reader.open(path) as img:
-        scene = img.images[0]
+        series = img.images[0]
 
         def work(seed):
             for key in _keys(ref.shape, n=15, seed=seed):
-                if not np.array_equal(scene[key], ref[key]):
+                if not np.array_equal(series[key], ref[key]):
                     errors.append(key)
         threads = [threading.Thread(target=work, args=(s,)) for s in range(6)]
         for th in threads:
@@ -271,3 +271,17 @@ def test_concurrent_reads(tmp_path, decode_threads):
         for th in threads:
             th.join()
     assert not errors
+
+
+def test_one_metre_per_pixel_is_index_space(tmp_path):
+    """LAS stores FLIM phasor plots with Length = N - 1 m (1 m per pixel):
+    no pixel size, while the image beside it keeps its own."""
+    plot = np.ones((30, 51), np.float32)
+    path = str(tmp_path / "flim.lif")
+    write_lif(path, [image("Fast Flim", np.ones((8, 10), np.float16), "yx"),
+                     image("Phasor Plot", plot, "yx", lengths={"x": 50, "y": 29})])
+    with micro_reader.open(path) as f:
+        fast, phasor = f.images
+        assert set(fast.metadata.pixel_sizes) == {"x", "y"}
+        assert phasor.metadata.pixel_sizes == {}
+        np.testing.assert_array_equal(phasor[...].reshape(plot.shape), plot)

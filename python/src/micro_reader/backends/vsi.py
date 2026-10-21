@@ -204,8 +204,17 @@ class _VsiImage(Image):
         super().__init__(position, axes, shape, ets.dtype.newbyteorder("="), name=name)
         self._ets, self._level, self._slots, self._volume = ets, level, slots, volume
         self._rgb, self._fill, self._size = rgb, fill, size
+        self._closed = False
+
+    def close(self) -> None:
+        """Unusable afterwards; the ETS files close with the file (``_VsiFile``)."""
+        self._closed = True
 
     def _read_block(self, block):
+        if self._closed:
+            # the ETS handles are per thread: a thread that never read would reopen them
+            raise ValueError("this VSI image has been closed: its file was closed "
+                             "(File.close() or the end of a with block)")
         ts, cs, zs, ys, xs = block[:5]
         ss = block[5] if self._rgb else slice(0, 1)
         out = np.empty(tuple(s.stop - s.start for s in block), self.dtype)
@@ -301,7 +310,7 @@ def _pyramid(position, name, ets, size, slots, extents, volume, fill) -> _VsiIma
     for level in levels:
         level._resolutions = levels
     for k, level in enumerate(levels):
-        level.index = {"scene": position, "resolution": k}
+        level.index = {"series": position, "resolution": k}
     return levels[0]
 
 
@@ -425,7 +434,7 @@ def _macro(path: str, position: int):
     image.name = "macro"
     # its resolution tags are a display default (96 dpi -> 264.6 um), not a pixel size
     image._metadata = Metadata.unknown(1)
-    image.index = {"scene": position}
+    image.index = {"series": position}
     image._position = position
     image._file = file
     return image

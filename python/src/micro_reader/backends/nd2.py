@@ -11,7 +11,7 @@ experiment loops, outermost first.  Structure parsing is ported from nd2
   come along: they are interleaved per pixel).
 - "Lossless" frames are one zlib stream each: decoded whole, cached.
 
-Images are the XY positions, indexed by ``scene`` (as bioio-nd2 has them); axes ``tczyx``, plus ``s``
+Images are the XY positions, indexed by ``series`` (bioio-nd2 calls them scenes); axes ``tczyx``, plus ``s``
 for RGB components.  Legacy JPEG 2000 ND2 (versions 1 / 2): ``_nd2_legacy``.
 Not supported:
 lossy compression, tiled frames, custom loops.

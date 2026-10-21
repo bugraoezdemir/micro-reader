@@ -95,6 +95,36 @@ def test_hilo_unpack_known_answer():
     np.testing.assert_array_equal(out, values)
 
 
+@pytest.mark.parametrize("name", list(_payloads()))
+@pytest.mark.parametrize("native", [pytest.param(True, marks=needs_native), False],
+                         ids=["native", "reference"])
+def test_lzf_decodes_exactly(name, native):
+    """LZF as h5py's filter writes it (liblzf, no header): literal runs, short
+    and long back references, and overlapping ones (the constant payload)."""
+    imagecodecs = pytest.importorskip("imagecodecs")
+    data = _payloads()[name]
+    packed = bytes(imagecodecs.lzf_encode(data.tobytes(), header=False))
+    out = np.empty_like(data)
+    _codecs.lzf_decompress_into(packed, out, native=native)
+    np.testing.assert_array_equal(out, data)
+
+
+@pytest.mark.parametrize("native", [pytest.param(True, marks=needs_native), False],
+                         ids=["native", "reference"])
+def test_corrupt_or_mis_sized_lzf_raises(native):
+    imagecodecs = pytest.importorskip("imagecodecs")
+    data = _payloads()["image_u16"]
+    packed = bytes(imagecodecs.lzf_encode(data.tobytes(), header=False))
+    with pytest.raises(CorruptFileError):                       # truncated
+        _codecs.lzf_decompress_into(packed[:len(packed) // 2], np.empty_like(data), native=native)
+    with pytest.raises(CorruptFileError):                       # output too small
+        _codecs.lzf_decompress_into(packed, np.empty(data.size - 1, data.dtype), native=native)
+    with pytest.raises(CorruptFileError):                       # output too large
+        _codecs.lzf_decompress_into(packed, np.empty(data.size + 1, data.dtype), native=native)
+    with pytest.raises(CorruptFileError):                       # a reference before the start
+        _codecs.lzf_decompress_into(b"\x20\x05", np.empty(3, np.uint8), native=native)
+
+
 def test_pure_python_packbits_matches_native():
     """The last-resort PackBits decoder (no native module, no imagecodecs)
     against the native one, on runs, literals and the -128 no-op."""

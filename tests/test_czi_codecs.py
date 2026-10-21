@@ -3,6 +3,8 @@ payloads encoded by imagecodecs (test-only) -- rule: support every codec an
 accepted format can contain, whether or not our real data has it."""
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
@@ -138,14 +140,14 @@ def decoders(request, monkeypatch):
 def test_every_compression_decodes(tmp_path, name, decoders):
     path, expected, tol, code = _write(tmp_path, name)
     with micro_reader.open(path) as img:
-        scene = img.images[0]
+        series = img.images[0]
         assert {s.compression for s in img._level0} == {code}
-        got = scene[0, 0, 0]
+        got = series[0, 0, 0]
         assert got.shape == expected.shape and got.dtype == expected.dtype
         diff = np.abs(got.astype(np.int64) - expected.astype(np.int64))
         assert diff.max() <= tol, f"{name}: max difference {diff.max()} > {tol}"
         # a region inside the tile (drawn from the cached decoded tile)
-        np.testing.assert_allclose(scene[0, 0, 0, 10:30, 20:50], got[10:30, 20:50])
+        np.testing.assert_allclose(series[0, 0, 0, 10:30, 20:50], got[10:30, 20:50])
 
 
 @pytest.mark.parametrize("name", ["jpegxr_gray16", "jpegxr_rgb"])
@@ -168,3 +170,25 @@ def test_vendor_raw_is_refused_clearly(tmp_path):
                           compression=150, payload=raw_payload(_gray("u2")))])
     with pytest.raises(UnsupportedFormatError, match="camera RAW"):
         micro_reader.open(path)
+
+
+def test_refused_file_leaves_nothing_open(tmp_path):
+    """A grey and a colour channel are refused (channels of different grey pixel
+    types are read since 2026-10-18: a whole in the wider type, exact parts); the
+    refusal closes the file: no ResourceWarning, and it can be deleted at once
+    (Windows refuses to delete a file that is still open)."""
+    import gc
+    import warnings
+    path = str(tmp_path / "gray8_bgr24.czi")
+    write_czi(path, [dict(plane={"C": 0}, x=0, y=0, height=H, width=W, dtype="u1", compression=0,
+                          payload=raw_payload(_gray("u1"))),
+                     dict(plane={"C": 1}, x=0, y=0, height=H, width=W, dtype="u1", samples=3,
+                          compression=0, payload=raw_payload(np.zeros((H, W, 3), np.uint8)))])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for plates in (False, True):                 # plates=True reads the XML first
+            with pytest.raises(UnsupportedFormatError, match="pixel types"):
+                micro_reader.open(path, plates=plates)
+        gc.collect()
+    assert not [w for w in caught if issubclass(w.category, ResourceWarning)]
+    os.remove(path)

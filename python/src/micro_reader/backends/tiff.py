@@ -23,12 +23,12 @@ plane (PLAN.md, "M1 design").
 Images and axes (docs/AXES.md): the array axes ``T C Z Y X S`` keep the
 series' own order (lower case; EER frames ``I`` are ``t``).  Every other
 tifffile axis makes separate images, indexed by: ``A`` (angle) view, ``R`` /
-``M`` / ``J K`` tile, LSM positions ``P`` scene, ``P`` (phase) phase, ``H``
+``M`` / ``J K`` tile, LSM positions ``P`` series, ``P`` (phase) phase, ``H``
 lifetime, ``E`` (lambda) emission, and ``I`` / ``Q`` / ``L`` / ``V`` (sequence,
 other, exposure, event) sequence; several letters of one index are counted
 as one (raveled).  ``open(path, rename={"sequence": "z"})`` reads such a
-dimension as an axis instead (plain multi-page TIFFs).  Each series is a
-scene otherwise.  Images of one series share its file handles and
+dimension as an axis instead (plain multi-page TIFFs).  Each tifffile series
+is a series (index) otherwise.  Images of one series share its file handles and
 decoded-segment cache.
 
 Resolution levels (OME-TIFF SubIFDs, SVS / NDPI-style pyramids: tifffile's
@@ -38,7 +38,7 @@ Resolution levels (OME-TIFF SubIFDs, SVS / NDPI-style pyramids: tifffile's
 Variants (``_tiff_variants``): whole-slide files (SVS, SCN, BIF, QPTIFF,
 Philips) list the series Bio-Formats lists, associated images named in
 lower case; Ventana BIF scans are composed from their overlapping tiles.
-Micro-Manager MMStack / NDTiff stage positions (``R``) are scenes, and their
+Micro-Manager MMStack / NDTiff stage positions (``R``) are series, and their
 series may span several files (uncompressed pages, each read from its file).
 
 Not yet: volumetric tiles (ImageDepth), OME series spread over several files.
@@ -46,7 +46,9 @@ Not yet: volumetric tiles (ImageDepth), OME series spread over several files.
 from __future__ import annotations
 
 import builtins
+import contextlib
 import itertools
+import logging
 import os
 import re
 import struct
@@ -58,7 +60,7 @@ import numpy as np
 from .. import _codecs, _jpeg_restarts, _memory, _parts, _pool, _stream
 from . import _tiff_variants
 from .._base import INDEX_NAMES, File, Image
-from .._errors import (CorruptFileError, MicroReaderError, MissingImagesWarning,
+from .._errors import (CorruptFileError, MicroReaderError, MissingImagesWarning, OpenInstead,
                        UnsupportedFormatError)
 from .._io import DecodeCache, ThreadHandles
 
@@ -67,7 +69,7 @@ MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")   # classic and BigTIFF
 CHUNK_BYTES = 4 << 20            # buffered raw rows are read this many bytes at a time
 RAW_TASK_BYTES = 8 << 20         # uncompressed strip runs are split into pool tasks of this size
 SEPARATE_READ_BYTES = 32 << 10   # bytes worth skipping rather than issuing one more read
-DECODE_CACHE_BYTES = 64 << 20    # decoded segments kept per scene
+DECODE_CACHE_BYTES = 64 << 20    # decoded segments kept per series
 STREAM_PIECE_BYTES = 8 << 20     # rows of a streamed segment decoded at a time (reserved)
 #: image codecs that decode a rectangle alone (``_area_into``)
 AREA_DECODERS = {"jpeg2k": _codecs.jpeg2k_decode_area_into, "jxl": _codecs.jxl_decode_area_into}
@@ -144,6 +146,30 @@ def own_codec(key):
     return None
 
 
+def _layout(page) -> tuple:
+    """How a page stores its pixels -- what decoding it as another page assumes:
+    compression, predictor, tiles or strips, sample type and arrangement."""
+    tiled = bool(page.is_tiled)
+    return (int(page.compression), int(page.predictor), tiled,
+            (page.tilelength, page.tilewidth) if tiled else page.rowsperstrip,
+            str(page.dtype), page.samplesperpixel, int(page.planarconfig), page.bitspersample,
+            int(page.fillorder))
+
+
+class _Scatter:
+    """The destination of a segment several cells of a composed level need
+    (``_merge_decodes``): assigning it the rows and columns all of them span
+    copies each its own, *targets* ``(destination, rows, cols)``."""
+    __slots__ = ("targets",)
+
+    def __init__(self, targets):
+        self.targets = targets
+
+    def __setitem__(self, key, value):
+        for dst, rows, cols in self.targets:
+            dst[...] = value[rows, cols]
+
+
 def jpeg_colour(key) -> str:
     """How the JPEG segments of *key* store colour (as tifffile decides):
     RGB without JFIF marker is stored untransformed (e.g. Aperio SVS)."""
@@ -196,20 +222,20 @@ def unpredict(seg: np.ndarray, predictor: int) -> np.ndarray:
 
 #: tifffile axis letter -> array axis (docs/AXES.md)
 AXIS_LETTERS = {"X": "x", "Y": "y", "Z": "z", "T": "t", "C": "c", "S": "s"}
-#: tifffile axis letter -> image index (LSM ``P`` is a position: "scene");
+#: tifffile axis letter -> image index (LSM ``P`` is a position: "series");
 #: letters tifffile does not name are "sequence" too
 INDEX_LETTERS = {"A": "view", "R": "tile", "M": "tile", "J": "tile", "K": "tile",
                  "P": "phase", "H": "lifetime", "E": "emission",
                  "I": "sequence", "Q": "sequence", "L": "sequence", "V": "sequence"}
-#: indices besides "scene", in index order
-OTHER_INDICES = tuple(n for n in INDEX_NAMES if n not in ("scene", "resolution"))
+#: indices besides "series", in index order
+OTHER_INDICES = tuple(n for n in INDEX_NAMES if n not in ("series", "resolution"))
 #: this backend can make an index an axis (open(..., rename=...))
 RENAMES = True
 #: this backend can open one file of a multi-file OME-TIFF alone (open(..., multifile=False))
 MULTIFILE = True
 
 
-#: series kinds whose ``R`` is a stage position (a scene, as Bio-Formats lists
+#: series kinds whose ``R`` is a stage position (a series, as Bio-Formats lists
 #: Micro-Manager positions), not a tile
 POSITION_KINDS = ("mmstack", "ndtiff")
 
@@ -227,8 +253,8 @@ def translate_axes(axes: str, *, lsm: bool = False, eer: bool = False, where: st
         elif a == "I" and eer:
             level, letter = None, "t"
         else:
-            scene = (a == "P" and lsm) or (a == "R" and positions)
-            level = "scene" if scene else INDEX_LETTERS.get(a, "sequence")
+            position = (a == "P" and lsm) or (a == "R" and positions)
+            level = "series" if position else INDEX_LETTERS.get(a, "sequence")
             letter = None
             if level in rename:
                 level, letter = None, rename[level]
@@ -360,35 +386,44 @@ class _TiffImage(Image):
                 f"{key.bitspersample}-bit)")
         if key.shaped[1] != 1:
             raise UnsupportedFormatError(f"{where}: volumetric pages (ImageDepth)")
-        if key.axes not in _PAGE_AXES:
-            raise UnsupportedFormatError(f"{where}: page axes {key.axes!r}")
+        page_axes, page_shape = key.axes, tuple(key.shape)
+        if page_axes not in _PAGE_AXES:
+            raise UnsupportedFormatError(f"{where}: page axes {page_axes!r}")
         # tifffile stacks the pages and reshapes them to the series shape, so
         # the pages must be its trailing dimensions.  Only the shapes must
         # match: series metadata may name the page axes differently (e.g. an
         # RGB-planar page 'SYX' labelled 'ZYX').
-        shape, axes, k = tuple(series.shape), series.axes, len(key.shape)
-        if shape[len(shape) - k:] != tuple(key.shape):
+        shape, axes = tuple(series.shape), series.axes
+        if page_axes == "YXS" and page_shape[-1] == 1 and                 shape[len(shape) - 2:] == page_shape[:2] and not axes.endswith("S"):
+            # one sample the series leaves out (a NanoZoomer S20MD's Map page:
+            # photometric RGB with one sample per pixel): read as 'YX'
+            page_axes, page_shape = "YX", page_shape[:2]
+        k = len(page_shape)
+        if shape[len(shape) - k:] != page_shape:
             raise UnsupportedFormatError(
                 f"{where}: pages ({key.axes} {key.shape}) do not map onto the "
                 f"trailing axes of the series ({axes} {shape})")
         #: where the tiles are placed (Ventana BIF, ``_tiff_variants``); None: the grid
         self._layout = getattr(series, "layout", None)
         if self._layout is not None:
-            x = len(shape) - k + key.axes.index("X")
+            x = len(shape) - k + page_axes.index("X")
             shape = shape[:x] + (self._layout.width,) + shape[x + 1:]
+            if self._layout.height is not None:                   # iScan BIF: areas
+                y = len(shape) - k + page_axes.index("Y")
+                shape = shape[:y] + (self._layout.height,) + shape[y + 1:]
 
         self._tif = tif
         self._series = series
         self._key = key
         self._path = tif.filehandle.path
         self._lead_shape = shape[:len(shape) - k]
-        self._page_pos = _PAGE_AXES[key.axes]
+        self._page_pos = _PAGE_AXES[page_axes]
         self._sep, _, self._length, self._width, self._contig = key.shaped
         self._file_dtype = np.dtype(key.dtype).newbyteorder(tif.byteorder)
         self._raw = (key.compression == 1 and key.predictor == 1 and key.fillorder == 1
                      and not key.is_subsampled and key.sampleformat != 5
                      and key.bitspersample == 8 * self._file_dtype.itemsize)
-        self._as_normalised = _AS_NORMALISED[key.axes]
+        self._as_normalised = _AS_NORMALISED[page_axes]
         self._tiled = bool(key.is_tiled)
         if self._tiled:
             self._seg_rows, self._seg_cols = key.tilelength, key.tilewidth
@@ -398,6 +433,7 @@ class _TiffImage(Image):
         self._segs_across = -(-self._width // self._seg_cols)     # as stored
         #: the value of missing pages and segments
         self._nodata = key.nodata
+        self._stored_width = self._width
         if self._layout is not None:
             self._width = self._layout.width                      # as composed
             if self._layout.fill is not None:
@@ -409,12 +445,23 @@ class _TiffImage(Image):
         npages = int(np.prod(self._lead_shape, dtype=np.int64))
         self._page_bytes = int(np.prod(key.shaped, dtype=np.int64)) * self._file_dtype.itemsize
         self._contiguous = None
+        #: pages the file holds; the series' metadata may name more (an acquisition
+        #: stopped early: those read as zeros, with a MissingImagesWarning)
+        self._stored = len(series.pages)
         if npages > len(series.pages):
-            if series.dataoffset is None or not self._raw:
-                raise UnsupportedFormatError(f"{where}: truncated series that is not contiguous")
-            if os.path.getsize(self._path) < series.dataoffset + npages * self._page_bytes:
-                raise CorruptFileError(f"{where}: truncated file")
-            self._contiguous = series.dataoffset
+            if series.dataoffset is not None and self._raw:
+                if os.path.getsize(self._path) < series.dataoffset + npages * self._page_bytes:
+                    raise CorruptFileError(f"{where}: truncated file")
+                self._contiguous = series.dataoffset
+                self._stored = npages
+            elif share is None:
+                # the file itself is whole (a cut file fails at open, _check_complete):
+                # the writer stopped before the planes its metadata announced
+                # (ScanImage: 3 of 24 frames), as an aborted NDTiff is read
+                warnings.warn(MissingImagesWarning(
+                    f"{where}: the file holds {len(series.pages)} of the {npages} planes its "
+                    f"metadata names (an acquisition stopped early?): the other "
+                    f"{npages - len(series.pages)} read as zeros"), stacklevel=4)
 
         if share is None:                      # the first image of this series
             #: page -> (offsets, bytecounts, jpegtables, handles of its file) | None
@@ -473,12 +520,24 @@ class _TiffImage(Image):
                     shift = self._contiguous + p * self._page_bytes - key.dataoffsets[0]
                     entry = ([o + shift for o in key.dataoffsets], key.databytecounts, None,
                              self._handles)
+                elif p >= self._stored:
+                    entry = None                   # named by the metadata, never written
                 else:
                     page = self._series.pages[p]       # parses the IFD on first access
+                    handles = None if page is None else self._handles_of(page)
+                    if handles is not None and handles is not self._handles:
+                        # a page of another file is decoded as the key page is: it must
+                        # be stored the same way (else its bytes read as wrong pixels)
+                        theirs = _layout(getattr(page, "keyframe", None) or page)
+                        if theirs != _layout(key):
+                            raise UnsupportedFormatError(
+                                f"{os.path.basename(self._path)!r}: page {p} of this series, in "
+                                f"{os.path.basename(handles.path)!r}, is stored differently "
+                                f"({theirs}) from the series' first page ({_layout(key)}): a "
+                                f"series spread over files stored differently is not supported yet")
                     entry = None if page is None else (
                         page.dataoffsets, page.databytecounts,
-                        getattr(page, "jpegtables", None) or key.jpegtables,
-                        self._handles_of(page))
+                        getattr(page, "jpegtables", None) or key.jpegtables, handles)
                 self._pages[p] = entry
             return self._pages[p]
 
@@ -550,6 +609,9 @@ class _TiffImage(Image):
             dest[...] = self._nodata
             return
         layout = self._layout
+        if layout is not None and layout.areas:
+            self._plan_areas(p, entry, ss, ys, xs, cs, dest, raws, decodes)
+            return
         if layout is None or not layout.pieces:
             self._plan_stored(p, entry, ss, ys, xs, cs, dest, raws, decodes)
             return
@@ -566,6 +628,59 @@ class _TiffImage(Image):
                 self._plan_stored(p, entry, ss, slice(y0, y1),
                                   slice(stored + x0 - composed, stored + x1 - composed),
                                   cs, part, raws, decodes)
+
+    def _plan_areas(self, p, entry, ss, ys, xs, cs, dest, raws, decodes) -> None:
+        """``_plan_page`` for a level composed of areas of tile cells (iScan
+        BIF, ``TileLayout.areas``): the fill value first, then each cell's
+        part from its stored pixels.  A segment several cells need (lower
+        levels: one stored tile holds many cells) is decoded once."""
+        dest[...] = self._nodata
+        mine = []
+        for area in self._layout.areas:
+            rows = [c for c in area.rows if c[0] < ys.stop and c[1] > ys.start]
+            if not rows:
+                continue
+            cols = [c for c in area.cols if c[0] < xs.stop and c[1] > xs.start]
+            for r0, r1, sr in rows:
+                y0 = max(ys.start, r0)
+                y1 = min(ys.stop, r1, r0 + self._length - sr)       # within the stored level
+                if y0 >= y1:
+                    continue
+                for c0, c1, sc in cols:
+                    x0 = max(xs.start, c0)
+                    x1 = min(xs.stop, c1, c0 + self._stored_width - sc)
+                    if x0 >= x1:
+                        continue
+                    part = dest[:, y0 - ys.start:y1 - ys.start, x0 - xs.start:x1 - xs.start]
+                    self._plan_stored(p, entry, ss, slice(sr + y0 - r0, sr + y1 - r0),
+                                      slice(sc + x0 - c0, sc + x1 - c0), cs, part, raws, mine)
+        decodes.extend(self._merge_decodes(mine))
+
+    def _merge_decodes(self, decodes) -> list:
+        """*decodes* with the jobs of one segment made one: decoded once, its
+        rows and columns of every job copied to each job's destination
+        (``_Scatter``).  Segments decoded in parts (too large for the memory
+        budget) keep their jobs."""
+        groups: dict = {}
+        for job in decodes:
+            groups.setdefault((job[0], job[1]), []).append(job)
+        out = []
+        for jobs in groups.values():
+            rows, cols, samples = self._segment_shape(jobs[0][1])
+            if len(jobs) == 1 or _memory.should_stream(
+                    rows * cols * samples * self._file_dtype.itemsize):
+                out.extend(jobs)
+                continue
+            r0 = min(j[6][1].start for j in jobs)
+            r1 = max(j[6][1].stop for j in jobs)
+            c0 = min(j[6][2].start for j in jobs)
+            c1 = max(j[6][2].stop for j in jobs)
+            targets = [(j[5], slice(j[6][1].start - r0, j[6][1].stop - r0),
+                        slice(j[6][2].start - c0, j[6][2].stop - c0)) for j in jobs]
+            p, i, offset, count, jpegtables, _, part = jobs[0]
+            out.append((p, i, offset, count, jpegtables, _Scatter(targets),
+                        (part[0], slice(r0, r1), slice(c0, c1), part[3])))
+        return out
 
     def _plan_stored(self, p, entry, ss, ys, xs, cs, dest, raws, decodes) -> None:
         """``_plan_page`` for rows *ys* and columns *xs* of page *p* as stored."""
@@ -923,7 +1038,9 @@ class _TiffFile(File):
 
     def close(self) -> None:
         super().close()
-        for image in self.images:
+        # every image's handles: also levels resolutions="base" leaves out of
+        # images, and the native image behind an axes view (``_every_image``)
+        for image in self._every_image():
             getattr(image, "_release", lambda: None)()
         self._tif.close()
 
@@ -962,15 +1079,15 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
         for pos, level in enumerate(frame):
             if level and s.shape[pos] > 1:
                 by_level.setdefault(level, []).append(pos)
-        levels.update(level for level in by_level if level != "scene")
+        levels.update(level for level in by_level if level != "series")
         plans.append((s, letters, frame, by_level))
     levels = [level for level in OTHER_INDICES if level in levels]
-    if tiles == "stitched" and "tile" in levels:
+    if tiles == "mosaic" and "tile" in levels:
         raise UnsupportedFormatError(
-            f"{path!r}: tiles='stitched': micro-reader does not compose TIFF tiles "
+            f"{path!r}: tiles='mosaic': micro-reader does not compose TIFF tiles "
             "(each tile is its own image)")
     listed = resolutions == "all"
-    images, scene = [], 0
+    images, first_series = [], 0
     for n, (s, letters, frame, by_level) in enumerate(plans):
         positions = [pos for pos, level in enumerate(frame) if level]
         varying = [pos for pos in positions if s.shape[pos] > 1]
@@ -979,11 +1096,11 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
         lower = [lv for lv in list(getattr(s, "levels", None) or [s])[1:]
                  if len(lv.shape) == len(s.shape) and lv.axes == s.axes]
         level_first: dict = {}
-        scenes_here = int(np.prod([s.shape[p] for p in by_level.get("scene", [])]))
+        series_here = int(np.prod([s.shape[p] for p in by_level.get("series", [])]))
         for values in itertools.product(*(range(s.shape[p]) for p in varying)):
             fixed = {pos: 0 for pos in positions}
             fixed.update(zip(varying, values))
-            key = {"scene": scene + _ravel(fixed, by_level.get("scene", []), s.shape)}
+            key = {"series": first_series + _ravel(fixed, by_level.get("series", []), s.shape)}
             for level in levels:
                 key[level] = _ravel(fixed, by_level.get(level, []), s.shape)
             if listed:
@@ -1005,7 +1122,7 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
             if len(pyramid) > 1:
                 for member in pyramid:
                     member._resolutions = pyramid
-        scene += scenes_here
+        first_series += series_here
     images = _without_missing(images, path)
     images.sort(key=lambda im: tuple(im.index.values()))
     meta_cache: dict = {}                      # metadata parsed once per file
@@ -1089,6 +1206,105 @@ def _ravel(fixed: dict, positions: list, shape) -> int:
 #: pages (its OME-XML may even list planes in other files: tifffile would open them)
 PLAIN_PAGES = {"is_ome": False, "is_imagej": False, "is_shaped": False}
 
+#: what tifffile logs when a file ends before what it points to: it then drops the tag or the
+#: page and goes on, so a cut file would read as a smaller image, or its pages as plain
+#: pages, with no error.  ("MMStack is missing N pages" is not one: it is also a missing file
+#: of a set, which is read with a warning.)
+_TRUNCATED = re.compile(r"invalid value offset|invalid (page )?offset|invalid offset to page|"
+                        r"missing data offset tag|corrupted IFD structure")
+
+
+class _TiffLog(logging.Handler):
+    """tifffile's warnings logged by one thread."""
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.thread, self.messages = threading.get_ident(), []
+        self.tif = None                  # the TiffFile to close when the guard raises
+
+    def emit(self, record):
+        if record.thread == self.thread:
+            self.messages.append(record.getMessage())
+
+    def truncated(self):
+        return next((m for m in self.messages if _TRUNCATED.search(m)), None)
+
+
+@contextlib.contextmanager
+def _truncation_guard(path: str):
+    """Turn what a cut TIFF does to tifffile into ``CorruptFileError``: the warnings it
+    logs while the file is opened, and the errors those leave behind (an ``IndexError``
+    or ``KeyError`` on a dropped tag, ``TiffFileError`` on a page read later).  The
+    end-of-file checks (``_check_complete``, ``_check_extent``) do not need the log, so
+    an application that raises tifffile's log level above WARNING keeps most of this."""
+    import tifffile
+    log = _TiffLog()
+    logger = logging.getLogger("tifffile")
+    logger.addHandler(log)
+    try:
+        yield log
+        found = log.truncated()
+        if found:
+            raise CorruptFileError(f"{path!r}: {found} (truncated file?)")
+    except BaseException as exc:
+        if log.tif is not None:
+            log.tif.close()
+        if isinstance(exc, (MicroReaderError, OpenInstead)) or not isinstance(exc, Exception):
+            raise
+        if isinstance(exc, tifffile.TiffFileError):
+            raise CorruptFileError(f"{path!r}: {exc}") from exc
+        found = log.truncated()
+        if found:
+            raise CorruptFileError(f"{path!r}: {found} (truncated file?)") from exc
+        raise
+    finally:
+        logger.removeHandler(log)
+
+
+def _check_complete(tif, path: str) -> None:
+    """Raise ``CorruptFileError`` when *tif* lost pages to a truncation: no page
+    could be read, or the last page tifffile read points to a next one past the
+    end of the file (tifffile logs it and stops there, so a cut file would read
+    as a smaller image, with no error)."""
+    size = tif.filehandle.size
+    try:
+        n = len(tif.pages)
+    except Exception as exc:                                     # noqa: BLE001 - any parse failure
+        raise CorruptFileError(f"{path!r}: the page directory cannot be read ({exc}); "
+                               "truncated file?") from exc
+    if n == 0:
+        raise CorruptFileError(f"{path!r}: no page can be read (truncated file?)")
+    fmt, at = tif.tiff, tif.pages[-1].offset
+    fh = tif.filehandle
+    try:
+        fh.seek(at)
+        count = struct.unpack(fmt.tagnoformat, fh.read(fmt.tagnosize))[0]   # formats carry the byte order
+        fh.seek(at + fmt.tagnosize + count * fmt.tagsize)
+        raw = fh.read(fmt.offsetsize)
+    except (OSError, struct.error) as exc:
+        raise CorruptFileError(f"{path!r}: the last page's directory ends early (truncated file?)") from exc
+    if len(raw) != fmt.offsetsize:
+        raise CorruptFileError(f"{path!r}: the last page's directory ends early (truncated file?)")
+    following = struct.unpack(fmt.offsetformat, raw)[0]
+    if following >= size:
+        raise CorruptFileError(f"{path!r}: page {n} is past the end of the file (byte {following} "
+                               f"of {size}): truncated file?")
+
+
+def _check_extent(series, path: str) -> None:
+    """Raise ``CorruptFileError`` when the last page of a series (or of one of its
+    levels) has data past the end of its file: the file was cut after its pages
+    were written.  Earlier pages are checked when they are read."""
+    for level in getattr(series, "levels", None) or [series]:
+        page = next((p for p in reversed(level.pages) if p is not None), None)
+        if page is None:
+            continue
+        size = page.parent.filehandle.size           # a series may span several files
+        ends = [o + c for o, c in zip(page.dataoffsets, page.databytecounts) if c]
+        if ends and max(ends) > size:
+            raise CorruptFileError(f"{page.parent.filehandle.path!r}: pixel data ends early, at "
+                                   f"byte {size} of {max(ends)} (truncated file?)")
+
 
 def open_pages(path: str) -> _TiffFile:
     """*path* as plain pages, whatever its own metadata says: for the members of
@@ -1100,11 +1316,10 @@ def open_pages(path: str) -> _TiffFile:
     except ImportError as exc:
         raise MicroReaderError(
             "reading TIFF needs tifffile, a dependency of micro-reader: pip install tifffile") from exc
-    try:
-        tif = tifffile.TiffFile(path, **PLAIN_PAGES)
-    except tifffile.TiffFileError as exc:
-        raise CorruptFileError(f"{path!r}: {exc}") from exc
-    return pages_file(tif, path)
+    with _truncation_guard(path) as guard:
+        tif = guard.tif = tifffile.TiffFile(path, **PLAIN_PAGES)
+        _check_complete(tif, path)
+        return pages_file(tif, path)
 
 
 def plain_pages(tif) -> bool:
@@ -1120,6 +1335,8 @@ def pages_file(tif, path: str) -> _TiffFile:
         series = list(tif.series)
         if not series:
             raise CorruptFileError(f"{path!r} contains no image series")
+        for s in series:
+            _check_extent(s, path)
         images = _images(tif, series, path, "separate", "base", {"sequence": "z"})
         pages = {}
         for image in images:
@@ -1141,15 +1358,26 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa:
     except ImportError as exc:
         raise MicroReaderError(
             "reading TIFF needs tifffile, a dependency of micro-reader: pip install tifffile") from exc
+    with _truncation_guard(path) as guard:
+        tif = guard.tif = tifffile.TiffFile(path)
+        return _open(tif, path, tiles, resolutions, rename, companion, multifile)
+
+
+def _open(tif, path, tiles, resolutions, rename, companion, multifile) -> _TiffFile:
+    """``open`` of an open *tif*; closes it on error."""
     try:
-        tif = tifffile.TiffFile(path)
-    except tifffile.TiffFileError as exc:
-        raise CorruptFileError(f"{path!r}: {exc}") from exc
-    try:
+        _check_complete(tif, path)
         if companion and tif.is_ome:
-            # a BinaryOnly stub: its metadata is in an OME companion (docs/COMPANION.md,
-            # CO-2); companion=False (internal: file sets, whose index file decides) skips it
+            # a BinaryOnly stub: its metadata is in an OME companion or another OME-TIFF
+            # (docs/COMPANION.md); companion=False (internal: file sets, whose index file
+            # decides) skips it.  multifile=True opens the set: the metadata file, as if it
+            # had been opened; multifile=False this file, with that file's metadata (CO-2).
+            # Not Micro-Manager stacks: their files are split by size (see owner).
             from . import companion
+            if multifile and not tif.is_micromanager:
+                target = companion.metadata_file_of(path, tif)
+                if target is not None:
+                    raise OpenInstead(target)
             view = companion.member_view(path, tif)    # takes over *tif* when it is one
             if view is None and not multifile and not tif.is_micromanager:
                 # a multi-file OME-TIFF: only the planes this file holds (not a
@@ -1157,6 +1385,24 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa:
                 view = companion.single_file_view(path, tif)
             if view is not None:
                 return view
+        first = tif.pages[0]
+        if first.description.startswith("[ImarisDataSet]") and first.subfiletype & 1:
+            # Imaris 3 (.ims before the HDF5 format): an RGB thumbnail (a reduced image),
+            # then the planes in an order its description defines; read as a plain TIFF it
+            # gives the wrong images.  Imaris's TIFF export writes the same description on
+            # full-size planes: those are plain TIFFs
+            raise UnsupportedFormatError(
+                f"{path!r}: Imaris 3 file (a TIFF with an '[ImarisDataSet]' description) is not "
+                "supported yet; Imaris 5 files (HDF5) are")
+        if first.tags.get(65200) is not None and (path.lower().endswith(".flex") or len(tif.pages) > 1):
+            # PerkinElmer Opera Flex (the FlexXML tag, several pages): its pages are the fields,
+            # time points and channels of a well, which only that XML orders; read as a plain
+            # TIFF they would be loose pages (decided 2026-10-18: refuse until a Flex backend
+            # exists).  Harmony and Columbus planes carry the tag too, one plane per file:
+            # those are plain TIFFs (the members of their plates)
+            raise UnsupportedFormatError(
+                f"{path!r}: PerkinElmer Opera Flex file (a TIFF with a FlexXML tag) is not "
+                "supported yet")
         series = list(tif.series)
         if tif.is_lsm:
             # Zeiss LSM stores a small RGB preview of every plane (reduced
@@ -1167,6 +1413,8 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa:
         series = _tiff_variants.select(tif, series)
         if not series:
             raise CorruptFileError(f"{path!r} contains no image series")
+        for s in series:
+            _check_extent(s, path)
         images = _images(tif, series, path, tiles, resolutions, rename)
     except BaseException:
         tif.close()
