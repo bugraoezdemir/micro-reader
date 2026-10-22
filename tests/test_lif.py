@@ -285,3 +285,181 @@ def test_one_metre_per_pixel_is_index_space(tmp_path):
         assert set(fast.metadata.pixel_sizes) == {"x", "y"}
         assert phasor.metadata.pixel_sizes == {}
         np.testing.assert_array_equal(phasor[...].reshape(plot.shape), plot)
+
+
+# -- coordinate systems (plan 4.4, 4.14, 4.15) ----------------------------------------------
+
+#: a FILETIME (2019-07-19, as in a real SP8 file) and one hour in its ticks
+T0, HOUR = 0x1d53e3b64eca2c0, 3600 * 10 ** 7
+SERIAL = "8100000388"
+
+
+def _run_id(clock_seq=0x04b5, node=0xeccd6d7240e6):
+    """A version-1 UniqueID of one LAS X run (its PC and clock sequence)."""
+    import uuid
+    return str(uuid.uuid1(node=node, clock_seq=clock_seq))
+
+
+def _placed(name, x_um, *, start=T0, serial=SERIAL, run=None, stamps=True, **kwargs):
+    """An image element with a stage position (*x_um*, 0) and what ties it to a
+    session: the microscope's serial, the run's UniqueID (*run* False: none),
+    two time stamps from *start* (*stamps* False: none)."""
+    setting = {"StagePosX": x_um * 1e-6, "StagePosY": 0.0}
+    if serial is not None:
+        setting["SystemSerialNumber"] = serial
+    return image(name, _ints((1, 1, 1, 8, 9), "u1"), setting=setting,
+                 unique_id=_run_id() if run is None else run or None,
+                 timestamps=[int(start), int(start) + 10 ** 7] if stamps else None, **kwargs)
+
+
+@pytest.fixture
+def metadata_reads(monkeypatch):
+    """How often a LIF image's ``_read_metadata`` ran."""
+    from micro_reader.backends import lif as lif_backend
+    count = [0]
+    real = lif_backend._LifImage._read_metadata
+
+    def counting(self):
+        count[0] += 1
+        return real(self)
+    monkeypatch.setattr(lif_backend._LifImage, "_read_metadata", counting)
+    return count
+
+
+def _systems(path, metadata_reads):
+    """(declared ids, each image's system) of a LIF, checking every invariant,
+    that declaring reads no metadata, and that the backend's test of which
+    series are placed (``has_position``) agrees with the positions it gives."""
+    from micro_reader._spatial import check_invariants
+    from micro_reader.backends._lif_metadata import has_position
+    metadata_reads[0] = 0
+    with micro_reader.open(path) as f:
+        ids = [s.id for s in f.coordinate_systems]
+        assert metadata_reads[0] == 0                        # declared without metadata
+        assert all(s.axes is None and not s.estimated for s in f.coordinate_systems)
+        assert f.coordinate_transformations == ()
+        check_invariants(f)                                  # I1-I3 on every image
+        for series in sorted({dict.get(i.index, "series") for i in f.images}):
+            images = f.select(series=series)
+            tiles = images[0]._layout.size.get("tile", 1)
+            assert has_position(images[0]._element, tiles) == \
+                any(i.metadata.position for i in images)
+        return ids, [i.metadata.coordinate_system for i in f.images]
+
+
+def test_one_session_is_one_stage_system(tmp_path, metadata_reads):
+    path = str(tmp_path / "a.lif")
+    write_lif(path, [_placed("a", 100.0), _placed("b", 250.0, start=T0 + HOUR),
+                     folder("f", [_placed("c", 400.0, start=T0 + 2 * HOUR)])])
+    assert _systems(path, metadata_reads) == (["stage"], ["stage"] * 3)
+    with micro_reader.open(path) as f:                      # positions as before
+        assert [round(i.metadata.position["x"].value) for i in f.images] == [100, 250, 400]
+
+
+@pytest.mark.parametrize("third", [
+    dict(start=T0 + 3 * HOUR),                              # a break of 2.5 h: another session
+    dict(serial="8100000783"),                              # another microscope
+    dict(run=_run_id(clock_seq=0x2fa5)),                    # another LAS X run
+    dict(run=_run_id(node=0x00506220276f)),                 # another acquisition PC
+], ids=["gap", "serial", "clock_seq", "node"])
+def test_each_session_of_a_file_gets_its_own_system(tmp_path, third, metadata_reads):
+    """Decision K1-2: one system per session, stage-r<k> in series order; the
+    two series of the first session stay in one frame."""
+    path = str(tmp_path / "a.lif")
+    write_lif(path, [_placed("a", 100.0), _placed("b", 250.0, start=T0 + HOUR / 2),
+                     _placed("c", 400.0, **{"start": T0 + HOUR, **third})])
+    assert _systems(path, metadata_reads) == (["stage-r0", "stage-r1"],
+                                              ["stage-r0", "stage-r0", "stage-r1"])
+
+
+@pytest.mark.parametrize("third", [
+    dict(serial=None),                                      # no serial: cannot tell
+    dict(run=False),                                        # no UniqueID: cannot tell
+    dict(run="not-a-uuid"),
+    dict(run="1b4e28ba-2fa1-41d2-883f-0016d3cca427"),       # version 4: no run in it
+    dict(stamps=False),                                     # no time stamps: cannot tell
+], ids=["no_serial", "no_uid", "bad_uid", "uuid4", "no_time"])
+def test_a_series_that_cannot_be_tied_to_a_session_gets_its_own_system(tmp_path, third,
+                                                                      metadata_reads):
+    """Plan 4.15 / 8.17 for that series alone: stage-s<series>; the others keep
+    their session's system."""
+    path = str(tmp_path / "a.lif")
+    write_lif(path, [_placed("a", 100.0), _placed("b", 250.0, start=T0 + HOUR / 2),
+                     _placed("c", 400.0, **{"start": T0 + HOUR, **third})])
+    assert _systems(path, metadata_reads) == (["stage-r0", "stage-s2"],
+                                              ["stage-r0", "stage-r0", "stage-s2"])
+
+
+def test_a_session_split_by_a_gap_and_rejoined_by_its_run_stays_apart(tmp_path, metadata_reads):
+    """Sessions are cut at breaks within one run, then numbered in series order."""
+    path = str(tmp_path / "a.lif")
+    write_lif(path, [_placed("a", 100.0, start=T0 + 5 * HOUR), _placed("b", 250.0),
+                     _placed("c", 400.0, start=T0 + 5.5 * HOUR)])
+    assert _systems(path, metadata_reads) == (["stage-r0", "stage-r1"],
+                                              ["stage-r0", "stage-r1", "stage-r0"])
+
+
+def test_a_break_inside_the_gap_keeps_one_session(tmp_path, metadata_reads):
+    path = str(tmp_path / "a.lif")
+    write_lif(path, [_placed("a", 100.0), _placed("b", 250.0, start=T0 + 1.9 * HOUR)])
+    assert _systems(path, metadata_reads)[0] == ["stage"]
+
+
+def test_unplaced_images_have_no_system_and_do_not_decide(tmp_path, metadata_reads):
+    """An image without a stage position (an analysis result) is unplaced; its
+    time stamps neither split one session nor bridge two."""
+    result = _ints((1, 1, 1, 8, 9), "u1")
+    path = str(tmp_path / "a.lif")
+    write_lif(path, [_placed("a", 100.0), image("result", result, timestamps=[T0 + 9 * HOUR]),
+                     _placed("b", 250.0, start=T0 + HOUR)])
+    assert _systems(path, metadata_reads) == (["stage"], ["stage", None, "stage"])
+    bridged = str(tmp_path / "b.lif")
+    write_lif(bridged, [_placed("a", 100.0),
+                        image("result", result, unique_id=_run_id(),
+                              timestamps=[T0 + int(1.5 * HOUR), T0 + 3 * HOUR]),
+                        _placed("b", 250.0, start=T0 + 3.2 * HOUR)])
+    assert _systems(bridged, metadata_reads) == (["stage-r0", "stage-r1"],
+                                                 ["stage-r0", None, "stage-r1"])
+
+
+def test_a_file_without_positions_declares_no_system(tmp_path, metadata_reads):
+    path, _ = _write(tmp_path, "stack_12bit")
+    assert _systems(path, metadata_reads) == ([], [None])
+
+
+def test_tiles_of_a_swapped_or_flipped_scan_are_unplaced(tmp_path, metadata_reads):
+    """4.4: tile positions of a scan with SwapXY / FlipX / FlipY are in a frame
+    nobody has verified: no position, no system.  An unflagged scan in the
+    same file keeps its tiles' positions."""
+    tiles = _ints((1, 1, 1, 2, 8, 9))
+    grid = [(0, 0, 0.0, 0.0), (1, 0, 1e-4, 0.0)]
+    session = dict(setting={"SystemSerialNumber": SERIAL, "StagePosX": 0.0, "StagePosY": 0.0},
+                   unique_id=_run_id(), timestamps=[T0, T0 + 10 ** 7])
+    for flag in ("SwapXY", "FlipX", "FlipY"):
+        path = str(tmp_path / f"{flag}.lif")
+        write_lif(path, [image("flagged", tiles, "tczmyx", tiles=grid, tile_flags={flag: "1"},
+                               **session),
+                         image("plain", tiles, "tczmyx", tiles=grid, **session)])
+        assert _systems(path, metadata_reads) == (["stage"], [None, None, "stage", "stage"])
+        with micro_reader.open(path) as f:
+            assert all(i.metadata.position == {} for i in f.select(series=0))
+
+
+def test_tiles_share_their_series_system(tmp_path, metadata_reads):
+    """The synthetic tile scan records no microscope or run: one system for
+    its series (4.15), every tile placed in it."""
+    path, _ = _write(tmp_path, "tiles")
+    assert _systems(path, metadata_reads) == (["stage-s0"], ["stage-s0"] * 3)
+
+
+def test_systems_survive_open_with_axes(tmp_path):
+    path = str(tmp_path / "a.lif")
+    write_lif(path, [_placed("a", 100.0), _placed("b", 250.0, start=T0 + HOUR)])
+    with micro_reader.open(path, axes="tczyx") as f:
+        assert [s.id for s in f.coordinate_systems] == ["stage"]
+        assert [i.metadata.coordinate_system for i in f.images] == ["stage", "stage"]
+
+
+def test_lif_is_checked_strictly_by_the_session():
+    import conftest
+    assert "lif" not in conftest.POSITIONS_WITHOUT_A_SYSTEM

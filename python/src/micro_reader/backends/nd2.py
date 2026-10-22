@@ -30,6 +30,7 @@ from .. import _memory, _pool, _stream
 from .._base import File, Image
 from .._errors import CorruptFileError, UnsupportedFormatError
 from .._io import DecodeCache, ThreadHandles
+from .._spatial import CoordinateSystem
 from . import _nd2_legacy as legacy
 from . import _nd2_structure as structure
 
@@ -254,6 +255,12 @@ class _Nd2File(File):
     def __init__(self, path, images, nd2: Nd2Parser):
         super().__init__(path, images)
         self._nd2 = nd2
+
+    def _declare_coordinate_systems(self):
+        # the positions' one stage frame (plan 4.5), when they can have a
+        # position at all: none without the camera-to-stage matrix
+        from ._nd2_metadata import STAGE, placed
+        return (CoordinateSystem(STAGE),) if placed(self._nd2.picture) else ()
 
     def close(self) -> None:
         super().close()

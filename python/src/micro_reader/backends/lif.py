@@ -37,8 +37,13 @@ each of their tiles, rotations and emission / excitation wavelengths
 (lambda scans) is its own image, indexed by ``{"series": n, "tile": m,
 "rotation": r, "emission": l, "excitation": e}`` (an index only where some
 image of the file has more than one; the wavelength of an emission /
-excitation index in the image's ``metadata.index_values``).  Axes: ``t c z
-y x``, and ``s`` for interleaved RGB -- ordered R, G, B by the
+excitation index in the image's ``metadata.index_values``).  Positions
+are in one coordinate system, ``stage``, when the file's placed images come
+from one microscope, one LAS X run and one session; a file of several
+sessions gives each its own, ``stage-r<k>``, and a series that records too
+little to tell gets ``stage-s<series>`` (plan 4.4, 4.14, decision K1-2;
+``_lif_metadata``).  Axes:
+``t c z y x``, and ``s`` for interleaved RGB -- ordered R, G, B by the
 ChannelTags for raw blocks (LAS stores B, G, R), as decoded for image-file
 frames.  Every
 request reads only the rows it needs; a row range is one contiguous read
@@ -77,6 +82,7 @@ from .._base import File, Image
 from .._errors import CorruptFileError, UnsupportedFormatError
 from .. import _parts
 from .._io import DecodeCache, ThreadHandles
+from .._spatial import CoordinateSystem
 from . import raster
 
 NAME = "lif"
@@ -372,13 +378,37 @@ class _Layout:
                           for a in self.stride if self.size.get(a, 1) > 1)
 
 
+class _StageFrames:
+    """The coordinate system of each series' positions, decided once for the
+    file (``_lif_metadata.stage_systems``) on first use: when the file
+    declares its systems or an image reads its metadata, whichever comes
+    first.  Reads only the XML opening parsed."""
+
+    def __init__(self, elements: list):
+        self._elements = elements             # per series: (XML element, tiles)
+        self._ids = None
+        self._lock = threading.Lock()
+
+    def ids(self) -> list:
+        """Per series: its system's id, or None when it has no position."""
+        with self._lock:
+            if self._ids is None:
+                from ._lif_metadata import stage_systems
+                self._ids = stage_systems(self._elements)
+                self._elements = None
+            return self._ids
+
+
 class _LifImage(Image):
     """One tile / rotation of one Leica image."""
 
-    def __init__(self, index: int, element, name: str, block, layout: "_Layout", key: dict):
+    def __init__(self, index: int, element, name: str, block, layout: "_Layout", key: dict,
+                 frames: _StageFrames):
         self._layout = layout
         self._block = block
         self._element = element
+        self._frames = frames
+        self._series = key["series"]
         # the tile / rotation of this image: a fixed offset into the block
         self._offset = sum(key.get(level, 0) * layout.stride.get(level, 0)
                            for level in OTHER_INDICES)
@@ -410,7 +440,8 @@ class _LifImage(Image):
     def _read_metadata(self):
         from ._lif_metadata import lif_metadata
         return lif_metadata(self._element, dict(zip(self.axes, self.shape)), self.index,
-                            tiled=self._layout.size.get("tile", 1) > 1)
+                            tiled=self._layout.size.get("tile", 1) > 1,
+                            system=self._frames.ids()[self._series])
 
     def _read_block(self, block):
         if self._closed:
@@ -494,16 +525,25 @@ class _LifFile(File):
                 raise UnsupportedFormatError(
                     f"{path!r}: tiles='mosaic': micro-reader does not compose Leica tiles "
                     "(each tile is its own image; image.metadata.position gives its place)")
+            self._frames = _StageFrames([(element, layout.size.get("tile", 1))
+                                         for (_, element, _, _), layout in zip(entries, layouts)])
             images = []
             for n, ((name, element, block, _), layout) in enumerate(zip(entries, layouts)):
                 for values in itertools.product(*(range(layout.size.get(level, 1))
                                                   for level in levels)):
                     key = {"series": n, **dict(zip(levels, values))}
-                    images.append(_LifImage(len(images), element, name, block, layout, key))
+                    images.append(_LifImage(len(images), element, name, block, layout, key,
+                                            self._frames))
         except BaseException:
             self._close_files()
             raise
         super().__init__(path, images)
+
+    def _declare_coordinate_systems(self):
+        # the systems the series' positions are in (plan 4.4, K1-2): one "stage",
+        # or one "stage-r<k>" per session ("stage-s<series>" for a series that
+        # cannot be tied to one); none when nothing is placed
+        return tuple(CoordinateSystem(i) for i in dict.fromkeys(self._frames.ids()) if i)
 
     # -- reading the file tree ----------------------------------------------------
 

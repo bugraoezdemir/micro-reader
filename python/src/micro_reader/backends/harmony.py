@@ -20,6 +20,9 @@ the index file: micro-reader reads the plate it describes.
   ``PositionZ``, t from ``MeasurementTimeOffset``), channel names and
   main excitation / emission wavelengths, and the position of the field's
   first pixel RELATIVE TO ITS WELL'S CENTRE (``_HarmonyImage._field_position``).
+- Coordinate systems: one per well (``well-B2``; plan 4.9), since positions
+  are relative to the well's centre: ``metadata.coordinate_system`` names
+  the field's well.
 
 The measurement folder is also a composite (docs/COMPOSITE.md): next to
 ``Images/`` it holds ``Assaylayout/`` (the plate map) and ``FFC_Profile/`` (the
@@ -37,7 +40,7 @@ from .._base import File
 from .._errors import CorruptFileError, UnsupportedFormatError
 from .._fileset import Members, PlaneImage, keep_fields
 from .._metadata import Channel, Metadata, quantity
-from .._plate import Plate, Well, layout, row_label
+from .._plate import Plate, Well, layout, row_label, well_system, well_systems
 
 NAME = "harmony"
 #: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
@@ -173,10 +176,12 @@ def _value(e, name, positive=True):
 class _HarmonyImage(PlaneImage):
     """One field; metadata from its planes' ``<Image>`` entries."""
 
-    def __init__(self, *args, entries: dict, **kwargs):
+    def __init__(self, *args, entries: dict, system: str, **kwargs):
         super().__init__(*args, **kwargs)
         #: (t, c, z) position -> its <Image> element (also for missing planes)
         self._entries = entries
+        #: the id of the coordinate system the position is in: its well's (4.9)
+        self._system = system
 
     def _entry(self, t=None, c=None, z=None):
         """A listed plane's <Image> with these positions (None: any), or None."""
@@ -208,8 +213,10 @@ class _HarmonyImage(PlaneImage):
                 name=_text(e, "ChannelName") or None,
                 emission_wavelength=_value(e, "MainEmissionWavelength"),
                 excitation_wavelength=_value(e, "MainExcitationWavelength")))
-        return Metadata(pixel_sizes={a: q for a, q in sizes.items() if q},
-                        position=self._field_position(first, sizes), channels=tuple(channels))
+        position = self._field_position(first, sizes)
+        return Metadata(pixel_sizes={a: q for a, q in sizes.items() if q}, position=position,
+                        coordinate_system=self._system if position else None,
+                        channels=tuple(channels))
 
     def _field_position(self, e, sizes) -> dict:
         """The centre of the field's first pixel, relative to the WELL centre
@@ -291,6 +298,9 @@ class _HarmonyFile(File):
                     for tp, ch, pl in wanted}
         plate_name = _text(plate_e, "Name") or _text(plate_e, "PlateID") or ""
         base = plate_name or os.path.basename(os.path.dirname(folder)) or os.path.basename(path)
+        row_names, column_names = layout(rows, columns, wells_rc, path)
+        plates = [Plate(name=plate_name, rows=row_names, columns=column_names,
+                        wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))]
         images = []
         for (r, c, f) in sorted(kept, key=lambda k: (number[k[:2]], k[2])):
             images.append(_HarmonyImage(
@@ -299,11 +309,15 @@ class _HarmonyFile(File):
                 f"{base} well {row_label(r)}{c + 1} field {f - 1}", unit,
                 {"plate": 0, "acquisition": 0, "well": number[(r, c)], "field": f - 1},
                 # every listed plane's <Image> (metadata), whether its file is there or not
-                entries={position[p]: e for p, e in listed[(r, c, f)].items() if p in position}))
-        row_names, column_names = layout(rows, columns, wells_rc, path)
-        plate = Plate(name=plate_name, rows=row_names, columns=column_names,
-                      wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))
-        super().__init__(path, images, plates=[plate])
+                entries={position[p]: e for p, e in listed[(r, c, f)].items() if p in position},
+                system=well_system(plates, 0, number[(r, c)])))
+        super().__init__(path, images, plates=plates)
+
+    def _declare_coordinate_systems(self):
+        """One system per well (plan 4.9): x / y relative to the well's
+        centre, z as the instrument gives it (``_HarmonyImage._field_position``),
+        so wells share no frame and no edge joins them."""
+        return well_systems(self.plates)
 
     def close(self) -> None:
         super().close()

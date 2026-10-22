@@ -57,6 +57,27 @@ def layout(rows: int, columns: int, wells, where: str) -> tuple:
     return tuple(row_label(r) for r in range(rows)), tuple(str(c + 1) for c in range(columns))
 
 
+def well_system(plates, plate: int, well: int) -> str:
+    """The id of the coordinate system of well *well* of plate *plate*
+    (indices into *plates* and its ``wells``), for backends whose positions
+    are relative to the well's centre (plan 4.9; ids 3.23): ``well-B2``, or
+    ``well-p1-B2`` when *plates* holds several (``p`` + the plate index)."""
+    from ._spatial import system_id
+    name = plates[plate].wells[well].name
+    return system_id("well", *((f"p{plate}", name) if len(plates) > 1 else (name,)))
+
+
+def well_systems(plates) -> tuple:
+    """One ``CoordinateSystem`` per well with images of *plates*, plate by
+    plate in well order (``well_system``'s ids; names "well B2", or "plate 1
+    well B2" with several plates): what a backend of plan 4.9 declares."""
+    from ._spatial import CoordinateSystem
+    several = len(plates) > 1
+    return tuple(CoordinateSystem(well_system(plates, p, w),
+                                  f"{f'plate {p} ' if several else ''}well {well.name}")
+                 for p, plate in enumerate(plates) for w, well in enumerate(plate.wells))
+
+
 @dataclass(frozen=True, eq=False)
 class Field:
     """One field of a well: its field index and its images (full resolution,

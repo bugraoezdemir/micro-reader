@@ -172,3 +172,87 @@ def test_the_map_is_refused_by_name_from_either_file(tmp_path):
     for name in ("Map_A01.oir", "Map_A01.hdf5"):
         with pytest.raises(UnsupportedFormatError, match="FluoView overview map.*Map_A01.hdf5"):
             micro_reader.open(str(tmp_path / name))
+
+
+# -- coordinate systems (plan 4.10, check 4.19) ---------------------------------------
+
+@pytest.fixture
+def metadata_reads(monkeypatch):
+    """How often a tile's or a group mosaic's ``_read_metadata`` ran."""
+    from micro_reader.backends import omp2info
+    count = [0]
+    for cls in (omp2info._Tile, omp2info._TilingMosaic):
+        real = cls._read_metadata
+
+        def counting(self, real=real):
+            count[0] += 1
+            return real(self)
+        monkeypatch.setattr(cls, "_read_metadata", counting)
+    return count
+
+
+def _write_two_groups(folder):
+    """A set of two groups (3 + 2 tiles) at different stage corners."""
+    path, _ = _write_set(folder)
+    xml = open(path, encoding="utf-8").read()
+    second = ("<matl:group><matl:areaInfo><matl:numOfXAreas>2</matl:numOfXAreas>"
+              "<matl:numOfYAreas>1</matl:numOfYAreas><matl:areaLeft>50000.0</matl:areaLeft>"
+              f"<matl:areaTop>20000.0</matl:areaTop><matl:areaWidth>{W * PX * 1000}</matl:areaWidth>"
+              f"<matl:areaHeight>{H * PX * 1000}</matl:areaHeight></matl:areaInfo>"
+              + "".join(f"<matl:area><matl:image>{_tile_name(k)}</matl:image><matl:xIndex>{x}"
+                        "</matl:xIndex><matl:yIndex>0</matl:yIndex></matl:area>"
+                        for k, x in ((4, 0), (5, 1)))
+              + "</matl:group>")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(xml.replace("</matl:properties>", second + "</matl:properties>"))
+    return path
+
+
+@pytest.mark.parametrize("tiles", ["separate", "mosaic"])
+def test_every_group_is_placed_in_one_stage(tmp_path, tiles, metadata_reads):
+    """One ``stage`` for the whole protocol: every tile (or group mosaic) of
+    every group names it, at the index positions; declaring reads no metadata."""
+    from micro_reader._spatial import check_invariants
+    path = _write_two_groups(str(tmp_path))
+    with micro_reader.open(path, tiles=tiles) as f:
+        assert [s.id for s in f.coordinate_systems] == ["stage"]
+        assert f.coordinate_systems[0].axes is None and f.coordinate_transformations == ()
+        assert metadata_reads[0] == 0                   # declared without metadata
+        check_invariants(f)                             # I1-I3 on every image
+        assert [im.index["series"] for im in f.images] == ([0] * 6 + [1] * 2 if tiles == "separate"
+                                                          else [0, 1])
+        for im in f.images:
+            meta = im.metadata
+            assert meta.coordinate_system == "stage" and set(meta.position) == {"x", "y"}
+        last = f.images[-1].metadata.position                 # group 1's first area is at its corner
+        if tiles == "separate":                               # ... and the last one a step along x
+            assert last["x"].to("micrometer").value == pytest.approx(50 + W * PX * 0.95 + PX / 2)
+        else:
+            assert last["x"].to("micrometer").value == pytest.approx(50 + PX / 2)
+        assert last["y"].to("micrometer").value == pytest.approx(20 + PX / 2)
+
+
+def test_tiles_without_a_pixel_size_are_unplaced(tmp_path):
+    """No pixel size, no first pixel to place: position ``{}`` and no system."""
+    from micro_reader._spatial import check_invariants
+    path, _ = _write_set(str(tmp_path), pixel_size=None)
+    with micro_reader.open(path) as f:
+        assert [s.id for s in f.coordinate_systems] == ["stage"]
+        check_invariants(f)
+        assert all(im.metadata.position == {} and im.metadata.coordinate_system is None
+                   for im in f.images)
+
+
+def test_a_tile_opened_alone_has_no_position(tmp_path):
+    """A plain OIR records no stage position (plan 4.12): only the index places it."""
+    _write_set(str(tmp_path))
+    with micro_reader.open(str(tmp_path / _tile_name(0))) as f:
+        assert f.coordinate_systems == ()
+        assert f.images[0].metadata.position == {} and f.images[0].metadata.coordinate_system is None
+
+
+def test_the_docstring_says_the_step_rests_on_one_sample():
+    """Check 4.19 closed as "one sample": the backend says so."""
+    from micro_reader.backends import omp2info
+    doc = " ".join(omp2info.__doc__.split())
+    assert "Derived from one sample only" in doc and "4.19" in doc

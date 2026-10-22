@@ -146,6 +146,10 @@ class Metadata:
     is absent / None."""
     pixel_sizes: dict = field(default_factory=dict)       # axis -> Quantity (x y z t)
     position: dict = field(default_factory=dict)          # axis -> Quantity
+    #: the id of the shared coordinate system ``position`` is in: one of
+    #: ``File.coordinate_systems`` (nominal, ``estimated=False``), set exactly
+    #: when the position is not empty (plan I3); None for an unplaced image
+    coordinate_system: Optional[str] = None
     channels: tuple = ()                                   # Channel per index of c
     #: this image's value of its indices that have one (D5): {"emission":
     #: Quantity(510.0, "nanometer"), "lifetime": Quantity(2.5, "nanosecond")}
@@ -155,6 +159,17 @@ class Metadata:
     #: directions against the image axes) is NOT verified -- so they are not
     #: a ``position``: axis -> Quantity (Bugra, 2026-10-19; MetaMorph)
     stage_position: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.coordinate_system is not None and not self.position:
+            raise ValueError(f"Metadata: coordinate_system={self.coordinate_system!r} with an "
+                             "empty position: an image is placed exactly when it has both "
+                             "(plan I3); give the position, or coordinate_system=None")
+
+    def unplaced(self) -> "Metadata":
+        """This metadata without a position: ``position`` empty and
+        ``coordinate_system`` None, the rest kept."""
+        return replace(self, position={}, coordinate_system=None)
 
     def scaled(self, factors: dict) -> "Metadata":
         """This metadata for a resolution level whose pixels are *factors*

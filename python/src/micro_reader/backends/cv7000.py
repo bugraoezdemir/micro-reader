@@ -24,6 +24,7 @@ micro-reader reads the measurement in that folder.
   plane's Z.  The CV7000's own Harmony-format export (``Index.idx.xml``)
   stores the same X / Y / Z, so both routes give the same positions, up to
   the ``.mlf`` truncating X / Y to 0.1 um (checked on idr0088: < 0.1 um).
+  Coordinate systems: one per well, as for Harmony (``well-B2``; plan 4.9).
 - Channels: name = ``Target`` (when it is empty or the software's default
   "Microscope Image": the light source, e.g. "405nm", plus the filter when two
   channels share one), excitation = the light source's wavelength,
@@ -57,7 +58,7 @@ from .._errors import CorruptFileError, UnsupportedFormatError
 from .._fileset import (Members, PlaneImage, check_times, keep_fields, ragged_field,
                         z_parts)
 from .._metadata import Channel, Metadata, color_hex, quantity
-from .._plate import Plate, Well, layout, row_label
+from .._plate import Plate, Well, layout, row_label, well_system, well_systems
 
 NAME = "cv7000"
 #: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
@@ -165,10 +166,12 @@ class _CVImage(PlaneImage):
     keys, *records*: its planes' (t, key, z) -> (X, Y, Z, Time)."""
 
     def __init__(self, *args, info: dict, channels: list, dz, records: dict, times: list,
-                 **kwargs):
+                 system: str, **kwargs):
         super().__init__(*args, **kwargs)
         self._info, self._channels, self._dz = info, channels, dz
         self._records, self._times = records, times
+        #: the id of the coordinate system the position is in: its well's (4.9)
+        self._system = system
 
     def _record(self, t: int, key, z=None):
         """The record of the first listed plane at timepoint *t* of channel *key*."""
@@ -198,8 +201,9 @@ class _CVImage(PlaneImage):
             if first[2] is not None:
                 position["z"] = quantity(first[2], "micrometer", positive=False)
         names = self._info["channels"]
-        return Metadata(pixel_sizes={a: q for a, q in sizes.items() if q},
-                        position={a: q for a, q in position.items() if q is not None},
+        position = {a: q for a, q in position.items() if q is not None}
+        return Metadata(pixel_sizes={a: q for a, q in sizes.items() if q}, position=position,
+                        coordinate_system=self._system if position else None,
                         channels=tuple(names.get(ch, Channel(name=f"Action {act}, Ch {ch}"))
                                        for act, ch in self._channels))
 
@@ -276,26 +280,33 @@ class _CVFile(File):
 
         wells_rc = sorted({(r, c) for r, c, _f in kept})
         number = {rc: n for n, rc in enumerate(wells_rc)}
+        row_names, column_names = layout(rows, columns, wells_rc, path)
+        plates = [Plate(name=plate_name, rows=row_names, columns=column_names,
+                        wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))]
         images = []
         for r, c, f in sorted(kept, key=lambda k: (number[k[:2]], k[2])):
             name = f"{plate_name} well {row_label(r)}{c + 1} field {f - 1}"
             recs = records[(r, c, f)]
+            system = well_system(plates, 0, number[(r, c)])
 
-            def make(planes, shape_tcz, chs, dz, index, readable, name=name, recs=recs):
+            def make(planes, shape_tcz, chs, dz, index, readable, name=name, recs=recs,
+                     system=system):
                 label = name if "part" not in index else f"{name} part {index['part']}"
                 return _CVImage(self._members, len(images), planes,
                                 shape_tcz + tuple(shape_yx), dtype, label, unit, index,
                                 readable=readable, info=info, channels=chs, dz=dz,
-                                records=recs, times=times)
+                                records=recs, times=times, system=system)
 
             images.append(ragged_field(
                 make, kept[(r, c, f)], z_at[(r, c, f)], times, parts,
                 {"plate": 0, "acquisition": 0, "well": number[(r, c)], "field": f - 1}))
-        row_names, column_names = layout(rows, columns, wells_rc, path)
-        plate = Plate(name=plate_name, rows=row_names, columns=column_names,
-                      wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))
-        super().__init__(path, images, plates=[plate])
+        super().__init__(path, images, plates=plates)
         self._folder = folder
+
+    def _declare_coordinate_systems(self):
+        """One system per well (plan 4.9): x / y relative to the well's
+        centre, z as the instrument gives it, so wells share no frame."""
+        return well_systems(self.plates)
 
     def _side_files(self) -> set:
         """The correction files the instrument writes into the measurement folder

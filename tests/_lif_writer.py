@@ -27,17 +27,25 @@ def _dim(dim_id, n, inc, unit="m", length=1e-4):
 
 
 def image(name, data, axes="tczyx", *, resolution=None, data_type=None, rgb=False,
-          tags=None, order=DEFAULT_ORDER, row_pad=0, tiles=None, lengths=None, children=()):
+          tags=None, order=DEFAULT_ORDER, row_pad=0, tiles=None, lengths=None, children=(),
+          setting=None, unique_id=None, timestamps=None, tile_flags=None):
     """One image element.  *data* has *axes* (a subset of t c z l m y x, plus
     s for interleaved colour, samples in R, G, B order); it is stored with
     *order* (fastest first), rows padded by *row_pad* bytes.  *rgb*: store
     the samples B, G, R interleaved in each pixel, tagged 3, 2, 1 (as LAS
     files store colour); *tags* overrides the ChannelTags.  *tiles*:
     [(FieldX, FieldY, PosX, PosY)] for the TileScanInfo attachment.
-    *lengths*: {axis: Length in m} instead of the default 1e-4."""
+    *lengths*: {axis: Length in m} instead of the default 1e-4.
+    *setting*: attributes of the image's confocal setting (a HardwareSetting
+    attachment), e.g. ``StagePosX`` / ``StagePosY`` (m) and
+    ``SystemSerialNumber``; *unique_id*: the element's ``UniqueID``;
+    *timestamps*: FILETIME ticks for its ``TimeStampList``; *tile_flags*:
+    {"SwapXY" / "FlipX" / "FlipY": "1"} on the TileScanInfo attachment."""
     return dict(name=name, data=np.asarray(data), axes=axes, resolution=resolution,
                 data_type=data_type, rgb=rgb, tags=tags, order=order, row_pad=row_pad,
-                tiles=tiles, lengths=lengths or {}, children=list(children))
+                tiles=tiles, lengths=lengths or {}, children=list(children),
+                setting=setting, unique_id=unique_id, timestamps=timestamps,
+                tile_flags=tile_flags or {})
 
 
 def folder(name, children=()):
@@ -108,12 +116,25 @@ def _layout(img):
                        for a in "xyztlm" if a in "xy" or sizes[a] > 1)
     tiles_xml = ""
     if img["tiles"]:
-        tiles_xml = ('<Attachment Name="TileScanInfo" Application="LAS AF" FlipX="0" FlipY="0" '
-                     'SwapXY="0">' + "".join(
+        flags = {"FlipX": "0", "FlipY": "0", "SwapXY": "0", **img.get("tile_flags", {})}
+        tiles_xml = ('<Attachment Name="TileScanInfo" Application="LAS AF" '
+                     + " ".join(f'{k}="{v}"' for k, v in flags.items()) + ">" + "".join(
                          f'<Tile FieldX="{fx}" FieldY="{fy}" PosX="{px}" PosY="{py}"/>'
                          for fx, fy, px, py in img["tiles"]) + "</Attachment>")
+    setting_xml = ""
+    if img.get("setting") is not None:          # as LAS X writes it (SystemTypeName on the attachment)
+        attrs = " ".join(f"{k}={quoteattr(str(v))}" for k, v in img["setting"].items())
+        setting_xml = ('<Attachment Name="HardwareSetting" Application="LAS AF" '
+                       f'SystemTypeName="TCS SP8"><ATLConfocalSettingDefinition {attrs}/>'
+                       "</Attachment>")
+    stamps_xml = ""
+    if img.get("timestamps") is not None:
+        stamps = img["timestamps"]
+        stamps_xml = (f'<TimeStampList NumberOfTimeStamps="{len(stamps)}">'
+                      + " ".join(f"{t:x}" for t in stamps) + "</TimeStampList>")
     xml = (f"<Image TextDescription=\"\"><ImageDescription><Channels>{ch_xml}</Channels>"
-           f"<Dimensions>{dims_xml}</Dimensions></ImageDescription>{tiles_xml}</Image>")
+           f"<Dimensions>{dims_xml}</Dimensions></ImageDescription>{tiles_xml}{setting_xml}"
+           f"{stamps_xml}</Image>")
     return xml, block.tobytes()
 
 
@@ -130,7 +151,8 @@ def write_lif(path, elements, version=2, file_name="test.lif"):
             data_xml = f"<Data>{image_xml}</Data>"
         blocks.append((block_id, raw))
         kids = "".join(element_xml(c) for c in el["children"])
-        return (f"<Element Name={quoteattr(el['name'])} Visibility=\"1\" CopyOption=\"1\">"
+        uid = f" UniqueID={quoteattr(el['unique_id'])}" if el.get("unique_id") else ""
+        return (f"<Element Name={quoteattr(el['name'])} Visibility=\"1\" CopyOption=\"1\"{uid}>"
                 f"{data_xml}<Memory Size=\"{len(raw)}\" MemoryBlockID=\"{block_id}\"/>"
                 f"<Children>{kids}</Children></Element>")
 

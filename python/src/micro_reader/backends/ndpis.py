@@ -146,7 +146,8 @@ class _NdpisImage(Image):
         channels = tuple(Channel() if m is None else
                          Channel(name=m.name, emission_wavelength=quantity(m.wavelength, "nanometer"))
                          for m in self._members)
-        return Metadata(pixel_sizes=base.pixel_sizes, position=base.position, channels=channels)
+        return Metadata(pixel_sizes=base.pixel_sizes, position=base.position,
+                        coordinate_system=base.coordinate_system, channels=channels)
 
     def _member_paths(self) -> set:
         return {m.path for m in self._members if m is not None}

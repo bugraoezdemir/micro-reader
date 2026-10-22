@@ -7,9 +7,16 @@ plain resolution tags.  The first of them a file has is used.
 
 OME ``Plane`` PositionX / PositionY are taken as the centre of the image (as
 Bio-Formats writes them) and moved to the first pixel's centre; without a
-pixel size that cannot be done, and the position is left unknown.  The
-slide formats record the image's top-left corner (SVS ``Left`` / ``Top``,
-SCN view offsets, QPTIFF X/YPosition tags), moved half a pixel inwards.
+pixel size that cannot be done, and the position is left unknown.  They are
+stage readings: such a position is in the file's ``stage`` system (plan 4.6,
+``STAGE``), which OME-TIFF and companion files declare.  ``PositionZ`` is
+no part of it (a companion takes only its z step from it).  The slide
+formats record where an image lies on the slide, in the system ``slide``
+(plan 4.11, ``SLIDE``): the top-left corner (SVS ``Left`` / ``Top``, SCN
+view offsets, a QPTIFF scan's and thumbnail's X/YPosition tags), moved
+half a pixel inwards, or the centre (a QPTIFF overview's and label's
+X/YPosition tags, check 4.20), moved to the first pixel.  An SVS label and
+macro record no position.
 """
 from __future__ import annotations
 
@@ -18,6 +25,7 @@ import re
 import xml.etree.ElementTree as ET
 
 from .._metadata import Channel, Metadata, Quantity, color_hex, quantity
+from .._spatial import system_id
 
 #: OME-XML's default units (schema 2016-06)
 OME_DEFAULT_LENGTH = "µm"
@@ -25,6 +33,9 @@ OME_DEFAULT_TIME = "s"
 OME_DEFAULT_WAVELENGTH = "nm"
 #: TIFF ResolutionUnit -> the unit the resolution counts pixels per
 RESOLUTION_UNITS = {2: "inch", 3: "centimeter"}
+#: the system OME ``Plane`` positions are in (plan 4.6): one stage frame for
+#: every image of an OME-TIFF or a companion set
+STAGE = system_id("stage")
 
 
 def tiff_metadata(image, n_channels: int, cache: dict, resolution_tags: bool = True):
@@ -253,7 +264,8 @@ def ome_image_metadata(element, shape: dict, n_channels: int, index: dict, annot
                        argb: bool = False):
     """The ``Metadata`` an OME ``Image`` element gives, or None without
     ``Pixels``: pixel sizes, time increment, channels, the first plane's stage
-    position, Modulo index values.  Shared by OME-TIFF and companion files.
+    position (in ``STAGE``), Modulo index values.  Shared by OME-TIFF and
+    companion files.
 
     *shape*: axis -> size of the image it describes (positions are moved from
     the field's centre to the first pixel); *index*: that image's index;
@@ -289,6 +301,7 @@ def ome_image_metadata(element, shape: dict, n_channels: int, index: dict, annot
                                            int(e.get("TheC", 0))))
         position = ome_plane_position(first, sizes, shape)
     return Metadata(pixel_sizes=sizes, position=position,
+                    coordinate_system=STAGE if position else None,
                     channels=_channels(channels, n_channels),
                     index_values=_ome_index_values(element, index, annotations))
 
@@ -425,6 +438,13 @@ def _imagej_unit(unit):
 #
 # Each reader gives the slide image's metadata, or None for an image it has
 # nothing for (associated images: the resolution tags apply, as before).
+# Every position they give is on the slide: in ``SLIDE``, which the file
+# declares (``_TiffFile._declare_coordinate_systems``).
+
+#: the system the slide formats' positions are in (plan 4.11): one frame for
+#: every image of an SVS, SCN or QPTIFF file, the slide's
+SLIDE = system_id("slide")
+
 
 def _corner_to_first_pixel(corner: dict, sizes: dict) -> dict:
     """A recorded top-left corner (axis -> Quantity) -> the first pixel's
@@ -435,6 +455,24 @@ def _corner_to_first_pixel(corner: dict, sizes: dict) -> dict:
         if q is not None and size is not None:
             position[axis] = Quantity(q.value + 0.5 * size.to(q.unit).value, q.unit)
     return position
+
+
+def _centre_to_first_pixel(centre: dict, sizes: dict, counts: dict) -> dict:
+    """A recorded centre of the image (axis -> Quantity) -> the first pixel's
+    centre, (n - 1) / 2 pixels back for *counts* n (axis -> pixels); unknown
+    without the pixel size."""
+    position = {}
+    for axis, q in centre.items():
+        size, n = sizes.get(axis), counts.get(axis)
+        if q is not None and size is not None and n:
+            position[axis] = Quantity(q.value - 0.5 * (n - 1) * size.to(q.unit).value, q.unit)
+    return position
+
+
+def _on_slide(position: dict) -> dict:
+    """``Metadata`` keywords for a slide position: *position* and, when it is
+    not empty, its system ``SLIDE`` (I3)."""
+    return {"position": position, "coordinate_system": SLIDE if position else None}
 
 
 def _xml(text):
@@ -450,8 +488,10 @@ def _xml(text):
 
 
 def _svs(image, n_channels: int, cache: dict):
-    """Aperio SVS: ``MPP`` (µm per pixel) and ``Left`` / ``Top`` (mm) in the
-    slide's description, for the slide (not its label / macro)."""
+    """Aperio SVS: ``MPP`` (µm per pixel) and ``Left`` / ``Top`` (mm, the
+    corner on the slide) in the slide's description, for the slide.  Its
+    label and macro record neither: they keep their resolution tags and stay
+    unplaced (plan 4.11)."""
     if image._series.name != "Baseline":
         return None
     fields = {}
@@ -465,14 +505,16 @@ def _svs(image, n_channels: int, cache: dict):
     sizes = {"x": q, "y": q}
     corner = {"x": quantity(fields.get("Left"), "millimeter", positive=False),
               "y": quantity(fields.get("Top"), "millimeter", positive=False)}
-    return Metadata(pixel_sizes=sizes, position=_corner_to_first_pixel(corner, sizes),
+    return Metadata(pixel_sizes=sizes, **_on_slide(_corner_to_first_pixel(corner, sizes)),
                     channels=_unknown_channels(n_channels))
 
 
 def _scn(image, n_channels: int, cache: dict):
     """Leica SCN: the image's ``view`` (its extent and offset in the
-    collection, nm) over its pixels gives the pixel size; channel names and
-    colours from ``channelSettings``."""
+    collection, nm) over its pixels gives the pixel size, and its offset the
+    corner on the slide; channel names and colours from ``channelSettings``.
+    The macro is placed too: its view is the whole collection, the frame
+    every other view's offset is in (plan 4.11)."""
     if "scn" not in cache:
         cache["scn"] = _xml(image._tif.pages.first.description)
     root = cache["scn"]
@@ -499,7 +541,7 @@ def _scn(image, n_channels: int, cache: dict):
               for axis in "xy"}
     channels = [Channel(name=c.get("name") or None, color=color_hex(c.get("rgb")))
                 for c in element.iter() if _local(c.tag) == "channel"]
-    return Metadata(pixel_sizes=sizes, position=_corner_to_first_pixel(corner, sizes),
+    return Metadata(pixel_sizes=sizes, **_on_slide(_corner_to_first_pixel(corner, sizes)),
                     channels=_channels(channels, n_channels))
 
 
@@ -518,19 +560,51 @@ def _bif(image, n_channels: int, cache: dict):
     return Metadata(pixel_sizes={"x": q, "y": q}, channels=_unknown_channels(n_channels))
 
 
+#: a QPTIFF page's ``ImageType`` -> the point of the image its X/YPosition tags
+#: record (check 4.20, on two Vectra Polaris scans): the scan and its thumbnail
+#: give their top-left corner; the overview (the whole slide) and the label,
+#: pictures from the wide-field camera, give their centre -- read as corners,
+#: they were 31 mm and 15 mm away from where their pixels show the scan
+QPI_POSITION_POINTS = {"FullResolution": "corner", "Thumbnail": "corner",
+                       "Overview": "centre", "Label": "centre"}
+#: the same by micro-reader's series name, for pages without an ``ImageType``:
+#: only the scan and its thumbnail are known to give their corner
+QPI_SERIES_POINTS = {"Baseline": "corner", "thumbnail": "corner"}
+
+
+def _qpi_point(image) -> "str | None":
+    """Which point of *image* its X/YPosition tags record ("corner",
+    "centre"), or None when that is not known (no position then)."""
+    root = _xml(getattr(image._series.keyframe, "description", ""))
+    image_type = root.findtext("ImageType") if root is not None else None
+    if image_type:
+        return QPI_POSITION_POINTS.get(image_type.strip())
+    return QPI_SERIES_POINTS.get(image._series.name)
+
+
 def _qpi(image, n_channels: int, cache: dict):
     """PerkinElmer / Akoya QPTIFF: pixel size from the resolution tags, the
     position from the X/YPosition tags (both in ResolutionUnit, as
-    Bio-Formats reads them), channel ``Name`` / ``Color`` from each channel
-    page's XML description."""
+    Bio-Formats reads them) -- the scan's and thumbnail's corner, the
+    overview's and label's centre (``QPI_POSITION_POINTS``; an image of
+    another ``ImageType`` gets none) -- channel ``Name`` / ``Color`` from
+    each channel page's XML description."""
     key = image._series.keyframe
     sizes = _resolution_tags(key)
     unit = RESOLUTION_UNITS.get(int(key.tags.valueof("ResolutionUnit", 2)))
-    corner = {}
+    recorded = {}
     for axis, tag in (("x", "XPosition"), ("y", "YPosition")):
         value = _rational(key.tags.get(tag))
         if value is not None and unit:
-            corner[axis] = quantity(value, unit, positive=False)
+            recorded[axis] = quantity(value, unit, positive=False)
+    point = _qpi_point(image) if recorded else None
+    if point == "corner":
+        position = _corner_to_first_pixel(recorded, sizes)
+    elif point == "centre":
+        counts = {a: image.shape[image.axes.index(a)] for a in "xy" if a in image.axes}
+        position = _centre_to_first_pixel(recorded, sizes, counts)
+    else:
+        position = {}
     channels = []
     if "c" in image.axes:
         for page in image._series.pages[:n_channels]:
@@ -546,7 +620,7 @@ def _qpi(image, n_channels: int, cache: dict):
             channels.append(Channel(name=name or None, color=rgb))
     if not sizes and not channels:
         return None
-    return Metadata(pixel_sizes=sizes, position=_corner_to_first_pixel(corner, sizes),
+    return Metadata(pixel_sizes=sizes, **_on_slide(position),
                     channels=_channels(channels, n_channels))
 
 

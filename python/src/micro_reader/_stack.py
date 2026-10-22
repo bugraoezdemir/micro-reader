@@ -73,6 +73,7 @@ class ChannelStack(Image):
             base = self._parts[0].metadata
             channels = tuple(part.metadata.channels[j] for part, j in self._channels)
             self._metadata = Metadata(pixel_sizes=base.pixel_sizes, position=base.position,
+                                      coordinate_system=base.coordinate_system,
                                       channels=channels, index_values=base.index_values,
                                       stage_position=base.stage_position)
         return self._metadata

@@ -14,6 +14,10 @@ segment (``ZISRAWMETADATA``) and the first subblock's own metadata.
   subblock, which Zeiss records for the centre of that field of view
   (Bio-Formats reports it as is: the centre); files without it: the
   scene's ``Positions/Position`` in the XML, taken as the image's centre.
+  Every position of a file is in one stage space, coordinate system
+  ``stage`` (plan 4.3): check 4.13 found the series of a file in one space
+  on every file that could answer (slide scans from two Zeiss scanner
+  models), and none in separate ones.
 """
 from __future__ import annotations
 
@@ -22,6 +26,10 @@ from dataclasses import replace
 import xml.etree.ElementTree as ET
 
 from .._metadata import Channel, Metadata, Quantity, color_hex, quantity, unit_name
+from .._spatial import system_id
+
+#: the coordinate system of every position of a file: its one stage space (4.13)
+STAGE = system_id("stage")
 
 
 def read_xml(fh):
@@ -235,4 +243,5 @@ def czi_metadata(image, fh, root) -> Metadata:
         chosen = tuple(every[k] for k in ids)
     else:
         chosen = channels(root, image._czi._dim_starts.get("C", 0), n_c)
-    return Metadata(pixel_sizes=sizes, position=position, channels=chosen)
+    return Metadata(pixel_sizes=sizes, position=position, channels=chosen,
+                    coordinate_system=STAGE if position else None)

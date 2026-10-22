@@ -367,6 +367,10 @@ class File:
     backend's own class is an implementation detail."""
 
     backend: str = "base"
+    #: (coordinate_systems, coordinate_transformations) once declared and checked
+    _graph: Optional[tuple] = None
+    #: (the images it was built from, collection) once built (``collection``)
+    _tree: Optional[tuple] = None
 
     def __init__(self, path: str, images: Sequence[Image], plates: Sequence = ()):
         #: the file read: for a composite format its main file (docs/COMPOSITE.md)
@@ -452,6 +456,75 @@ class File:
             else:
                 out.append(image)
         return out
+
+    # The spatial model (plan section 3; _spatial.py): the shared coordinate
+    # systems the file's positions are in, the other edges between them, and
+    # the tree of what contains what.  A backend declares the systems from
+    # what opening the file already read; an image names its system beside
+    # its position (``metadata.coordinate_system``).
+
+    def _declare_coordinate_systems(self) -> Sequence:
+        """The shared coordinate systems this file's positions are in (plan
+        4.2), declared from what opening the file already read -- the
+        indices, the plates, the file's own header -- never from an image's
+        ``metadata`` (no ``_read_metadata``: ``coordinate_systems`` must stay
+        as cheap as opening).  Backends override it; the default declares
+        none.  ``(CoordinateSystem(system_id("stage")),)`` is the usual
+        answer; one per well (``system_id("well", well.name)``, 4.9) or per
+        series (``system_id("stage", f"s{n}")``, 4.15) where the plan says so;
+        ``axes=None`` (the writer fills them, 3.12).  Called once, on the first
+        access of ``coordinate_systems``; the result is checked (I1)."""
+        return ()
+
+    def _declare_coordinate_transformations(self) -> Sequence:
+        """The edges of the graph other than positions (plan 3.3): only
+        BigDataViewer has some (affine views and registrations, 9.16).  Each a
+        ``Transformation`` between declared systems and image keys (I5); the
+        same rules as ``_declare_coordinate_systems``."""
+        return ()
+
+    def _declared(self) -> tuple:
+        if self._graph is None:
+            from ._spatial import check_declared_systems, check_edges, image_key
+            systems = check_declared_systems(self._declare_coordinate_systems(), where=self.path)
+            edges = self._declare_coordinate_transformations()
+            keys = {image_key(image) for image in self.images} if edges else ()
+            self._graph = (systems, check_edges(edges, systems, keys, where=self.path))
+        return self._graph
+
+    @property
+    def coordinate_systems(self) -> tuple:
+        """The shared coordinate systems the backend declares for this file
+        (a tuple of ``CoordinateSystem``, plan 3.3, 4.2): the systems its
+        images' positions are in, named by ``metadata.coordinate_system``.
+        Empty for a backend that declares none.  Declared when first read,
+        without reading any image's metadata."""
+        return self._declared()[0]
+
+    @property
+    def coordinate_transformations(self) -> tuple:
+        """The edges of the file's transformation graph other than positions
+        (a tuple of ``Transformation``, plan 3.3): empty for every backend
+        but BigDataViewer, whose affine views and registrations are edges
+        from an image into ``global`` and ``global-registered`` (9.16)."""
+        return self._declared()[1]
+
+    @property
+    def collection(self):
+        """The tree of what contains what (a ``Collection``, plan 3.1, 3.17):
+        a root named after the file's stem holding plate > well > field, or
+        series, each holding its full-resolution images.  A field or series
+        of one image collapses into it; tiles and the orthogonal indices
+        (view, illumination, ...) make no collection.  The leaves are the
+        objects of ``images`` (after ``open(axes=...)`` too), and the tree
+        is built from the indices and ``plates`` alone: no metadata is read.
+        Built on first access, again when ``images`` has changed
+        (``_spatial.file_collection``)."""
+        images = tuple(self.images)
+        if self._tree is None or self._tree[0] != images:     # identity: Image has no __eq__
+            from ._spatial import file_collection
+            self._tree = (images, file_collection(self))
+        return self._tree[1]
 
     def _member_files(self) -> set:
         """The other files this file's images are read from -- a file set's

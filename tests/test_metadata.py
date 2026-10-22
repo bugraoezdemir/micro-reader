@@ -89,6 +89,76 @@ def test_ome_tiff(tmp_path):
     # the first pixel's centre is 4.5 (x) / 3.5 (y) pixels of 0.25 um before it
     _close(meta.position["x"], 12.5 - 4.5 * 0.25e-3, "millimeter")
     _close(meta.position["y"], -3.0 - 3.5 * 0.25e-3, "millimeter")
+    assert meta.coordinate_system == "stage"                             # plan 4.6
+
+
+def _ome_plane(x, y, n, z=None):
+    """OME Plane metadata for tifffile: *n* planes at stage (x, y) um."""
+    plane = {"PositionX": [x] * n, "PositionXUnit": ["µm"] * n,
+             "PositionY": [y] * n, "PositionYUnit": ["µm"] * n}
+    if z is not None:
+        plane.update({"PositionZ": list(z), "PositionZUnit": ["µm"] * n})
+    return plane
+
+
+def test_ome_tiff_positions_are_in_the_stage_system(tmp_path, monkeypatch):
+    """Plan 4.6: an OME-TIFF declares one ``stage`` system at open, without
+    reading any image's metadata; every series' Plane position (x, y only:
+    PositionZ is no part of it) is in it, and so is every resolution level."""
+    from micro_reader._spatial import check_invariants
+    from micro_reader.backends import tiff
+    reads = []
+    real = tiff._TiffImage._read_metadata
+    monkeypatch.setattr(tiff._TiffImage, "_read_metadata",
+                        lambda self: reads.append(self) or real(self))
+    path = tmp_path / "two.ome.tif"
+    with tifffile.TiffWriter(path, ome=True) as w:
+        for x in (100.0, 250.0):
+            w.write(np.zeros((2, 8, 10), np.uint16), subifds=1, photometric="minisblack",
+                    metadata={"axes": "ZYX", "PhysicalSizeX": 0.5, "PhysicalSizeXUnit": "µm",
+                              "PhysicalSizeY": 0.5, "PhysicalSizeYUnit": "µm",
+                              "Plane": _ome_plane(x, 20.0, 2, z=(1.0, 3.0))})
+            w.write(np.zeros((2, 4, 5), np.uint16), subfiletype=1, photometric="minisblack")
+    with micro_reader.open(path, resolutions="all") as f:
+        assert f.format == "ome-tiff"
+        assert [s.id for s in f.coordinate_systems] == ["stage"]
+        assert f.coordinate_systems[0].axes is None and not f.coordinate_systems[0].estimated
+        assert reads == []
+        levels = [im for im in f.images if im.index["resolution"] == 1]
+        assert len(levels) == 2
+        for im in f.images:
+            meta = im.metadata
+            x = 100.0 if im.index["series"] == 0 else 250.0
+            assert meta.coordinate_system == "stage" and set(meta.position) == {"x", "y"}
+            _close(meta.position["x"], x - 4.5 * 0.5, "micrometer")     # level 0's (8.22)
+            _close(meta.position["y"], 20.0 - 3.5 * 0.5, "micrometer")
+        check_invariants(f)
+
+
+def test_ome_tiff_without_a_position_is_unplaced(tmp_path):
+    """No Plane position, or one that cannot be moved to the first pixel (no
+    pixel size): position {} and no system; the file still declares
+    ``stage``."""
+    from micro_reader._spatial import check_invariants
+    for name, metadata in (("none", {"axes": "YX", "PhysicalSizeX": 0.5, "PhysicalSizeY": 0.5}),
+                           ("no-size", {"axes": "YX", "Plane": _ome_plane(5.0, 6.0, 1)})):
+        path = tmp_path / f"{name}.ome.tif"
+        tifffile.imwrite(path, np.zeros((8, 10), np.uint8), photometric="minisblack",
+                         metadata=metadata)
+        with micro_reader.open(path) as f:
+            assert [s.id for s in f.coordinate_systems] == ["stage"]
+            meta = f.images[0].metadata
+            assert meta.position == {} and meta.coordinate_system is None
+            check_invariants(f)
+
+
+def test_tiffs_without_ome_xml_declare_no_system(tmp_path):
+    tifffile.imwrite(tmp_path / "plain.tif", np.zeros((8, 10), np.uint8), metadata=None)
+    tifffile.imwrite(tmp_path / "ij.tif", np.zeros((3, 8, 10), np.uint8), imagej=True)
+    for name in ("plain.tif", "ij.tif"):
+        with micro_reader.open(tmp_path / name) as f:
+            assert f.coordinate_systems == ()
+            assert f.images[0].metadata.position == {}
 
 
 def test_imagej_tiff(tmp_path):
@@ -212,6 +282,7 @@ def test_imaris(tmp_path):
     _close(meta.pixel_sizes["z"], 2.0, "micrometer")
     _close(meta.pixel_sizes["t"], 2.0, "second")
     _close(meta.position["x"], 100.25, "micrometer")           # ExtMin: edge of the first pixel
+    assert set(meta.position) == {"x", "y"} and meta.coordinate_system == "stage"   # no z (4.17)
     assert (meta.channels[0].name, meta.channels[0].color) == ("GFP", "#00FF00")
     _close(meta.channels[0].emission_wavelength, 510, "nanometer")
     assert meta.channels[1].name is None                       # Imaris's placeholder
@@ -244,6 +315,20 @@ def test_nd2(tmp_path):
     # pixel 4.5 (x) / 3.5 (y) pixels of 0.5 um before it
     _close(meta.position["x"], -1.0 - 4.5 * 0.5, "micrometer")
     _close(meta.position["y"], 0.0 - 3.5 * 0.5, "micrometer")
+    assert meta.coordinate_system == "stage"
+
+
+def test_nd2_y_position_uses_the_y_pixel_size():
+    """4.16: y steps back by the y pixel size (once x's).  NIS records one
+    calibration for x and y, so a file cannot hold unequal sizes: the rule
+    is checked on the sizes the position is computed from."""
+    from micro_reader.backends._nd2_metadata import _first_pixel
+    sizes = {"x": Quantity(0.5, "micrometer"), "y": Quantity(0.25, "micrometer")}
+    turned = (-1.0, 0.0, 0.0, -1.0)
+    first = _first_pixel(1.0, 2.0, turned, sizes, {"x": 10, "y": 8})
+    # centre along the image's axes (-1, -2); W = 10, H = 8
+    _close(first["x"], -1.0 + (0.5 - 10 / 2) * 0.5, "micrometer")
+    _close(first["y"], -2.0 + (0.5 - 8 / 2) * 0.25, "micrometer")
 
 
 # -- Leica ----------------------------------------------------------------------------------
@@ -346,5 +431,5 @@ def test_nd2_without_camera_matrix_has_no_position(tmp_path):
     write_nd2(path, np.zeros((2, 8, 10, 1, 1), np.uint16), [("P", 2)])
     with micro_reader.open(path) as f:
         meta = f.select(series=1)[0].metadata
-    assert meta.position == {}
+    assert meta.position == {} and meta.coordinate_system is None
     _close(meta.pixel_sizes["x"], 0.5, "micrometer")

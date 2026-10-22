@@ -190,6 +190,55 @@ def test_field_positions_are_first_pixels_relative_to_the_well(tmp_path):
             assert pos["z"].value == pytest.approx(2.0)     # the first plane's PositionZ
 
 
+def test_one_coordinate_system_per_well(tmp_path, monkeypatch):
+    """Positions are relative to the well's centre, so each well is its own
+    system (plan 4.9): ``well-A1``, ``well-B3``, declared at open without
+    reading any metadata; every field names its well's system (I2, I3)."""
+    from micro_reader._spatial import check_invariants
+    from micro_reader.backends import harmony
+    reads = []
+    real = harmony._HarmonyImage._read_metadata
+    monkeypatch.setattr(harmony._HarmonyImage, "_read_metadata",
+                        lambda self: reads.append(self.name) or real(self))
+    index, _ = _write_harmony(str(tmp_path), wells=((1, 1), (2, 3)), fields=2)
+    with micro_reader.open(index) as f:
+        systems = f.coordinate_systems
+        assert [(s.id, s.name, s.axes, s.estimated) for s in systems] == [
+            ("well-A1", "well A1", None, False), ("well-B3", "well B3", None, False)]
+        assert f.coordinate_transformations == ()        # no edge joins two wells
+        assert reads == []                               # declared without a metadata read
+        for image in f.images:
+            well = f.plates[0].wells[image.index["well"]].name
+            md = image.metadata
+            assert md.coordinate_system == f"well-{well}" and set(md.position) == {"x", "y", "z"}
+        check_invariants(f)
+
+
+def test_a_field_without_positions_is_unplaced(tmp_path):
+    """An index without PositionX / Y / Z: no position, so no system (I3)."""
+    import re
+    index, _ = _write_harmony(str(tmp_path), wells=((1, 1),), fields=1, channels=1)
+    with open(index, encoding="utf-8") as fh:
+        xml = re.sub(r"<Position[XYZ][^>]*>[^<]*</Position[XYZ]>", "", fh.read())
+    with open(index, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    with micro_reader.open(index) as f:
+        md = f.images[0].metadata
+        assert md.position == {} and md.coordinate_system is None
+        assert [s.id for s in f.coordinate_systems] == ["well-A1"]
+
+
+def test_well_system_ids_with_several_plates():
+    """With several plates the plate index scopes a well's id (plan 3.23):
+    ``well-p0-A1``, ``well-p1-A1``; names say which plate."""
+    from micro_reader._plate import Plate, Well, well_system, well_systems
+    one = Plate("a", ("A",), ("1",), (Well(0, 0, "A1"),))
+    two = Plate("b", ("A", "B"), ("1", "2"), (Well(0, 0, "A1"), Well(1, 1, "B2")))
+    assert well_system([two], 0, 1) == "well-B2"
+    assert [s.id for s in well_systems([one, two])] == ["well-p0-A1", "well-p1-A1", "well-p1-B2"]
+    assert well_systems([one, two])[2].name == "plate 1 well B2"
+
+
 def test_timepoints_and_ids_counting_from_1(tmp_path):
     """IDs start at 0 (Operetta timepoints) or 1 (CV7000): axes count from 0."""
     index, data = _write_harmony(str(tmp_path), wells=((1, 1),), fields=1, channels=1,

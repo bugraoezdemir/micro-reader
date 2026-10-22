@@ -4,6 +4,7 @@ or one multi-page file per timepoint."""
 from __future__ import annotations
 
 import os
+import types
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 
@@ -31,7 +32,8 @@ def _stub(own, points_to, metadata_file="set.companion.ome"):
 def _write(folder, *, T=2, C=2, Z=3, order="XYZCT", layout="planes", images=1, own="listed",
            points_to="this", list_uuids=True, physical_z=True, positions_z=None, skip=(),
            name="set.companion.ome", absolute=False, member_shape=None, time=True,
-           channel_info=True, metadata_file="set.companion.ome", dpi96=False):
+           channel_info=True, metadata_file="set.companion.ome", dpi96=False,
+           positions_xy=None):
     """A companion set in *folder*. *layout*: "planes" (one file per plane) or
     "stacks" (one file per timepoint, its planes in DimensionOrder; T must be
     slowest). *time* / *channel_info*: the companion gives a TimeIncrement /
@@ -40,6 +42,9 @@ def _write(folder, *, T=2, C=2, Z=3, order="XYZCT", layout="planes", images=1, o
     UUID "listed" (as in the companion),
     "other" or None; *points_to*: its stub points to "this" companion,
     "other", or None (no stub). *skip*: (image, file number) not written.
+    *positions_xy*: {t: (x, y)} in um, the PositionX / Y of every plane of that
+    timepoint (the field's centre), each image 1000 um further in x; every
+    plane gets a Plane element, the other timepoints' without a position.
     -> (companion path, {(image, t, c, z): plane})."""
     os.makedirs(folder, exist_ok=True)
     this = "urn:uuid:companion-0"
@@ -95,6 +100,15 @@ def _write(folder, *, T=2, C=2, Z=3, order="XYZCT", layout="planes", images=1, o
         if positions_z is not None:
             planes = "".join(f'<Plane TheT="0" TheC="0" TheZ="{z}" PositionZ="{p}" '
                              f'PositionZUnit="µm"/>' for z, p in enumerate(positions_z))
+        if positions_xy is not None:
+            def at(t):
+                if t not in positions_xy:
+                    return ""
+                x, y = positions_xy[t]
+                return (f' PositionX="{x + 1000 * im}" PositionXUnit="µm" PositionY="{y}" '
+                        f'PositionYUnit="µm"')
+            planes = "".join(f'<Plane TheT="{t}" TheC="{c}" TheZ="{z}"{at(t)}/>'
+                             for t in range(T) for c in range(C) for z in range(Z))
         pz = ' PhysicalSizeZ="2.5" PhysicalSizeZUnit="µm"' if physical_z else ""
         tinc = ' TimeIncrement="60" TimeIncrementUnit="s"' if time else ""
         xml_images.append(
@@ -580,3 +594,78 @@ def test_a_member_without_a_stub_opens_as_it_is(tmp_path):
     path, _data = _write(str(tmp_path), own="listed", points_to=None)
     with micro_reader.open(_member(str(tmp_path))) as f:
         assert f.backend == "tiff" and f.path == _member(str(tmp_path))
+
+
+# -- the stage system (plan 4.6) ---------------------------------------------------
+
+def _first_pixel(centre):
+    """PositionX / Y (the field's centre, um) -> the first pixel's centre."""
+    x, y = centre
+    return pytest.approx(x - (X / 2 - 0.5) * 0.5), pytest.approx(y - (Y / 2 - 0.5) * 0.5)
+
+
+def test_a_sets_positions_are_in_its_one_stage_system(tmp_path, monkeypatch):
+    """Every image of a companion set is placed in ``stage``; declaring it
+    reads no image's metadata; PositionZ is no part of the position."""
+    from micro_reader._spatial import check_invariants
+    reads = []
+    real = companion._CompanionImage._read_metadata
+    monkeypatch.setattr(companion._CompanionImage, "_read_metadata",
+                        lambda self: reads.append(self) or real(self))
+    path, _data = _write(str(tmp_path), images=2, positions_xy={0: (100.0, 50.0)},
+                         positions_z=[10.0, 13.0, 16.0])
+    with micro_reader.open(path) as f:
+        assert [s.id for s in f.coordinate_systems] == ["stage"]
+        assert f.coordinate_systems[0].axes is None and not f.coordinate_systems[0].estimated
+        assert reads == []
+        for k, im in enumerate(f.images):
+            m = im.metadata
+            assert m.coordinate_system == "stage" and set(m.position) == {"x", "y"}
+            x, y = _first_pixel((100.0 + 1000 * k, 50.0))
+            assert (m.position["x"].value, m.position["y"].value) == (x, y)
+            assert m.position["x"].unit == "micrometer"
+        check_invariants(f)
+
+
+def test_a_set_without_positions_is_unplaced(tmp_path):
+    from micro_reader._spatial import check_invariants
+    path, _data = _write(str(tmp_path))
+    with micro_reader.open(path) as f:
+        assert [s.id for s in f.coordinate_systems] == ["stage"]
+        m = f.images[0].metadata
+        assert m.position == {} and m.coordinate_system is None
+        check_invariants(f)
+
+
+def test_a_member_opened_alone_is_placed_by_its_own_first_plane(tmp_path):
+    """CO-2: the block a member holds is placed by its first plane, in
+    ``stage``; a block whose first plane has no position is unplaced."""
+    from micro_reader._spatial import check_invariants
+    path, _data = _write(str(tmp_path), T=3, layout="stacks",
+                         positions_xy={0: (100.0, 50.0), 1: (130.0, 50.0)})
+    for number, centre in ((1, (130.0, 50.0)), (2, None)):
+        with micro_reader.open(_member(str(tmp_path), number), multifile=False) as f:
+            assert (f.backend, f.format) == ("tiff", "ome-tiff")
+            assert [s.id for s in f.coordinate_systems] == ["stage"]
+            m = f.images[0].metadata
+            if centre is None:
+                assert m.position == {} and m.coordinate_system is None
+            else:
+                assert m.coordinate_system == "stage"
+                assert (m.position["x"].value, m.position["y"].value) == _first_pixel(centre)
+            check_invariants(f)
+    with micro_reader.open(_member(str(tmp_path), 1)) as f:      # the whole set
+        assert f.backend == "companion"
+        assert f.images[0].metadata.coordinate_system == "stage"
+
+
+def test_companion_sets_and_ome_tiffs_are_checked_strictly():
+    """Plan 4.6 landed: the session check no longer tolerates a position
+    without a system for companion sets or OME-TIFFs (members too)."""
+    import conftest
+    assert "companion" not in conftest.POSITIONS_WITHOUT_A_SYSTEM
+    assert "tiff" not in conftest.POSITIONS_WITHOUT_A_SYSTEM
+    f = types.SimpleNamespace(backend="tiff", format="ome-tiff")
+    assert conftest.strict_placement(f)
+    assert conftest.strict_placement(types.SimpleNamespace(backend="companion",
+                                                           format="ome-companion"))

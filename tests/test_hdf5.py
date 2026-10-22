@@ -2,6 +2,7 @@
 arrays written (tests/_hdf5_writer.py)."""
 from __future__ import annotations
 
+import os
 import warnings
 
 import numpy as np
@@ -510,6 +511,327 @@ def test_bdv_hdf5_alone_names_the_xmls_that_name_it(tmp_path):
     with f:
         assert f.format == "bdv-hdf5" and "sequence" in f.index_range
         assert f.images[0].metadata.pixel_sizes == {}
+
+
+# -- BigDataViewer: coordinate systems (plan 4.8) ----------------------------------
+
+GRID = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0)                 # identity: tile 0 of the grid
+CALIBRATION = ("calibration", (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 4, 0))
+TURNED = (0, -1, 0, 30.0, 1, 0, 0, 0, 0, 0, 1, 0)           # 90 degrees about z, then shifted
+MIRRORED = (-1, 0, 0, 49.0, 0, 1, 0, 0, 0, 0, 1, 0)
+
+
+@pytest.fixture
+def metadata_reads(monkeypatch):
+    """How often a BigDataViewer image's ``_read_metadata`` ran."""
+    from micro_reader.backends import bdv as bdv_backend
+    count = [0]
+    real = bdv_backend._BdvImage._read_metadata
+
+    def counting(self):
+        count[0] += 1
+        return real(self)
+    monkeypatch.setattr(bdv_backend._BdvImage, "_read_metadata", counting)
+    return count
+
+
+def _edit_registration(path, timepoint, setup, affine):
+    """The written XML with the first listed transform of one view replaced."""
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(path)
+    for reg in tree.getroot().iter("ViewRegistration"):
+        if (reg.get("timepoint"), reg.get("setup")) == (str(timepoint), str(setup)):
+            if affine is None:
+                tree.getroot().find("ViewRegistrations").remove(reg)
+            else:
+                reg.find("ViewTransform/affine").text = " ".join(str(v) for v in affine)
+            break
+    else:
+        raise AssertionError(f"no ViewRegistration t={timepoint} setup={setup}")
+    tree.write(path, encoding="utf-8", xml_declaration=True)
+
+
+def test_bdv_positions_are_in_the_global_system(tmp_path, metadata_reads):
+    """Grid translations and the calibration only scale and shift: every
+    image, every level too, is placed in ``global``, declared without reading
+    any image's metadata."""
+    from micro_reader._spatial import check_invariants
+    write_bdv(tmp_path)
+    with micro_reader.open(tmp_path / "dataset.xml", resolutions="all") as f:
+        assert [s.id for s in f.coordinate_systems] == ["global"]
+        assert f.coordinate_systems[0].axes is None and not f.coordinate_systems[0].estimated
+        assert f.coordinate_transformations == ()
+        assert metadata_reads[0] == 0                       # declared from the XML alone
+        check_invariants(f)                                 # I1-I3 on every image and level
+        for image in f.images:
+            meta = image.metadata
+            assert meta.coordinate_system == "global"
+            assert meta.position["x"] == (pytest.approx(45 * image.index["tile"] * 0.5), "micrometer")
+            assert meta.position["z"] == (pytest.approx(0.0), "micrometer")
+
+
+def test_bdv_global_system_after_axes(tmp_path):
+    """``open(axes=...)`` replaces the images; the declaration still has
+    what it needs."""
+    write_bdv(tmp_path)
+    with micro_reader.open(tmp_path / "dataset.xml", axes="ctzyx") as f:
+        assert [s.id for s in f.coordinate_systems] == ["global"]
+        assert all(im.metadata.coordinate_system == "global" for im in f.images)
+
+
+def _matrix(affine) -> np.ndarray:
+    """A BigDataViewer affine (12 numbers, row by row) as 4 x 4."""
+    return np.vstack([np.reshape(affine, (3, 4)), [0, 0, 0, 1]])
+
+
+def _apply(edge, axes: str, point: dict) -> dict:
+    """An edge (translation or affine over *axes*) applied to {axis: value}."""
+    vec = np.array([point.get(a, 0.0) for a in axes])
+    if edge.type == "translation":
+        return dict(zip(axes, vec + np.array(edge.params["translation"])))
+    m = np.array(edge.params["affine"])
+    assert m.shape == (len(axes), len(axes) + 1)             # M x (N + 1), NGFF 0.6
+    return dict(zip(axes, m[:, :-1] @ vec + m[:, -1]))
+
+
+def _check_edge(edge, image, chain, unit=0.5, position=None):
+    """*edge* maps the far corner of *image* (its own coordinates: pixel
+    times voxel size, plus *position*) to where BigDataViewer's *chain*
+    (pixel -> global, 4 x 4) puts it, times the length of a global unit."""
+    z, y, x = image.shape[-3:]
+    pixel = np.array([x - 1, y - 1, z - 1, 1.0])
+    voxel = {"x": 0.5, "y": 0.5, "z": 2.0}                    # the writer's
+    held = {a: pixel[k] * voxel[a] + (position or {}).get(a, 0.0) for k, a in enumerate("xyz")}
+    held.update(t=1.0, c=1.0)
+    got = _apply(edge, image.axes, held)
+    want = (chain @ pixel)[:3] * unit
+    assert [got[a] for a in "xyz" if a in got] == \
+        pytest.approx([want[k] for k, a in enumerate("xyz") if a in got], abs=1e-9)
+    assert all(got[a] == held[a] for a in "tc" if a in image.axes)   # t, c kept
+
+
+@pytest.mark.parametrize("affine", [TURNED, MIRRORED], ids=["turned", "mirrored"])
+def test_bdv_turned_or_mirrored_views_are_affine_edges_into_global(tmp_path, affine,
+                                                                    metadata_reads):
+    """A nominal transform that turns or mirrors a view is no position but an
+    affine edge from the image into ``global`` (plan 4.8, 9.16), over the
+    image's axes, in micrometres (a global unit is 0.5 um: voxel 0.5 over
+    calibration 1).  Declared without reading any image's metadata."""
+    from micro_reader._spatial import check_invariants, image_key
+    write_bdv(tmp_path, transforms=lambda tile: [("Translation to Regular Grid", affine), CALIBRATION])
+    chain = _matrix(affine) @ _matrix(CALIBRATION[1])
+    with micro_reader.open(tmp_path / "dataset.xml") as f:
+        assert [(s.id, s.estimated) for s in f.coordinate_systems] == [("global", False)]
+        assert metadata_reads[0] == 0
+        edges = f.coordinate_transformations
+        assert [(e.type, e.input, e.output) for e in edges] == \
+            [("affine", image_key(im), "global") for im in f.images]
+        check_invariants(f)
+        for image, edge in zip(f.images, edges):
+            assert image.metadata.position == {} and image.metadata.coordinate_system is None
+            _check_edge(edge, image, chain)
+        # 9.7: every image attached to global has the same axes, so the writer
+        # gives global those axes (3.12), and each affine matches them
+        assert {im.axes for im in f.images} == {"tczyx"}
+        assert all(len(e.params["affine"]) == 5 and len(e.params["affine"][0]) == 6 for e in edges)
+    write_bdv(tmp_path, transforms=lambda tile: [("Translation to Regular Grid", affine if tile else GRID),
+                                                CALIBRATION])
+    with micro_reader.open(tmp_path / "dataset.xml") as f:
+        assert [s.id for s in f.coordinate_systems] == ["global"]
+        check_invariants(f)
+        assert f.select(tile=0)[0].metadata.coordinate_system == "global"
+        unplaced = f.select(tile=1)[0].metadata
+        assert unplaced.position == {} and unplaced.coordinate_system is None
+        assert [e.input for e in f.coordinate_transformations] == [image_key(f.select(tile=1)[0])]
+
+
+def test_bdv_affine_edges_follow_the_axes_and_levels(tmp_path):
+    """The edges are written over the images' axes as opened (``axes=``), one
+    per image however many levels are listed."""
+    from micro_reader._spatial import check_invariants
+    write_bdv(tmp_path, transforms=lambda tile: [("Translation to Regular Grid", TURNED), CALIBRATION])
+    chain = _matrix(TURNED) @ _matrix(CALIBRATION[1])
+    with micro_reader.open(tmp_path / "dataset.xml", axes="ctzyx", resolutions="all") as f:
+        assert len(f.images) == 4                               # 2 tiles x 2 levels
+        edges = f.coordinate_transformations
+        assert len(edges) == 2
+        check_invariants(f)
+        for edge in edges:
+            image = f.select(**dict(edge.input), resolution=0)[0]
+            assert image.axes == "ctzyx"
+            _check_edge(edge, image, chain)
+
+
+def test_bdv_affine_edge_of_a_squeezed_plane(tmp_path):
+    """A 2-D dataset opened without its z axis (``squeeze=True``): a view
+    turned in its plane keeps an edge over ``tcyx``; one tilted out of it
+    cannot be written over those axes, and the file says so."""
+    tilted = (1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0)            # 90 degrees about x
+    write_bdv(tmp_path, shape=(1, 40, 50),
+              transforms=lambda tile: [("Translation to Regular Grid", TURNED), CALIBRATION])
+    chain = _matrix(TURNED) @ _matrix(CALIBRATION[1])
+    with micro_reader.open(tmp_path / "dataset.xml", squeeze=True) as f:
+        assert f.images[0].axes == "tcyx"
+        edges = f.coordinate_transformations
+        assert len(edges) == 2 and all(len(e.params["affine"]) == 4 for e in edges)
+        for image, edge in zip(f.images, edges):
+            _check_edge(edge, image, chain)
+    write_bdv(tmp_path, shape=(1, 40, 50),
+              transforms=lambda tile: [("Translation to Regular Grid", tilted), CALIBRATION])
+    with pytest.warns(UserWarning, match="has no edge into 'global'"):
+        with micro_reader.open(tmp_path / "dataset.xml", squeeze=True) as f:
+            assert f.coordinate_transformations == ()
+    with micro_reader.open(tmp_path / "dataset.xml") as f:      # with z: the edge is there
+        assert len(f.coordinate_transformations) == 2
+
+
+@pytest.mark.parametrize("view", [(1, 0), (0, 1)], ids=["later_timepoint", "other_channel"])
+def test_bdv_views_of_one_image_placed_apart_leave_it_unplaced(tmp_path, view):
+    """One position holds for every time point and channel of an image: when
+    one view's nominal placement differs (time point 1 of tile 0, or channel
+    1 of tile 0 -- setup 1), tile 0 is unplaced; tile 1 keeps its position."""
+    from micro_reader._spatial import check_invariants
+    write_bdv(tmp_path)
+    timepoint, setup = view
+    _edit_registration(tmp_path / "dataset.xml", timepoint, setup, (1, 0, 0, 3.0, 0, 1, 0, 0, 0, 0, 1, 0))
+    with micro_reader.open(tmp_path / "dataset.xml") as f:
+        assert [s.id for s in f.coordinate_systems] == ["global"]
+        check_invariants(f)
+        assert f.select(tile=0)[0].metadata.position == {}
+        assert f.select(tile=1)[0].metadata.coordinate_system == "global"
+
+
+def test_bdv_missing_views_do_not_unplace(tmp_path):
+    """A view listed as missing needs no registration; a view that is stored
+    but has none leaves its image unplaced."""
+    from micro_reader._spatial import check_invariants
+    write_bdv(tmp_path, missing=[(1, 0)])
+    _edit_registration(tmp_path / "dataset.xml", 1, 0, None)
+    with micro_reader.open(tmp_path / "dataset.xml") as f:
+        check_invariants(f)
+        assert f.select(tile=0)[0].metadata.coordinate_system == "global"
+    write_bdv(tmp_path)
+    _edit_registration(tmp_path / "dataset.xml", 1, 0, None)
+    with micro_reader.open(tmp_path / "dataset.xml") as f:
+        check_invariants(f)
+        assert f.select(tile=0)[0].metadata.position == {}
+        assert f.select(tile=1)[0].metadata.coordinate_system == "global"
+
+
+STITCHING = ("Stitching Transform", (1, 0, 0, -3.0, 0, 1, 0, 9.0, 0, 0, 1, 0))
+ICP = (1, 0.01, 0, 2.5, 0, 1, 0, -1.0, 0, 0, 1, 0.5)
+BEADS = ("Fast 3d geometric hashing (rotation invariant), AffineModel3D on [beads (c=0)]",
+         (0.9, 0.1, 0, 4.0, -0.1, 0.9, 0, 80.0, 0, 0, 1, 370.0))
+
+
+def test_bdv_registrations_are_edges_into_global_registered(tmp_path, metadata_reads):
+    """BigStitcher's stitching and ICP results (listed before the grid and the
+    calibration) are estimated: an edge from each image, as placed, into
+    ``global-registered``, a system marked estimated (plan 3.7).  The
+    positions stay the grid's, in ``global``."""
+    from micro_reader._spatial import check_invariants, image_key
+
+    def chain(tile):
+        return [("Tile ICP Refinement", ICP if tile else GRID), STITCHING,
+                ("Translation to Regular Grid", (1, 0, 0, 45.0 * tile, 0, 1, 0, 0, 0, 0, 1, 0)),
+                CALIBRATION]
+    write_bdv(tmp_path, transforms=chain)
+    with micro_reader.open(tmp_path / "dataset.xml") as f:
+        assert [(s.id, s.estimated) for s in f.coordinate_systems] == \
+            [("global", False), ("global-registered", True)]
+        assert metadata_reads[0] == 0
+        check_invariants(f)                                  # no position in the estimated one
+        edges = f.coordinate_transformations
+        assert [(e.type, e.input, e.output) for e in edges] == \
+            [("translation", image_key(f.images[0]), "global-registered"),
+             ("affine", image_key(f.images[1]), "global-registered")]
+        assert edges[0].params["translation"] == pytest.approx([0, 0, 0, 4.5, -1.5])
+        for tile, (image, edge) in enumerate(zip(f.images, edges)):
+            meta = image.metadata
+            assert meta.coordinate_system == "global"
+            assert meta.position["x"] == (pytest.approx(45 * tile * 0.5), "micrometer")
+            listed = [_matrix(m) for _, m in chain(tile)]
+            _check_edge(edge, image, listed[0] @ listed[1] @ listed[2] @ listed[3],
+                        position={a: q.value for a, q in meta.position.items()})
+
+
+def test_bdv_bead_registrations_without_a_nominal_placement(tmp_path):
+    """Bead-registered angles: the nominal run is the bare calibration, which
+    places nothing (no position, no ``global``); the registration still is
+    an edge from the image's own coordinates into ``global-registered``."""
+    from micro_reader._spatial import check_invariants
+    write_bdv(tmp_path, transforms=lambda tile: [BEADS, CALIBRATION])
+    with micro_reader.open(tmp_path / "dataset.xml") as f:
+        assert [(s.id, s.estimated) for s in f.coordinate_systems] == [("global-registered", True)]
+        check_invariants(f)
+        chain = _matrix(BEADS[1]) @ _matrix(CALIBRATION[1])
+        for image, edge in zip(f.images, f.coordinate_transformations):
+            assert image.metadata.position == {} and edge.output == "global-registered"
+            _check_edge(edge, image, chain)
+
+
+def test_bdv_registration_that_changes_over_time_is_no_edge(tmp_path):
+    """One edge holds for every time point of an image: a registration that
+    differs at time point 1 (tile 0) gives tile 0 no registered edge; its
+    position, nominal, stays."""
+    write_bdv(tmp_path, transforms=lambda tile: [STITCHING, ("Translation to Regular Grid", GRID),
+                                                CALIBRATION])
+    _edit_registration(tmp_path / "dataset.xml", 1, 0, (1, 0, 0, -2.0, 0, 1, 0, 9.0, 0, 0, 1, 0))
+    with micro_reader.open(tmp_path / "dataset.xml") as f:
+        assert [s.id for s in f.coordinate_systems] == ["global", "global-registered"]
+        assert [dict(e.input)["tile"] for e in f.coordinate_transformations] == [1]
+        assert f.select(tile=0)[0].metadata.coordinate_system == "global"
+
+
+def test_bdv_hdf5_alone_declares_nothing(tmp_path):
+    """An HDF5 file read without its XML has no transforms: no position, no
+    system, no edge."""
+    write_bdv(tmp_path, transforms=lambda tile: [STITCHING, CALIBRATION])
+    (tmp_path / "dataset.xml").unlink()
+    with pytest.warns(CompositeWarning):
+        f = micro_reader.open(tmp_path / "dataset.h5")
+    with f:
+        assert f.coordinate_systems == () and f.coordinate_transformations == ()
+        assert all(im.metadata.coordinate_system is None for im in f.images)
+
+
+DATA = os.environ.get("MICROSCOPY_DATA", os.path.expanduser("~/Desktop/data/microscopy"))
+
+
+@pytest.mark.parametrize("sample, systems, edges", [
+    ("grid-3d-stitched-h5/dataset.xml", [("global", False), ("global-registered", True)],
+     [("translation", "global-registered")] + [("affine", "global-registered")] * 5),
+    ("grid-2d-stitched-h5/dataset.xml", [("global", False), ("global-registered", True)],
+     [("translation", "global-registered")] * 6),
+], ids=["grid-3d", "grid-2d"])
+def test_bdv_registrations_of_real_bigstitcher_projects(sample, systems, edges, chunk_path):
+    """The BigStitcher examples (osf.io/bufza): grid positions in ``global``;
+    the stitching (2-D) and ICP refinement (3-D, affine) as edges into
+    ``global-registered``, each matching BigDataViewer's own chain."""
+    from micro_reader._spatial import check_invariants
+    from micro_reader.backends import bdv
+    if chunk_path != "native":
+        pytest.skip("reads only the XML: once is enough")
+    path = os.path.join(DATA, "formats", "h5", "bdv", "osf-bufza-bigstitcher", sample)
+    if not os.path.exists(path):
+        pytest.skip(f"sample not found: {path} (set MICROSCOPY_DATA)")
+    xml = bdv._Xml(path)
+    with micro_reader.open(path) as f:
+        assert [(s.id, s.estimated) for s in f.coordinate_systems] == systems
+        assert [(e.type, e.output) for e in f.coordinate_transformations] == edges
+        check_invariants(f)
+        for image, edge in zip(f.images, f.coordinate_transformations):
+            meta = image.metadata
+            setup = f._views[edge.input].group[0]
+            nominal, _, registered = xml.split(0, setup.id)
+            voxel = {a: q.value for a, q in meta.pixel_sizes.items()}
+            unit = voxel["x"] / nominal[0, 0]
+            z, y, x = image.shape[-3:]
+            pixel = np.array([x - 1, y - 1, z - 1, 1.0])
+            held = {a: pixel[k] * voxel[a] + meta.position[a].value for k, a in enumerate("xyz")}
+            got = _apply(edge, image.axes, held)
+            want = (registered @ nominal @ pixel)[:3] * unit
+            assert [got[a] for a in "xyz"] == pytest.approx(list(want), abs=1e-9)
 
 
 @pytest.mark.parametrize("dtype", ["<u2", ">u2", "u1", ">f4"])

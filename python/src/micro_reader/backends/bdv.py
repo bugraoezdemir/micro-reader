@@ -25,6 +25,23 @@ Images: one per tile, angle and illumination (indices ``tile``, ``view``,
 the image's ``resolutions``.  BigDataViewer stores unsigned 16-bit pixels as
 signed 16-bit HDF5 data; they are read as ``uint16``.
 
+Positions and edges (plan 4.8, 9.16): a view is placed by its nominal
+transforms (the acquisition's grid or tile configuration and the calibration,
+not a stitching or registration result: ``NOMINAL_TRANSFORMS``).  That
+placement must be the same for every time point and channel the image holds,
+or the image is placed nowhere.  When it only scales, by positive factors,
+and shifts, the image gets a position in the coordinate system ``global``
+(BigDataViewer's global space, in the image's voxel unit).  When it turns,
+shears or mirrors, the image has no position but an affine edge into
+``global`` (``File.coordinate_transformations``).  The transforms listed
+before the nominal ones (stitching, ICP, bead registration) are estimated
+from the content: they make an edge into ``global-registered``, a system
+marked ``estimated`` (plan 3.7), never a position.  An edge starts at the
+image's own coordinates (pixel index times voxel size), plus its position
+when it has one.  The file declares ``global`` when an image is placed in it
+or has an edge into it, and ``global-registered`` when an image has an edge
+into that.
+
 Opening the HDF5 file opens the XML next to it with the same name, when that
 XML names the HDF5 file (BigDataViewer's and BigStitcher's own naming); a
 partition file ``<name>-<tt>-<ss>.h5`` opens the XML ``<name>.xml`` beside it
@@ -50,6 +67,7 @@ from .._base import File, Image
 from .._errors import (CompositeWarning, CorruptFileError, MissingImagesWarning,
                        UnsupportedFormatError)
 from .._metadata import Channel, Metadata, Quantity, quantity
+from .._spatial import CoordinateSystem, Transformation, image_key, system_id
 from . import _hdf5
 
 NAME = "bdv"
@@ -62,6 +80,25 @@ ATTRIBUTE_INDEX = {"tile": "tile", "angle": "view", "illumination": "illuminatio
 #: XML read whole to find the HDF5 file it names (owner): BigStitcher projects
 #: with many registrations are a few MB
 MAX_XML_BYTES = 256 << 20
+#: the coordinate system of every position: BigDataViewer's global space, the
+#: one space a dataset's view transforms map all its views into
+GLOBAL = system_id("global")
+#: its estimated twin (plan 3.7): the global space after the registrations
+#: (stitching, ICP, bead registration) listed before the nominal transforms
+REGISTERED = system_id("global", "registered")
+#: two views share a placement when their nominal matrices agree this closely
+#: (relative, and absolute for zeros): the same numbers in the XML compose to
+#: the same matrix, so only a real difference exceeds it
+SAME_PLACEMENT = 1e-9
+#: a nominal placement that turns or shears must give one global unit the
+#: same length along x, y and z (``_lengths``), to this relative difference:
+#: room for numbers printed to float32 precision, no more
+ISOTROPIC = 1e-6
+#: a placement whose determinant is this small next to its column lengths
+#: (relative) flattens the image: no edge
+SINGULAR = 1e-12
+#: an edge whose linear part is this close to the identity is a translation
+IDENTITY = 1e-12
 
 
 def may_index(name: str) -> bool:
@@ -307,20 +344,56 @@ class _Xml:
     def transforms(self, timepoint: int, setup: int) -> Optional[list]:
         """The view's transforms as listed: [(name or None, 4 x 4)], the first
         listed applied last; None when the XML has none or one is malformed."""
-        regs = self.root.find("ViewRegistrations")
-        if regs is None:
+        reg = self._registrations().get((timepoint, setup))
+        if reg is None:
             return None
-        for reg in regs.findall("ViewRegistration"):
-            if int(reg.get("timepoint", -1)) == timepoint and int(reg.get("setup", -1)) == setup:
-                out = []
-                for vt in reg.findall("ViewTransform"):
-                    values = _numbers(_text(vt, "affine"))
-                    if len(values) != 12:
-                        return None
-                    out.append((_text(vt, "Name"),
-                                np.vstack([np.reshape(values, (3, 4)), [0, 0, 0, 1]])))
-                return out
-        return None
+        out = []
+        for vt in reg.findall("ViewTransform"):
+            values = _numbers(_text(vt, "affine"))
+            if len(values) != 12:
+                return None
+            out.append((_text(vt, "Name"),
+                        np.vstack([np.reshape(values, (3, 4)), [0, 0, 0, 1]])))
+        return out
+
+    def _registrations(self) -> dict:
+        """{(timepoint, setup): its ViewRegistration}, the first listed for a
+        view; built once (an image's position looks up each of its views, and
+        a BigStitcher project lists thousands)."""
+        if getattr(self, "_by_view", None) is None:
+            by_view = {}
+            regs = self.root.find("ViewRegistrations")
+            for reg in regs.findall("ViewRegistration") if regs is not None else []:
+                key = (int(reg.get("timepoint", -1)), int(reg.get("setup", -1)))
+                by_view.setdefault(key, reg)
+            self._by_view = by_view
+        return self._by_view
+
+    def split(self, timepoint: int, setup: int) -> Optional[tuple]:
+        """The view's transforms in two parts, each composed into one 4 x 4
+        (pixel -> global coordinates): (nominal, placed, registered).
+        *nominal* is the run of nominal transforms at the end of the list
+        (applied first); *placed* says whether it places the view anywhere (a
+        BigStitcher "calibration" alone, without a translation, only scales).
+        *registered* is what is listed before the run (stitching, ICP, bead
+        registration: estimated from the content, applied after the nominal
+        run), None when nothing is.  None when the XML has no transforms for
+        the view, or one is malformed."""
+        listed = self.transforms(timepoint, setup)
+        if listed is None:
+            return None
+        nominal, placed, n = np.eye(4), False, len(listed)
+        for name, matrix in reversed(listed):
+            if name is not None and name.lower() not in NOMINAL_TRANSFORMS:
+                break
+            nominal = matrix @ nominal
+            placed = (placed or name is None or name.lower() != "calibration"
+                      or bool(np.any(matrix[:3, 3])))
+            n -= 1
+        registered = None
+        for _, matrix in listed[:n]:
+            registered = matrix if registered is None else registered @ matrix
+        return nominal, placed, registered
 
     def registration(self, timepoint: int, setup: int) -> Optional[np.ndarray]:
         """The view's NOMINAL placement (pixel -> global coordinates), 4 x 4:
@@ -328,19 +401,9 @@ class _Xml:
         composed.  What is listed before it (stitching, ICP, bead
         registration) is a registration estimated from the content: not a
         position (pending history, docs/PROCESSED.md).  None when the XML has
-        no transforms for the view, or places it nowhere: a BigStitcher
-        "calibration" alone, without a translation, only scales."""
-        listed = self.transforms(timepoint, setup)
-        if listed is None:
-            return None
-        nominal, placed = np.eye(4), False
-        for name, matrix in reversed(listed):
-            if name is not None and name.lower() not in NOMINAL_TRANSFORMS:
-                break
-            nominal = matrix @ nominal
-            placed = (placed or name is None or name.lower() != "calibration"
-                      or bool(np.any(matrix[:3, 3])))
-        return nominal if placed else None
+        no transforms for the view, or places it nowhere (``split``)."""
+        parts = self.split(timepoint, setup)
+        return parts[0] if parts is not None and parts[1] else None
 
 
 # -- images ---------------------------------------------------------------------
@@ -508,6 +571,7 @@ def _build(h5, path: str, xml: Optional[_Xml], resolutions: str, tiles: str,
         if len(n_levels) != 1:
             raise UnsupportedFormatError(f"{where}: the channels of {index} store "
                                          f"different numbers of levels {sorted(n_levels)}")
+        views = _Views(xml, group, timepoints, missing)
         pyramid = []
         for level in range(n_levels.pop()):
             datasets = []
@@ -540,8 +604,9 @@ def _build(h5, path: str, xml: Optional[_Xml], resolutions: str, tiles: str,
             level_index = dict(index, resolution=level) if (level or resolutions == "all") else dict(index)
             image = _BdvImage(0, name, level_index, datasets, (len(timepoints), len(group), *zyx),
                               dtype, view, reader, (g, level),
-                              lambda im, group=group: _metadata(xml, group, timepoints, names, im),
+                              lambda im, views=views: _metadata(views, names, im),
                               members)
+            image._views = views
             pyramid.append(image)
         if not pyramid:
             continue
@@ -564,34 +629,206 @@ def _build(h5, path: str, xml: Optional[_Xml], resolutions: str, tiles: str,
     return images
 
 
-def _metadata(xml: Optional[_Xml], group: list, timepoints: list, names: dict, image) -> Metadata:
-    """Pixel sizes (the first channel's voxel size), channel names (the
-    ``channel`` attribute's names) and the position of the first pixel, from
-    the nominal placement (``_Xml.registration``: stage / grid, not a
-    stitching or registration result) when it only scales and shifts."""
-    n_channels = len(group)
-    if xml is None:
-        return Metadata.unknown(n_channels)
-    first = group[0]
+def _pixel_sizes(setup: _Setup) -> dict:
+    """A view setup's voxel size, {axis: Quantity}; an axis without a size
+    or a known unit left out."""
     sizes = {}
-    for axis, value in zip("xyz", first.voxel):
-        q = quantity(value, first.unit)
+    for axis, value in zip("xyz", setup.voxel):
+        q = quantity(value, setup.unit)
         if q is not None:
             sizes[axis] = q
+    return sizes
+
+
+def _scales_and_shifts(matrix: np.ndarray) -> bool:
+    """Whether a placement only scales, by positive factors, and shifts: no
+    rotation, shear or mirror (those are affine edges, not positions)."""
+    linear = matrix[:3, :3]
+    diagonal = np.diag(linear)
+    return bool(np.allclose(linear, np.diag(diagonal)) and np.all(diagonal > 0))
+
+
+def _same(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> bool:
+    """Whether two placements agree (``SAME_PLACEMENT``); None only with None."""
+    if a is None or b is None:
+        return a is b
+    return bool(np.allclose(a, b, rtol=SAME_PLACEMENT, atol=SAME_PLACEMENT))
+
+
+def _shift(vector) -> np.ndarray:
+    out = np.eye(4)
+    out[:3, 3] = vector
+    return out
+
+
+def _lengths(linear: np.ndarray, sizes: dict) -> Optional[np.ndarray]:
+    """How long one unit of BigDataViewer's global space is along x, y and z,
+    in the image's voxel unit.  One pixel step along axis k is the voxel size
+    v_k long and moves by column k of the nominal placement's linear part, in
+    global units.  A placement that only scales gives each axis its own
+    length, v_k / |s_k| (the rule positions use).  One that turns or shears
+    mixes the axes, so the three lengths must agree (``ISOTROPIC``); their
+    mean is used.  None when a voxel size is missing, the units differ, the
+    placement is singular or the lengths disagree: then no edge can say
+    where the image is in the image's units."""
+    if set(sizes) != set("xyz") or len({q.unit for q in sizes.values()}) != 1:
+        return None
+    voxel = np.array([sizes[a].value for a in "xyz"], dtype=float)
+    diagonal = bool(np.allclose(linear, np.diag(np.diag(linear))))
+    steps = np.abs(np.diag(linear)) if diagonal else np.linalg.norm(linear, axis=0)
+    if np.any(steps <= 0) or abs(np.linalg.det(linear)) <= SINGULAR * np.prod(steps):
+        return None
+    lengths = voxel / steps
+    if diagonal:
+        return lengths
+    if lengths.max() - lengths.min() > ISOTROPIC * lengths.max():
+        return None
+    return np.full(3, lengths.mean())
+
+
+class _Placement:
+    """Where an image's views put it (plan 4.8, 9.16), from the XML alone.
+
+    *position*: {axis: Quantity} in ``GLOBAL``, for a nominal placement that
+    only scales and shifts.  *nominal*: the edge from the image into
+    ``GLOBAL`` for a nominal placement that turns, shears or mirrors (then
+    there is no position).  *registered*: the edge from the image into
+    ``REGISTERED``: the nominal placement, then the registration (the
+    estimated part).  Each edge is a 4 x 4 matrix over x, y, z, or None.  It
+    maps the image's coordinates (pixel index times voxel size, plus the
+    position when there is one, plan 3.21) into the global space, in the
+    image's voxel unit."""
+
+    __slots__ = ("position", "nominal", "registered")
+
+    def __init__(self, position: Optional[dict] = None, nominal: Optional[np.ndarray] = None,
+                 registered: Optional[np.ndarray] = None):
+        self.position = position or {}
+        self.nominal = nominal
+        self.registered = registered
+
+
+#: an image its views place nowhere
+NOWHERE = _Placement()
+
+
+def _place(xml: Optional[_Xml], group: list, timepoints: list, missing: set) -> _Placement:
+    """Where the views of an image put it.  An image holds every time point
+    of each of its channels, so its views (views listed as missing aside)
+    must share one nominal placement (``_Xml.split``), or it is placed
+    nowhere: one position or edge cannot hold for all of them.  The
+    registered edge also needs one shared registration.  A stored view
+    without transforms leaves the image unplaced.
+
+    - a nominal placement that only scales, by positive factors, and shifts:
+      the position of the first pixel (the shift, in pixels of the scale,
+      times the voxel size);
+    - one that turns, shears or mirrors: no position, an edge into
+      ``GLOBAL`` (``_lengths`` gives the global space the image's unit);
+    - a registration listed before the nominal run: an edge into
+      ``REGISTERED``, also when the nominal run places the view nowhere (a
+      calibration alone, as bead-registered angles have).
+
+    Reads only the XML, so the file declares its systems and edges without
+    reading any image's metadata."""
+    if xml is None:
+        return NOWHERE
+    first, one_registration = None, True
+    for tp in timepoints:
+        for s in group:
+            if (tp, s.id) in missing:
+                continue
+            parts = xml.split(tp, s.id)
+            if parts is None:
+                return NOWHERE
+            if first is None:
+                first = parts
+            elif parts[1] != first[1] or not _same(parts[0], first[0]):
+                return NOWHERE
+            elif not _same(parts[2], first[2]):
+                one_registration = False
+    if first is None:
+        return NOWHERE
+    nominal, placed, registered = first
+    sizes = _pixel_sizes(group[0])
+    position = {}
+    if placed and sizes and _scales_and_shifts(nominal):
+        for k, axis in enumerate("xyz"):
+            q = sizes.get(axis)
+            if q is not None:
+                position[axis] = Quantity(float(nominal[k, 3] * q.value / nominal[k, k]), q.unit)
+    lengths = _lengths(nominal[:3, :3], sizes)
+    if lengths is None:
+        return _Placement(position)
+    to_image_unit = np.diag([*lengths, 1.0])
+    to_pixels = np.diag([*(1 / sizes[a].value for a in "xyz"), 1.0])
+    if position:                             # an edge starts at the image as placed (3.21)
+        to_pixels = to_pixels @ _shift([-position[a].value for a in "xyz"])
+    edge = to_image_unit @ nominal @ to_pixels if placed and not position else None
+    if registered is not None and one_registration:
+        return _Placement(position, edge, to_image_unit @ registered @ nominal @ to_pixels)
+    return _Placement(position, edge)
+
+
+class _Views:
+    """The stored views of one image and where they put it (``_place``),
+    worked out once, when the declaration or the image's metadata first
+    asks."""
+
+    def __init__(self, xml: Optional[_Xml], group: list, timepoints: list, missing: set):
+        self.xml, self.group, self.timepoints, self.missing = xml, group, timepoints, missing
+        self._placement = None
+
+    def placement(self) -> _Placement:
+        if self._placement is None:
+            self._placement = _place(self.xml, self.group, self.timepoints, self.missing)
+        return self._placement
+
+
+def _edge(matrix: np.ndarray, axes: str, key: tuple, output: str) -> Optional[Transformation]:
+    """An edge of ``_Placement`` as a ``Transformation`` from the image
+    (*key*, its own system) into the system *output*, over the image's
+    *axes* in their order, the same names in the same order on both sides
+    (NGFF 0.6: an affine is an M x (N + 1) matrix, rows and columns in the
+    systems' axis order, the shift last).  Axes other than x, y and z keep
+    their values.  An edge whose linear part is the identity is a
+    ``translation``.  An x, y or z axis the image does not have (dropped by
+    ``open(squeeze=...)``) is at 0: its column drops, and its row must map
+    the image to 0 too, or the edge cannot be written over the image's axes
+    (None)."""
+    for k, axis in enumerate("xyz"):
+        if axis not in axes:
+            kept = [j for j, other in enumerate("xyz") if other in axes] + [3]
+            if not np.allclose(matrix[k, kept], 0, rtol=0, atol=SAME_PLACEMENT):
+                return None
+    rows = []
+    for axis in axes:
+        if axis in "xyz":
+            k = "xyz".index(axis)
+            row = [matrix[k, "xyz".index(b)] if b in "xyz" else 0.0 for b in axes] + [matrix[k, 3]]
+        else:
+            row = [1.0 if b == axis else 0.0 for b in axes] + [0.0]
+        rows.append([float(v) + 0.0 for v in row])           # + 0.0: no -0.0
+    n = len(axes)
+    if np.allclose([row[:n] for row in rows], np.eye(n), rtol=0, atol=IDENTITY):
+        return Transformation("translation", key, output, {"translation": [row[n] for row in rows]})
+    return Transformation("affine", key, output, {"affine": rows})
+
+
+def _metadata(views: _Views, names: dict, image) -> Metadata:
+    """Pixel sizes (the first channel's voxel size), channel names (the
+    ``channel`` attribute's names) and the position of the first pixel in
+    ``GLOBAL`` (``_place``)."""
+    group = views.group
+    if views.xml is None:
+        return Metadata.unknown(len(group))
+    sizes = _pixel_sizes(group[0])
     channel_names = names.get("channel", {})
     channels = tuple(Channel(name=channel_names.get(s.attributes.get("channel")))
                      for s in group)
-    position = {}
-    matrix = xml.registration(timepoints[0], first.id)
-    if matrix is not None and sizes:
-        linear = matrix[:3, :3]
-        diagonal = np.diag(linear)
-        if np.allclose(linear, np.diag(diagonal)) and np.all(diagonal > 0):
-            for k, axis in enumerate("xyz"):
-                q = sizes.get(axis)
-                if q is not None:
-                    position[axis] = Quantity(float(matrix[k, 3] * q.value / diagonal[k]), q.unit)
-    return Metadata(pixel_sizes=sizes, position=position, channels=channels)
+    position = views.placement().position
+    return Metadata(pixel_sizes=sizes, position=position, channels=channels,
+                    coordinate_system=GLOBAL if position else None)
 
 
 class _BdvFile(File):
@@ -602,6 +839,46 @@ class _BdvFile(File):
         super().__init__(path, images)
         self._h5 = h5
         self._reader = reader
+        # kept from the native images, by image key: open(axes=...) replaces
+        # self.images, and every level of an image shares its views
+        self._views = {}
+        for image in images:
+            self._views.setdefault(image_key(image), image._views)
+
+    def _declare_coordinate_systems(self):
+        # BigDataViewer's global space (plan 4.8), when an image is placed in
+        # it or has an edge into it, then its registered twin (3.7, 9.16);
+        # from the XML alone
+        placements = [views.placement() for views in self._views.values()]
+        systems = []
+        if any(p.position or p.nominal is not None for p in placements):
+            systems.append(CoordinateSystem(GLOBAL))
+        if any(p.registered is not None for p in placements):
+            systems.append(CoordinateSystem(REGISTERED, estimated=True))
+        return tuple(systems)
+
+    def _declare_coordinate_transformations(self):
+        # one edge per image into each system, over the image's axes as they
+        # are now (after open(axes=...)); levels share their image's edges
+        edges, seen = [], set()
+        for image in self.images:
+            key = image_key(image)
+            if key in seen or key not in self._views:
+                continue
+            seen.add(key)
+            placement = self._views[key].placement()
+            for matrix, system in ((placement.nominal, GLOBAL), (placement.registered, REGISTERED)):
+                if matrix is None:
+                    continue
+                edge = _edge(matrix, image.axes, key, system)
+                if edge is None:
+                    warnings.warn(UserWarning(
+                        f"{self.path}: {image.name!r} has no edge into {system!r}: its views "
+                        f"leave the plane its axes {image.axes!r} keep (open it with x, y and z, "
+                        "e.g. squeeze=False, for the edge)"), stacklevel=3)
+                else:
+                    edges.append(edge)
+        return tuple(edges)
 
     def close(self) -> None:
         super().close()
