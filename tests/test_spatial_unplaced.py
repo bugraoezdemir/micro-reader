@@ -73,6 +73,7 @@ def _oib(tmp_path):
 
 
 def _nd2_legacy(tmp_path):
+    pytest.importorskip("imagecodecs")      # the legacy ND2 writer compresses with it
     path = str(tmp_path / "legacy.nd2")
     write_legacy_nd2(path, _u2((4, 2, 12, 14)), [("T", 2), ("P", 2)])
     return path
@@ -126,6 +127,7 @@ def _mrc(tmp_path):
 
 
 def _tiff(tmp_path):
+    pytest.importorskip("imagecodecs")      # the TIFF writer compresses with it
     path = str(tmp_path / "plain.tif")
     write_tiff(path, _u2((20, 24)), 16)
     return path
