@@ -560,7 +560,9 @@ def test_label_and_slide_preview_have_no_position(tmp_path):
     for resolutions in ("base", "all"):
         with micro_reader.open(path, resolutions=resolutions) as f:
             assert f.images[0].metadata.position
+            assert f.images[0].metadata.coordinate_system == "stage"
             assert [im.metadata.position for im in f.images[1:]] == [{}, {}]
+            assert [im.metadata.coordinate_system for im in f.images[1:]] == [None, None]
 
 
 def test_a_compressed_label_reads_from_its_own_offsets(tmp_path):
@@ -589,3 +591,125 @@ def test_stitched_is_the_deprecated_name_of_mosaic(tmp_path):
     with old:
         assert len(old.images) == 1
         np.testing.assert_array_equal(old.images[0][...], expected)
+
+
+# -- coordinate systems (plan 4.3, 4.13, 4.18) --------------------------------------------
+
+SCALING = ("<Scaling><Items>"
+           '<Distance Id="X"><Value>1E-06</Value></Distance>'
+           '<Distance Id="Y"><Value>1E-06</Value></Distance>'
+           "</Items></Scaling>")
+
+
+@pytest.fixture
+def metadata_reads(monkeypatch):
+    """How often a CZI image's ``_read_metadata`` ran."""
+    from micro_reader.backends import czi as czi_backend
+    count = [0]
+    real = czi_backend._CziImage._read_metadata
+
+    def counting(self):
+        count[0] += 1
+        return real(self)
+    monkeypatch.setattr(czi_backend._CziImage, "_read_metadata", counting)
+    return count
+
+
+def _tagged(series, mosaic, x, y, stage=None, size=(8, 10)):
+    a = np.zeros(size, np.uint16)
+    t = dict(series=series, mosaic=mosaic, plane={"C": 0}, x=x, y=y, height=size[0],
+             width=size[1], dtype="u2", compression=0, payload=raw_payload(a))
+    if stage is not None:
+        t["tags"] = {"StageXPosition": stage[0], "StageYPosition": stage[1]}
+    return t
+
+
+def test_every_series_is_in_one_stage_system(tmp_path, metadata_reads):
+    """Check 4.13 found a file's series in one stage space: every position
+    names ``stage``.  A series with neither stage tags nor an XML position is
+    unplaced (no system either).  Declaring reads no image's metadata."""
+    from micro_reader._spatial import check_invariants
+    path = str(tmp_path / "scenes.czi")
+    # series 0: two tiles; series 1 far away on the same stage; series 2 untagged
+    tiles = [_tagged(0, 0, 0, 0, (100.5, 200.5)), _tagged(0, 1, 10, 0, (110.5, 200.5)),
+             _tagged(1, 0, 5000, 0, (5100.5, 200.5)), _tagged(2, 0, 9000, 0)]
+    write_raw(path, tiles, SCALING)
+    for tiles_policy, placed in (("mosaic", 2), ("separate", 3)):
+        with micro_reader.open(path, tiles=tiles_policy) as f:
+            assert [s.id for s in f.coordinate_systems] == ["stage"]
+            assert f.coordinate_systems[0].axes is None and not f.coordinate_systems[0].estimated
+            assert f.coordinate_transformations == ()
+            assert metadata_reads[0] == 0                   # declared without metadata
+            check_invariants(f)                             # I1-I3 on every image
+            metas = [im.metadata for im in f.images]
+            assert [m.coordinate_system for m in metas] == ["stage"] * placed + [None]
+            assert metas[-1].position == {}
+            # the series' positions are in one frame: 5000 px of 1 um apart
+            first, far = metas[0].position["x"].value, metas[placed - 1].position["x"].value
+            assert far - first == pytest.approx(5000.0)
+            assert f.canvas().metadata.coordinate_system == "stage"
+        metadata_reads[0] = 0
+
+
+def test_resolution_levels_carry_the_stage_system(tmp_path):
+    a = np.zeros((16, 16), np.uint16)
+    tiles = [dict(series=0, plane={"C": 0}, x=0, y=0, height=16, width=16, dtype="u2",
+                  compression=0, payload=raw_payload(a),
+                  tags={"StageXPosition": 8.0, "StageYPosition": 8.0}),
+             dict(series=0, plane={"C": 0}, x=0, y=0, height=16, width=16, stored=(8, 8),
+                  pyramid=2, dtype="u2", compression=0, payload=raw_payload(a[::2, ::2]))]
+    path = str(tmp_path / "levels.czi")
+    write_raw(path, tiles, SCALING)
+    with micro_reader.open(path, resolutions="all") as f:
+        base, level = f.images
+        assert level.index["resolution"] == 1
+        assert base.metadata.coordinate_system == level.metadata.coordinate_system == "stage"
+        assert level.metadata.position == base.metadata.position
+
+
+def test_a_plate_is_in_the_stage_system(tmp_path):
+    """A Zeiss plate's wells are stage readings of one run (plan 4.3: CZI
+    plates take ``stage``, not one system per well as 4.9's Harmony)."""
+    from micro_reader._spatial import check_invariants
+    from test_hcs import _plate_xml
+    scenes = {0: (2, 2, "B2"), 1: (2, 4, "B4")}
+    path = str(tmp_path / "plate.czi")
+    write_raw(path, [_tagged(0, 0, 0, 0, (900.0, 50.0)), _tagged(1, 0, 9000, 0, (9900.0, 50.0))],
+              SCALING + _plate_xml(scenes))
+    with micro_reader.open(path, plates=True) as f:
+        assert f.plates and [s.id for s in f.coordinate_systems] == ["stage"]
+        check_invariants(f)
+        assert [im.metadata.coordinate_system for im in f.images] == ["stage", "stage"]
+
+
+def test_label_and_preview_are_unplaced_and_their_file_declares_nothing(tmp_path,
+                                                                       metadata_reads):
+    """4.18: the label and slide preview have no position and no system,
+    also when their inner CZIs carry stage tags; the embedded CZIs declare
+    no system of their own."""
+    from micro_reader._spatial import check_invariants
+    stage = (1500.5, -200.25)
+    write_raw(str(tmp_path / "label.czi"), [_tagged(0, 0, 0, 0, stage)], SCALING)
+    write_raw(str(tmp_path / "preview.czi"), [_tagged(0, 0, 0, 0, stage)], SCALING)
+    path = str(tmp_path / "slide.czi")
+    write_raw(path, [_tagged(0, 0, 0, 0, stage)], SCALING,
+              attachments=[("SlidePreview", "CZI", (tmp_path / "preview.czi").read_bytes()),
+                           ("Label", "CZI", (tmp_path / "label.czi").read_bytes())])
+    with micro_reader.open(str(tmp_path / "label.czi")) as alone:   # a file of its own
+        assert alone.images[0].metadata.coordinate_system == "stage"
+    metadata_reads[0] = 0
+    with micro_reader.open(path) as f:
+        assert [s.id for s in f.coordinate_systems] == ["stage"]
+        assert metadata_reads[0] == 0
+        assert [inner.coordinate_systems for inner in f._attached] == [(), ()]
+        check_invariants(f)
+        slide, *attached = f.images
+        assert slide.metadata.coordinate_system == "stage"
+        assert len(attached) == 2
+        for im in attached:
+            assert im.metadata.position == {} and im.metadata.coordinate_system is None
+
+
+def test_czi_is_checked_strictly_by_the_session():
+    import conftest
+    assert "czi" not in conftest.POSITIONS_WITHOUT_A_SYSTEM

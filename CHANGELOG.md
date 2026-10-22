@@ -1,6 +1,48 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.2.0 (2026-10-22): coordinate systems and the file's tree
+
+A minor release under the release policy: positions some users already have change (the
+QPTIFF overview and label pictures, the ND2 y step, a Leica SCN macro picture), so it is
+not a patch. eubi-bridge 0.3.0 and 0.3.1 bound micro-reader below 0.2 and keep 0.1.0;
+eubi-bridge 0.3.2 is the first that reads 0.2.0 (it writes each image's coordinate system).
+The new attributes are additive: code that reads only `metadata.position` keeps working.
+
+### Added
+
+- **Coordinate systems.** A position now says which space it is in. `File.coordinate_systems` lists the shared coordinate systems of a file (`CoordinateSystem(id, name, axes, estimated)`), declared when the file opens, without reading any image's metadata. `Metadata.coordinate_system` is the id of the system `metadata.position` is in: set exactly when the position is not empty, None for an image without a position. `Metadata.unplaced()` drops both. Ids are made of `[a-zA-Z0-9_-]` only: other characters become `_`, and an id never holds `.` or `--`.
+- **Systems per format.**
+
+  | Format | System |
+  | --- | --- |
+  | CZI | `stage`, one per file. Label and slide-preview pictures have no position. |
+  | ND2 | `stage`, for files calibrated with a camera-to-stage matrix |
+  | OME-TIFF, OME companion sets | `stage` |
+  | Imaris | `stage` |
+  | Leica LIF | `stage` when all placed elements come from one session (one microscope, one LAS X run, no break over 2 hours); a file of several sessions gets one system per session, `stage-r0`, `stage-r1`, ... in series order; an element that records too little to tie it to a session gets `stage-s<series>` |
+  | Harmony, CellVoyager plates | one per well: `well-B2`; `well-p<plate>-B2` with several plates. Positions are relative to the well centre. |
+  | SVS, SCN, QPTIFF slides | `slide` |
+  | FluoView tiling sets (`.omp2info`) | `stage`, all groups |
+  | BigDataViewer / BigStitcher | `global`, for images whose view transforms are plain (diagonal, positive) |
+
+  Every other format gives no position and declares no system.
+- **Transformations.** `File.coordinate_transformations` holds the edges that are not plain positions (`Transformation(type, input, output, params, name)`). BigDataViewer fills it: an image whose nominal view transform turns, shears or mirrors it gets an affine edge into `global` instead of a position, and a registration (stitching, ICP, bead registration) becomes an edge into `global-registered`, a system marked `estimated=True`.
+- **The file's tree.** `File.collection` is a `Collection(name, kind, index, children)`: plate > well > field, and series outside plates. A field or series holding one image is that image; tiles, views and resolution levels make no collection of their own. It is built from the current images, so it follows `open(axes=...)`, and it reads no image metadata. The root is named after the file without its extension (`cells.ome.tif` and `cells.ome.zarr` give `cells`; a folder keeps its name), a plate without a name is `plate<n>`; ome_zarr_pyramid builds the same tree.
+- `Axis`, `CoordinateSystem`, `Transformation`, `Collection` and `InvariantError` are exported from `micro_reader`.
+
+### Fixes
+
+- QPTIFF overview and label pictures were placed by their corner, about 31 mm off: their position tags are centres, and are now read as such.
+- A BigDataViewer image is placed only when all its views (every time point and channel) share one placement; before, only the first view was read.
+- A Leica SCN macro picture is placed on the slide, in the same frame as the scan.
+- An ND2 position steps along y by the y pixel size (it used x's; the same value in every file seen so far).
+
+### Known limits
+
+- Leica positions are unchanged and can be tens of micrometres off (field centre versus first pixel); a check is planned.
+- The FluoView tiling grid step comes from one public sample and is 2-6 px short per tile on it.
+
+## 0.1.0 (2026-10-21)
 
 ### Breaking changes
 

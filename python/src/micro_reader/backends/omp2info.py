@@ -15,14 +15,28 @@ record of where they go.
   read); its metadata is the tile file's, with the position from the index
   (the first pixel's centre: ``areaLeft + xIndex * step`` plus half a pixel;
   y likewise).  Positions are nominal (the protocol's grid), not registered.
+  Every position, of every group, is in the one coordinate system ``stage``
+  (plan 4.10): ``areaLeft`` / ``areaTop`` are stage coordinates for all the
+  groups of a protocol (the one sample has one group).  A tile file without
+  a pixel size has no position (and no system).  A plain OIR opened alone has
+  no position (plan 4.12).
 - The grid step is ``areaWidth * (1 - overlap / 200)``: the protocol's
   ``overlap`` (``matl:stage/matl:overlap``, %) shared by the two tiles of a
-  seam.  Derived from the one sample (2026-10-18): ``areaWidth`` is exactly a
-  tile's field (512 px); FluoView's own stitched image holds all 25 tiles
-  pixel for pixel, at a fitted step of 487.2 px in y and 490.7 in x (+-9 px
-  registration corrections).  This rule's 486.4 px matches y and is 4.3 px
-  per column short in x; a step of the whole field (512) or of the full 10 %
-  overlap (460.8) is off by 21-30 px per tile.  To confirm on a second sample.
+  seam.  **Derived from one sample only** (ome-zenodo-13680725, 25 tiles of
+  512 px, overlap 10 %; plan check 4.19, closed 2026-10-20 as "one sample": no
+  second sample was found locally, on the OME downloads, on Zenodo or on the
+  BioImage Archive).  Check it again when a second sample turns up.  On that
+  sample ``areaWidth`` is exactly a tile's field (512 px), and the rule's
+  486.4 px is short in both axes: FluoView's own stitched image holds the 25
+  tiles pixel for pixel at a fitted step of 490.4 px along ``xIndex`` and
+  488.4 along ``yIndex`` (rms 1.3 / 1.1 px, the grid turned by -0.3 deg), and
+  the seams between neighbours match at a median 492 px.  So the positions
+  fall short by 2-6 px per grid step (24-34 px at the sample's last column); a
+  step of the whole field (512) or of the full overlap (460.8) is off by 20-31
+  px per tile.  The stitched image's size (3554 x 2540 = 6 x 507 + 512 by
+  4 x 507 + 512) is no guide to the step: its content sits on the ~490 px grid
+  inside an empty margin.  The rule may not hold for other objectives,
+  overlaps or FluoView versions.
 - ``tiles="mosaic"``: one image per group, the tiles placed at those positions
   on one canvas (``_mosaic.Mosaic``: fusion "overwrite", later tile on top;
   areas without a tile read as 0).
@@ -45,11 +59,14 @@ from .._base import File, Image
 from .._errors import CorruptFileError, MissingImagesWarning, UnsupportedFormatError
 from .._metadata import quantity
 from .._mosaic import Mosaic
+from .._spatial import CoordinateSystem, system_id
 
 NAME = "omp2info"
 #: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
 SET_INDEX = True
 MATL = "{http://www.olympus.co.jp/hpf/protocol/matl/model/matl}"
+#: the coordinate system of every position: the protocol's stage, all groups (plan 4.10)
+STAGE = system_id("stage")
 
 
 def sniff(head: bytes, path: str) -> bool:
@@ -118,23 +135,23 @@ class _Tile(Image):
         return self._image()._read_block(block)
 
     def _read_metadata(self):
-        md = self._image().metadata
-        return replace(md, position=_first_pixel(md, self._corner))
+        return _first_pixel(self._image().metadata, self._corner)
 
     def close(self) -> None:
         self._closed = True
 
 
-def _first_pixel(md, corner: tuple) -> dict:
-    """*md*'s position with x / y the centre of the first pixel of a tile whose
-    corner is *corner* (nm); z as the tile file has it."""
+def _first_pixel(md, corner: tuple):
+    """*md* placed with x / y the centre of the first pixel of a tile whose
+    corner is *corner* (nm), in ``STAGE``; z as the tile file has it (a plain
+    OIR gives none).  No pixel size, no position: unplaced (plan I3)."""
     position = dict(md.position)
     for axis, value in zip("xy", corner):
         px = md.pixel_sizes.get(axis)
         if px is not None:
             position[axis] = quantity(value / 1000 + px.to("micrometer").value / 2,
                                       "micrometer", positive=False)
-    return position
+    return replace(md, position=position, coordinate_system=STAGE if position else None)
 
 
 class _TilingMosaic(Mosaic):
@@ -146,8 +163,7 @@ class _TilingMosaic(Mosaic):
         self._corner = corner
 
     def _read_metadata(self):
-        md = self._tiles[0][0].metadata
-        return replace(md, position=_first_pixel(md, self._corner))
+        return _first_pixel(self._tiles[0][0].metadata, self._corner)
 
 
 class _TilingFile(File):
@@ -236,6 +252,11 @@ class _TilingFile(File):
                     len(images), [(t, round(yi * step_y), round(xi * step_x)) for t, xi, yi, _c in placed],
                     f"{where} group {g}", {"series": g}, corner))
         super().__init__(path, images)
+
+    def _declare_coordinate_systems(self):
+        # one stage for the whole protocol (plan 4.10): every group's grid is
+        # in its stage coordinates, known from the index alone
+        return (CoordinateSystem(STAGE),)
 
     def _member_files(self) -> set:
         return {tile._path for image in self.images

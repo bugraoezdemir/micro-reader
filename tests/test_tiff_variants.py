@@ -6,6 +6,7 @@ spread over several files."""
 from __future__ import annotations
 
 import re
+import types
 
 import numpy as np
 import pytest
@@ -204,6 +205,173 @@ def test_philips_levels_macro_metadata(tmp_path):
         sizes = f.images[0].metadata.pixel_sizes
         assert sizes["x"].to("micrometer").value == pytest.approx(0.25)
         assert sizes["y"].to("micrometer").value == pytest.approx(0.25)
+        assert f.coordinate_systems == ()                       # Philips records no position
+        assert all(im.metadata.position == {} for im in f.images)
+
+
+# -- the slide's coordinate system (plan 4.11) ---------------------------------------
+
+@pytest.fixture
+def reads(monkeypatch):
+    """The TIFF images whose metadata is read from the file, in order."""
+    from micro_reader.backends import tiff
+    seen = []
+    real = tiff._TiffImage._read_metadata
+    monkeypatch.setattr(tiff._TiffImage, "_read_metadata",
+                        lambda self: seen.append(self) or real(self))
+    return seen
+
+
+def _um(q):
+    return q.to("micrometer").value
+
+
+def _declares_slide(f, reads):
+    """*f* declares ``slide`` alone, without reading any image's metadata."""
+    assert [s.id for s in f.coordinate_systems] == ["slide"]
+    assert f.coordinate_systems[0].axes is None and not f.coordinate_systems[0].estimated
+    assert reads == []
+
+
+def test_svs_slide_is_placed_on_the_slide_label_and_macro_are_not(tmp_path, reads):
+    from micro_reader._spatial import check_invariants
+    path = str(tmp_path / "slide.svs")
+    _svs(path)
+    with micro_reader.open(path) as f:
+        _declares_slide(f, reads)
+        base, label, macro = f.images
+        assert base.metadata.coordinate_system == "slide" and set(base.metadata.position) == {"x", "y"}
+        for im in (label, macro):                               # 4.11: no position recorded
+            assert im.metadata.position == {} and im.metadata.coordinate_system is None
+        check_invariants(f)
+
+
+def test_svs_without_left_top_is_unplaced(tmp_path):
+    from micro_reader._spatial import check_invariants
+    path = str(tmp_path / "slide.svs")
+    with tifffile.TiffWriter(path) as tw:
+        tw.write(_rgb((80, 96)), metadata=None, tile=(32, 32), photometric="rgb",
+                 description="Aperio Image Library v12.0.0\r\n96x80 [0,0 96x80] (32x32) RAW|MPP = 0.5")
+    with micro_reader.open(path) as f:
+        assert [s.id for s in f.coordinate_systems] == ["slide"]
+        meta = f.images[0].metadata
+        assert _um(meta.pixel_sizes["x"]) == pytest.approx(0.5)
+        assert meta.position == {} and meta.coordinate_system is None
+        check_invariants(f)
+
+
+def test_scn_images_and_macro_are_on_the_slide(tmp_path, reads):
+    """The macro's view is the whole collection, the frame of every view's
+    offset: it is placed too (4.11), and so are the resolution levels (8.22)."""
+    from micro_reader._spatial import check_invariants
+    path = str(tmp_path / "slide.scn")
+    with tifffile.TiffWriter(path) as tw:
+        tw.write(_rgb((120, 40)), metadata=None, photometric="rgb", tile=(16, 16), description=SCN_XML)
+        for shape in ((48, 64), (48, 64), (12, 16), (12, 16)):
+            tw.write(np.zeros(shape, np.uint8), metadata=None, tile=(16, 16))
+    with micro_reader.open(path, resolutions="all") as f:
+        _declares_slide(f, reads)
+        assert [(im.name, im.index["resolution"]) for im in f.images] == [
+            ("macro", 0), ("tissue", 0), ("tissue", 1)]
+        macro, tissue, level = (im.metadata for im in f.images)
+        assert macro.coordinate_system == "slide"
+        assert macro.position == {"x": Quantity(12500.0, "nanometer"),     # half a 25 um pixel
+                                  "y": Quantity(12500.0, "nanometer")}
+        assert tissue.coordinate_system == level.coordinate_system == "slide"
+        assert level.position == tissue.position                         # level 0's (8.22)
+        check_invariants(f)
+
+
+def _qptiff_slide(path, overview_type="Overview", label_type="Label"):
+    """A pyramidal QPTIFF: 2 channels (0.5 um pixels, corner 500 / 4250 um),
+    thumbnail, level 1, then the overview and label, whose X/YPosition tags
+    give their centre (check 4.20).  ``None`` for a type: no ImageType."""
+    def description(image_type, name=None):
+        return _qpi_description(image_type, name) if image_type else \
+            '<?xml version="1.0" encoding="utf-16"?>\r\n<PerkinElmer-QPI-ImageDescription/>'
+
+    def tags(x, y):                                         # cm, as rationals
+        return [(286, 5, 1, x, True), (287, 5, 1, y, True)]
+
+    common = dict(metadata=None, software="PerkinElmer-QPI", resolutionunit="CENTIMETER")
+    corner = tags((1, 20), (17, 40))                        # 0.05 cm, 0.425 cm
+    with tifffile.TiffWriter(path) as tw:
+        for name in ("DAPI", "FITC"):
+            tw.write(np.zeros((32, 32), np.uint8), tile=(16, 16), resolution=(20000, 20000),
+                     extratags=corner, description=description("FullResolution", name), **common)
+        tw.write(_rgb((8, 8)), photometric="rgb", resolution=(2000, 2000), extratags=corner,
+                 description=description("Thumbnail"), **common)
+        for name in ("DAPI", "FITC"):
+            tw.write(np.zeros((16, 16), np.uint8), tile=(16, 16), resolution=(10000, 10000),
+                     extratags=corner, description=description("ReducedResolution", name), **common)
+        # overview: 10 um pixels, 20 x 60 px, centre 0.1 / 0.3 cm; label: 20 um, 20 x 20, 0.1 / 0.05 cm
+        tw.write(_rgb((60, 20)), photometric="rgb", resolution=(1000, 1000),
+                 extratags=tags((1, 10), (3, 10)), description=description(overview_type), **common)
+        tw.write(_rgb((20, 20)), photometric="rgb", resolution=(500, 500),
+                 extratags=tags((1, 10), (1, 20)), description=description(label_type), **common)
+
+
+def test_qptiff_scan_thumbnail_overview_and_label_on_the_slide(tmp_path, reads):
+    """The scan and its thumbnail record their corner, the overview and
+    label their centre (check 4.20): each first pixel follows from that."""
+    from micro_reader._spatial import check_invariants
+    path = str(tmp_path / "scan.qptiff")
+    _qptiff_slide(path)
+    with micro_reader.open(path, resolutions="all") as f:
+        _declares_slide(f, reads)
+        assert [(im.name, im.index["resolution"]) for im in f.images] == [
+            ("Baseline", 0), ("Resolution", 1), ("thumbnail", 0), ("macro", 0), ("label", 0)]
+        first = {(im.index["series"], im.index["resolution"]): im.metadata for im in f.images}
+        expected = {(0, 0): (500 + 0.25, 4250 + 0.25),               # scan: corner + half a pixel
+                    (0, 1): (500 + 0.25, 4250 + 0.25),               # its level: level 0's (8.22)
+                    (1, 0): (500 + 2.5, 4250 + 2.5),                 # thumbnail: corner
+                    (2, 0): (1000 - 9.5 * 10, 3000 - 29.5 * 10),     # overview: centre - (n - 1) / 2 px
+                    (3, 0): (1000 - 9.5 * 20, 500 - 9.5 * 20)}       # label: the same
+        for key, (x, y) in expected.items():
+            meta = first[key]
+            assert meta.coordinate_system == "slide", key
+            assert (_um(meta.position["x"]), _um(meta.position["y"])) == (
+                pytest.approx(x), pytest.approx(y)), key
+        check_invariants(f)
+
+
+@pytest.mark.parametrize("image_type", [None, "Unknown"])
+def test_qptiff_overview_of_unknown_type_is_unplaced(tmp_path, image_type):
+    """Only the ImageTypes check 4.20 verified are placed: an overview and
+    label without one (or of another type) keep their pixel size, no position."""
+    from micro_reader._spatial import check_invariants
+    path = str(tmp_path / "scan.qptiff")
+    _qptiff_slide(path, overview_type=image_type, label_type=image_type)
+    with micro_reader.open(path) as f:
+        by_name = {im.name: im.metadata for im in f.images}
+        assert by_name["Baseline"].coordinate_system == "slide"
+        for name in ("macro", "label"):
+            assert by_name[name].pixel_sizes and by_name[name].position == {}, name
+            assert by_name[name].coordinate_system is None
+        check_invariants(f)
+
+
+def test_qptiff_without_image_type_keeps_the_scan_corner(tmp_path):
+    """A scan page without an ImageType is still the scan (series ``Baseline``):
+    its corner reading stays."""
+    path = str(tmp_path / "scan.qptiff")
+    with tifffile.TiffWriter(path) as tw:
+        tw.write(np.zeros((40, 56), np.uint8), metadata=None, software="PerkinElmer-QPI",
+                 resolution=(20000, 20000), resolutionunit="CENTIMETER",
+                 extratags=[(286, 5, 1, (1, 2), True), (287, 5, 1, (17, 4), True)],
+                 description='<?xml version="1.0"?><PerkinElmer-QPI-ImageDescription/>')
+    with micro_reader.open(path) as f:
+        meta = f.images[0].metadata
+        assert meta.coordinate_system == "slide"
+        assert _um(meta.position["x"]) == pytest.approx(5000 + 0.25)
+
+
+def test_the_slide_formats_are_checked_strictly():
+    """The session check fails the run for a slide position without a system."""
+    import conftest
+    assert "tiff" not in conftest.POSITIONS_WITHOUT_A_SYSTEM
+    for fmt in ("svs", "scn", "qptiff"):
+        assert conftest.strict_placement(types.SimpleNamespace(backend="tiff", format=fmt))
 
 
 # -- Ventana BIF -------------------------------------------------------------------------

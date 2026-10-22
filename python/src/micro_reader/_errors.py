@@ -14,6 +14,14 @@ class CorruptFileError(MicroReaderError):
     """The file is recognised but inconsistent, e.g. truncated."""
 
 
+class InvariantError(MicroReaderError):
+    """The spatial model's invariants (plan 3.22) do not hold for a file: a
+    coordinate system id that is not one micro-reader makes or not unique
+    (I1), a position in a system the file does not declare or an estimated
+    one (I2), a position and a coordinate system given without each other
+    (I3), or an edge whose end is neither (I5).  A backend bug."""
+
+
 class OpenInstead(Exception):
     """Internal, not an error: a backend found that *path* is a member of a set
     and that the set's metadata file (``.path``) is what opens it (``open``'s

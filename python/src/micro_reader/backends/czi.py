@@ -21,6 +21,10 @@ Uncompressed subblocks are read exactly: only the rows and columns of each
 tile that fall into the requested rectangle.  ``canvas()`` composes all
 scenes.
 
+Positions (docs/METADATA.md) are all in one coordinate system, ``stage``:
+the series of a file share one stage space (plan 4.3, check 4.13).  The
+slide's label and preview are never placed (4.18).
+
 Axes: ``t c z y x``, and ``s`` for RGB pixels -- samples in R, G, B (A)
 order (CZI stores them B, G, R).  Not yet: compressed subblocks (zstd: next step, native;
 JPEG-XR / JPEG / LZW), multi-part files, complex pixel types.
@@ -47,6 +51,7 @@ from .._base import File, Image
 from .._errors import CorruptFileError, MicroReaderError, UnsupportedFormatError
 from .._io import DecodeCache, ThreadHandles
 from .._plate import Plate, Well, layout as layout_names, row_label
+from .._spatial import CoordinateSystem
 
 NAME = "czi"
 #: reads a plate's layout and indexes its images by well and field
@@ -816,8 +821,9 @@ class _CziImage(Image):
         from ._czi_metadata import czi_metadata
         meta = czi_metadata(self, self._czi._handles.get(), self._czi._xml_root)
         if meta is not None and getattr(self, "_attachment", False):
-            # a label / slide preview: no position until its frame is verified (4.18)
-            meta = replace(meta, position={})
+            # a label / slide preview: no position (and no system) until its
+            # frame is verified (4.18)
+            meta = meta.unplaced()
         return meta
 
     def close(self) -> None:
@@ -1060,9 +1066,10 @@ class _CziFile(File):
     def _attached_images(self, images: list, resolutions: str, listed: bool) -> list:
         """The slide's label and preview (CZI attachments holding a CZI of
         their own), as further series after the file's own.  They have no
-        stage position (``metadata.position`` is empty): their inner CZI's
-        stage tags are in a frame not verified against the slide's (plan
-        4.18)."""
+        stage position (``metadata.position`` is empty, ``coordinate_system``
+        None): their inner CZI's stage tags are in a frame not verified
+        against the slide's (plan 4.18: on the two previews with tags, the
+        tags put them tens of mm away from the scan they show)."""
         with self._open_raw() as fh:
             found = _attachments(fh)
         series = max([im.index.get("series", -1) for im in images] + [-1]) + 1
@@ -1092,6 +1099,13 @@ class _CziFile(File):
                     out.extend(picture.resolutions if listed else [picture])
                     series += 1
         return out
+
+    def _declare_coordinate_systems(self):
+        # one stage space for the whole file (plan 4.3, check 4.13), plates
+        # included: positions are stage readings.  An embedded CZI (a label
+        # or preview) declares none: its pictures are never placed (4.18).
+        from ._czi_metadata import STAGE
+        return () if self._base else (CoordinateSystem(STAGE),)
 
     def _plate_map(self, groups: dict) -> tuple:
         """``({series: (well, field)}, Plate)`` when the file is a plate

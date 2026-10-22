@@ -125,6 +125,35 @@ def test_metadata_channels_pixel_sizes_and_position(tmp_path):
         assert md.position["z"].value == -3.0
 
 
+def test_one_coordinate_system_per_well(tmp_path, monkeypatch):
+    """As for Harmony (plan 4.9): ``well-B2``, ``well-C5``, declared at open
+    without reading any metadata; each field names its well's system."""
+    from micro_reader._spatial import check_invariants
+    reads = []
+    real = cv7000._CVImage._read_metadata
+    monkeypatch.setattr(cv7000._CVImage, "_read_metadata",
+                        lambda self: reads.append(self.name) or real(self))
+    _write(str(tmp_path))
+    with micro_reader.open(tmp_path / "P1.wpi") as f:
+        assert [(s.id, s.name) for s in f.coordinate_systems] == [
+            ("well-B2", "well B2"), ("well-C5", "well C5")]
+        assert reads == []
+        assert [image.metadata.coordinate_system for image in f.images] == [
+            "well-B2", "well-B2", "well-C5", "well-C5"]
+        check_invariants(f)
+
+
+def test_a_record_without_stage_coordinates_is_unplaced(tmp_path):
+    import re
+    _write(str(tmp_path), wells=((2, 2),), fields=1)
+    mlf = tmp_path / "MeasurementData.mlf"
+    mlf.write_text(re.sub(r' bts:[XYZ]="[^"]*"', "", mlf.read_text(encoding="utf-8")),
+                   encoding="utf-8")
+    with micro_reader.open(tmp_path / "P1.wpi") as f:
+        md = f.images[0].metadata
+        assert md.position == {} and md.coordinate_system is None
+
+
 def test_default_targets_are_named_by_their_light_source(tmp_path):
     """The software's default Target "Microscope Image" names nothing (BIA
     S-BIAD1013 / S-BIAD3934): the light source does, plus the filter when two
@@ -172,6 +201,8 @@ def test_a_three_d_action_next_to_a_two_d_one_is_ragged(tmp_path):
         assert flat.shape == (1, 1, 1, Y, X) and stack.shape == (1, 1, 4, Y, X)
         assert stack.metadata.pixel_sizes["z"] == micro_reader.Quantity(2.0, "micrometer")
         assert stack.metadata.position["z"].value == 0.0
+        # the whole and each part are in their well's system
+        assert {i.metadata.coordinate_system for i in (whole, flat, stack)} == {"well-B2"}
         # BFP at z = 3.0: nearest slice of 0, 2, 4, 6 is 1 (a tie with 2 goes to the first)
         np.testing.assert_array_equal(whole[0, 0, 1], data[(2, 2, 1, 1, 1, 1)])
         assert not np.delete(whole[0, 0], 1, axis=0).any()

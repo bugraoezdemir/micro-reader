@@ -13,7 +13,8 @@ OME-TIFFs: each ``TiffData`` says which file (``UUID FileName``), which pages
   wins; the members' own metadata only fills its gaps, with a
   ``CompanionWarning`` (never their bare TIFF resolution tags). The z step
   comes from ``PhysicalSizeZ``, else the planes' even ``PositionZ`` steps,
-  else the members.
+  else the members. Positions (``Plane`` PositionX / Y) are in the set's one
+  ``stage`` system (plan 4.6), also for a member opened on its own.
 - Matching: a member belongs to the set when its own OME UUID is the one the
   companion lists for it, or its ``BinaryOnly`` stub points to this
   companion's UUID; it is an error when a check fails and none passes; without
@@ -47,8 +48,9 @@ from .._base import File
 from .._errors import CompanionWarning, CorruptFileError, UnsupportedFormatError
 from .._fileset import Members, PlaneImage, keep_fields
 from .._metadata import Metadata, quantity
+from .._spatial import CoordinateSystem
 from .tiff import PLAIN_PAGES
-from ._tiff_metadata import (OME_DEFAULT_LENGTH, _children, _local, ome_annotations,
+from ._tiff_metadata import (OME_DEFAULT_LENGTH, STAGE, _children, _local, ome_annotations,
                              ome_image_metadata, ome_plane_position, tiff_metadata)
 
 NAME = "companion"
@@ -413,7 +415,8 @@ def _series_metadata(core: Core, s: _Series, index: dict, *, members=None, start
     if tuple(start) != (0, 0, 0):
         plane = s.plane_at(start)
         if plane is not None:
-            changes["position"] = ome_plane_position(plane, meta.pixel_sizes, s.sizes)
+            position = ome_plane_position(plane, meta.pixel_sizes, s.sizes)
+            changes.update(position=position, coordinate_system=STAGE if position else None)
     sizes = dict(meta.pixel_sizes)
     missing = [a for a in "xyzt" if a not in sizes and (a in "xy" or s.sizes[a] > 1)]
     if missing and members is not None:
@@ -456,6 +459,9 @@ def _position_z_step(s: _Series):
 class _CompanionFile(File):
     backend = NAME
     format = "ome-companion"
+
+    def _declare_coordinate_systems(self):
+        return (CoordinateSystem(STAGE),)        # every Plane position (plan 4.6)
 
     def __init__(self, path: str):
         core = load(path)
@@ -520,6 +526,9 @@ class _MemberFile(File):
         self._members = members
         #: the companion file the metadata came from
         self.companion = companion
+
+    def _declare_coordinate_systems(self):
+        return (CoordinateSystem(STAGE),)        # its companion's positions (plan 4.6)
 
     def close(self) -> None:
         super().close()

@@ -15,6 +15,11 @@ One image, full resolution, axes ``tczyx``; every ``ResolutionLevel r`` is in
 ``image.resolutions``, and an image of its own with ``resolutions="all"``
 (index ``{"series": 0, "resolution": r}``).
 
+The position (x and y of the first pixel's centre, from ``ExtMin``; z is left
+out on purpose, plan 4.17) is in the coordinate system ``stage``, one per file:
+the one volume read (the ``DataSet`` group) has one extent, and its levels keep
+level 0's position (plan 4.7, check 4.14).
+
 This backend also answers for HDF5 files of no layout micro-reader reads (it is
 the last HDF5 backend tried): they are refused with the datasets they hold, and
 without h5py every HDF5 file comes here to say which extra to install.
@@ -31,10 +36,13 @@ from .. import _parts
 from .._base import File, Image
 from .._errors import CorruptFileError, MissingImagesWarning, UnsupportedFormatError
 from .._metadata import Channel, Metadata, Quantity, color_hex, quantity
+from .._spatial import CoordinateSystem, system_id
 from . import _hdf5
 from ._hdf5 import attr_text as _attr_str
 
 NAME = "ims"
+#: the coordinate system of the position: the one frame of the file's volume
+STAGE = system_id("stage")
 
 
 def sniff(head: bytes, path: str) -> bool:
@@ -186,15 +194,13 @@ class _ImsImage(Image):
             return _metadata(self._h5, self.shape, self._channel_ids)
 
 
-def _metadata(h5, shape: tuple, channel_ids: list):
-    """``DataSetInfo``: the volume's extent (``ExtMin`` / ``ExtMax`` 0-2 = x,
-    y, z, edges of the outer pixels, in ``Unit``) over the image size gives
-    the pixel sizes and the position of the first pixel; ``TimeInfo`` the
-    time points; ``Channel c`` name, colour (``r g b`` in 0-1) and
-    wavelengths (nm)."""
-    if "DataSetInfo" not in h5:
-        return None
-    info = h5["DataSetInfo"]
+def _extent(h5, shape: tuple) -> tuple:
+    """``DataSetInfo/Image``: the volume's extent (``ExtMin`` / ``ExtMax`` 0-2
+    = x, y, z, edges of the outer pixels, in ``Unit``) over the image size
+    (*shape*: the level-0 ``tczyx`` shape) -> (pixel sizes, position): the
+    position of the first pixel's centre, x and y only (z is dropped on
+    purpose, plan 4.17)."""
+    info = h5["DataSetInfo"] if "DataSetInfo" in h5 else {}
     image = info["Image"].attrs if "Image" in info else {}
     unit = _attr_str(image, "Unit") or "um"
     sizes, position = {}, {}
@@ -209,6 +215,18 @@ def _metadata(h5, shape: tuple, channel_ids: list):
             sizes[axis] = size
             if axis != "z":
                 position[axis] = Quantity(lo.value + size.value / 2, lo.unit)
+    return sizes, position
+
+
+def _metadata(h5, shape: tuple, channel_ids: list):
+    """``DataSetInfo``: the extent gives the pixel sizes and the position of
+    the first pixel (``_extent``, in ``STAGE``); ``TimeInfo`` the time
+    points; ``Channel c`` name, colour (``r g b`` in 0-1) and wavelengths
+    (nm)."""
+    if "DataSetInfo" not in h5:
+        return None
+    info = h5["DataSetInfo"]
+    sizes, position = _extent(h5, shape)
     times = _time_points(info["TimeInfo"].attrs) if "TimeInfo" in info else []
     if len(times) > 1 and shape[0] > 1:
         step = quantity((times[-1] - times[0]).total_seconds() / (len(times) - 1), "second")
@@ -231,7 +249,8 @@ def _metadata(h5, shape: tuple, channel_ids: list):
             emission_wavelength=quantity(_attr_str(attrs, "LSMEmissionWavelength"), "nanometer"),
             excitation_wavelength=quantity(_attr_str(attrs, "LSMExcitationWavelength"),
                                            "nanometer")))
-    return Metadata(pixel_sizes=sizes, position=position, channels=tuple(channels))
+    return Metadata(pixel_sizes=sizes, position=position, channels=tuple(channels),
+                    coordinate_system=STAGE if position else None)
 
 
 def _time_points(attrs) -> list:
@@ -256,6 +275,19 @@ class _ImsFile(File):
         super().__init__(path, images)
         self._h5 = h5
         self._reader = reader
+
+    def _declare_coordinate_systems(self):
+        # one stage per file (plan 4.7, check 4.14), when the extent gives a
+        # position at all: the same few header attributes metadata reads,
+        # not the image's metadata
+        first = self.images[0]
+        base = getattr(first, "source", first).resolutions[0]     # open(axes=...) wraps it
+        if base._closed:
+            raise ValueError("this Imaris file has been closed (File.close() or the end "
+                             "of a with block): read coordinate_systems before closing it")
+        with self._reader.lock:
+            placed = bool(_extent(self._h5, base.shape)[1])
+        return (CoordinateSystem(STAGE),) if placed else ()
 
     def close(self) -> None:
         super().close()

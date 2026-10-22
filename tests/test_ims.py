@@ -410,3 +410,91 @@ def test_multifile_group_files(tmp_path, monkeypatch):
     assert [os.path.basename(p) for p in group.parts] == parts
     assert [os.path.basename(p) for p in g.singles] == ["set.h5"]           # the copy
     assert sorted(reads) == parts
+
+
+# -- coordinate systems (plan 4.7, check 4.14) ----------------------------------------
+
+@pytest.fixture
+def metadata_reads(monkeypatch):
+    """How often an Imaris image's ``_read_metadata`` ran."""
+    from micro_reader.backends import ims
+    count = [0]
+    real = ims._ImsImage._read_metadata
+
+    def counting(self):
+        count[0] += 1
+        return real(self)
+    monkeypatch.setattr(ims._ImsImage, "_read_metadata", counting)
+    return count
+
+
+def _set_extent(path, extent, unit="um"):
+    """``DataSetInfo/Image`` ``ExtMin`` / ``ExtMax`` k: *extent* maps k (0-2 =
+    x, y, z) to (min, max); the ones not given are removed."""
+    with h5py.File(path, "a") as f:
+        img = f.require_group("DataSetInfo/Image")
+        for k in range(3):
+            for e in ("Min", "Max"):
+                if f"Ext{e}{k}" in img.attrs:
+                    del img.attrs[f"Ext{e}{k}"]
+        for k, (lo, hi) in extent.items():
+            img.attrs[f"ExtMin{k}"], img.attrs[f"ExtMax{k}"] = _char(lo), _char(hi)
+        img.attrs["Unit"] = _char(unit)
+
+
+@pytest.mark.parametrize("resolutions, axes", [("base", None), ("all", None), ("base", "canonical")])
+def test_position_is_in_the_stage_system(tmp_path, resolutions, axes, metadata_reads):
+    """One ``stage`` per file; the position (ExtMin + half a pixel, x and y)
+    names it, at every resolution level (level 0's position, plan 8.22)."""
+    from micro_reader._spatial import check_invariants
+    write_ims_multifile(tmp_path)                       # 2 levels; 24 x 20 pixels of 0.5 um
+    _set_extent(tmp_path / "set.ims", {0: (100.0, 112.0), 1: (-5.0, 5.0), 2: (0.0, 6.0)})
+    with micro_reader.open(tmp_path / "set.ims", resolutions=resolutions, axes=axes) as f:
+        assert [s.id for s in f.coordinate_systems] == ["stage"]
+        assert f.coordinate_systems[0].axes is None and f.coordinate_transformations == ()
+        assert metadata_reads[0] == 0                   # declared without metadata
+        check_invariants(f)                             # I1-I3, every level too
+        levels = f.images[0].resolutions
+        assert len(levels) == 2 and len(f.images) == (2 if resolutions == "all" else 1)
+        for level in levels:
+            meta = level.metadata
+            assert meta.coordinate_system == "stage" and set(meta.position) == {"x", "y"}
+            assert meta.position["x"].value == pytest.approx(100.25)
+            assert meta.position["y"].value == pytest.approx(-4.75)
+        assert metadata_reads[0] == 1                   # level 0's, scaled for level 1
+
+
+@pytest.mark.parametrize("extent, unit", [(None, "um"), ({2: (0.0, 6.0)}, "um"),
+                                          ({0: (0.0, 12.0), 1: (0.0, 10.0)}, "furlong"),
+                                          ({0: (5.0, 5.0), 1: (3.0, 1.0)}, "um")],
+                         ids=["no_extent", "z_only", "unknown_unit", "empty_extent"])
+def test_files_without_a_position_declare_no_system(tmp_path, extent, unit, metadata_reads):
+    """No position from the extent: no system declared, none named."""
+    from micro_reader._spatial import check_invariants
+    path = tmp_path / "a.ims"
+    write_ims(path)                                     # DataSetInfo without an extent
+    if extent is not None:
+        _set_extent(path, extent, unit)
+    with micro_reader.open(path) as f:
+        assert f.coordinate_systems == ()
+        assert metadata_reads[0] == 0
+        check_invariants(f)
+        meta = f.images[0].metadata
+        assert meta.position == {} and meta.coordinate_system is None
+
+
+def test_coordinate_systems_after_close_raise(tmp_path):
+    """Declared on first access, which needs the open file: after closing, a
+    ValueError says to read them before."""
+    from micro_reader.backends import ims
+    path = tmp_path / "a.ims"
+    write_ims(path)
+    f = ims.open(str(path))                             # not the session's open, which reads them
+    f.close()
+    with pytest.raises(ValueError, match="read coordinate_systems before closing"):
+        f.coordinate_systems
+
+
+def test_ims_is_checked_strictly_by_the_session():
+    import conftest
+    assert "ims" not in conftest.POSITIONS_WITHOUT_A_SYSTEM

@@ -38,7 +38,8 @@ Resolution levels (OME-TIFF SubIFDs, SVS / NDPI-style pyramids: tifffile's
 Variants (``_tiff_variants``): whole-slide files (SVS, SCN, BIF, QPTIFF,
 Philips) list the series Bio-Formats lists, associated images named in
 lower case; Ventana BIF scans are composed from their overlapping tiles.
-Micro-Manager MMStack / NDTiff stage positions (``R``) are series, and their
+An SVS, SCN or QPTIFF file declares one coordinate system, ``slide``, which
+its positions are in (``_tiff_metadata``).  Micro-Manager MMStack / NDTiff stage positions (``R``) are series, and their
 series may span several files (uncompressed pages, each read from its file).
 
 Not yet: volumetric tiles (ImageDepth), OME series spread over several files.
@@ -63,6 +64,8 @@ from .._base import INDEX_NAMES, File, Image
 from .._errors import (CorruptFileError, MicroReaderError, MissingImagesWarning, OpenInstead,
                        UnsupportedFormatError)
 from .._io import DecodeCache, ThreadHandles
+from .._spatial import CoordinateSystem
+from ._tiff_metadata import SLIDE, STAGE
 
 NAME = "tiff"
 MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")   # classic and BigTIFF
@@ -1033,8 +1036,22 @@ class _TiffFile(File):
 
     def __init__(self, path, images, tif):
         self.format = tiff_format(tif)
+        self._variant = _tiff_variants.kind(tif)    # the slide format whose metadata is read
         super().__init__(path, images)
         self._tif = tif
+
+    def _declare_coordinate_systems(self):
+        # OME Plane positions are stage readings (plan 4.6); the format is known
+        # from the first page at open.  SVS, SCN and QPTIFF positions are on the
+        # slide (4.11); the variant is the one whose metadata reader runs
+        # (``_tiff_metadata.SLIDE_READERS`` takes the first flag in the same
+        # order), known at open
+        systems = []
+        if self.format == "ome-tiff":
+            systems.append(CoordinateSystem(STAGE))
+        if self._variant in SLIDE_VARIANTS:
+            systems.append(CoordinateSystem(SLIDE))
+        return tuple(systems)
 
     def close(self) -> None:
         super().close()
@@ -1045,6 +1062,9 @@ class _TiffFile(File):
         self._tif.close()
 
 
+#: the slide variants (``_tiff_variants.kind``) whose positions are on the
+#: slide: SVS, SCN, QPTIFF (plan 4.11; BIF and Philips record none)
+SLIDE_VARIANTS = ("svs", "scn", "qpi")
 #: tifffile's file flags -> File.format, first match wins
 TIFF_FORMATS = (("is_ome", "ome-tiff"), ("is_imagej", "imagej"), ("is_lsm", "lsm"),
                 ("is_stk", "stk"), ("is_eer", "eer"), ("is_svs", "svs"), ("is_ndpi", "ndpi"),

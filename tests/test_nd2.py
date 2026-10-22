@@ -224,3 +224,72 @@ def test_uncompressed_narrow_reads_merge_rows(tmp_path):
         series = img.images[0]
         np.testing.assert_array_equal(series[0, 0, 2, 10:14, 5:9], expected[0][0, 0, 2, 10:14, 5:9])
         assert series.stats.pixels_read == 4 * 53 * 3                 # 4 whole rows
+
+
+# -- coordinate systems (plan 4.5) --------------------------------------------------------
+
+CAMERA_TURNED = {"dStgLgCT11": -1.0, "dStgLgCT12": 0.0, "dStgLgCT21": 0.0, "dStgLgCT22": -1.0}
+
+
+@pytest.fixture
+def metadata_reads(monkeypatch):
+    """How often an ND2 image's ``_read_metadata`` ran."""
+    count = [0]
+    real = nd2_backend._Nd2Image._read_metadata
+
+    def counting(self):
+        count[0] += 1
+        return real(self)
+    monkeypatch.setattr(nd2_backend._Nd2Image, "_read_metadata", counting)
+    return count
+
+
+def test_positions_are_in_the_stage_system(tmp_path, metadata_reads):
+    from micro_reader._spatial import check_invariants
+    path = str(tmp_path / "a.nd2")
+    write_nd2(path, _frames(3, channels=1), [("P", 3)], picture=CAMERA_TURNED)
+    with micro_reader.open(path) as f:
+        assert [s.id for s in f.coordinate_systems] == ["stage"]
+        assert f.coordinate_systems[0].axes is None and f.coordinate_transformations == ()
+        assert metadata_reads[0] == 0                       # declared without metadata
+        check_invariants(f)                                 # I1-I3 on every image
+        for image in f.images:
+            assert image.metadata.position and image.metadata.coordinate_system == "stage"
+        # every position of the file in one frame: the points 1 um apart in stage x
+        # are 1 um apart along the image's x (turned by 180 degrees: -1)
+        xs = [image.metadata.position["x"].value for image in f.images]
+        assert xs[1] - xs[0] == pytest.approx(-1.0) and xs[2] - xs[1] == pytest.approx(-1.0)
+
+
+@pytest.mark.parametrize("picture", [None, {"bCalibrated": False}, dict(CAMERA_TURNED, dStgLgCT22=0.0)],
+                         ids=["no_camera_matrix", "uncalibrated", "singular_matrix"])
+def test_files_without_a_position_declare_no_system(tmp_path, picture, metadata_reads):
+    from micro_reader._spatial import check_invariants
+    path = str(tmp_path / "a.nd2")
+    if picture is not None and "dStgLgCT11" not in picture:
+        picture = dict(CAMERA_TURNED, **picture)
+    write_nd2(path, _frames(2, channels=1), [("P", 2)], picture=picture)
+    with micro_reader.open(path) as f:
+        assert f.coordinate_systems == ()
+        assert metadata_reads[0] == 0
+        check_invariants(f)
+        for image in f.images:
+            assert image.metadata.position == {} and image.metadata.coordinate_system is None
+
+
+def test_legacy_nd2_declares_no_system(tmp_path):
+    pytest.importorskip("imagecodecs")             # encodes the JPEG 2000 frames
+    from _nd2_legacy_writer import write_legacy_nd2
+    from micro_reader._spatial import check_invariants
+    path = str(tmp_path / "old.nd2")
+    write_legacy_nd2(path, np.zeros((2, 1, 8, 10), np.uint16), [("P", 2)])
+    with micro_reader.open(path) as f:
+        assert f.backend == "nd2" and f.coordinate_systems == ()
+        check_invariants(f)
+        assert all(image.metadata.position == {} and image.metadata.coordinate_system is None
+                   for image in f.images)
+
+
+def test_nd2_is_checked_strictly_by_the_session():
+    import conftest
+    assert "nd2" not in conftest.POSITIONS_WITHOUT_A_SYSTEM
