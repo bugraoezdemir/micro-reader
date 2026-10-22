@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased: coordinate systems and the file's tree
+## 0.2.0 (2026-10-22): coordinate systems and the file's tree
+
+A minor release under the release policy: positions some users already have change (the
+QPTIFF overview and label pictures, the ND2 y step, a Leica SCN macro picture), so it is
+not a patch. eubi-bridge 0.3.0 and 0.3.1 bound micro-reader below 0.2 and keep 0.1.0;
+eubi-bridge 0.3.2 is the first that reads 0.2.0 (it writes each image's coordinate system).
+The new attributes are additive: code that reads only `metadata.position` keeps working.
 
 ### Added
 
