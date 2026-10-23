@@ -1,6 +1,71 @@
 # Changelog
 
-## 0.2.0 (2026-10-22): coordinate systems and the file's tree
+## 0.2.1 (unreleased): plates and composites from more real files
+
+A patch release: what 0.2.0 read keeps its pixels and positions; files it refused or
+misread now open. Found on the 2026-10-22 round of new samples (three full plates and
+30 new sample sets; `C:\Users\oezdemir\Desktop\data\microscopy\catalogue.csv`).
+
+### Fixed
+
+- CZI scenes of large compressed tiles (JPEG XR slide scans, JPEG, zstd) are read much faster:
+  a scene was read in row bands of about 8 MB, shorter than one tile, so every band decoded the
+  tiles it crossed again (237 decodes for 25 tiles in one 10240 x 10240 read; now 43). A band is
+  now at least one tile tall. A 50821 x 56323 RGB slide scan (iCAIRD, 8.6 GB) converts to
+  OME-Zarr in 96 s instead of 588 s, with identical pixels.
+- MetaMorph `.nd` sets whose wave names hold a `_`: MetaMorph writes it as `-` in the
+  file names (`WaveName` `iSIM1_DAPI` -> `_w1iSIM1-DAPI`); both spellings are looked
+  for. Such a set stopped with "none of the fields it lists has any of its files"
+  (Zenodo 7963332).
+- Micro-Manager 2.0.0 image-per-file acquisitions, whose `metadata.txt` names each plane
+  with its position folder (`Pos0/img_...`) and keys its coordinates `FrameIndex` /
+  `ChannelIndex` / `SliceIndex`: the folder was joined twice and every plane was
+  "missing" (Zenodo 6659532). The channel names of a set read through an axes wrapper
+  (`open(..., axes=...)`) no longer fail.
+- OME companion files whose bytes are not in the encoding their XML declaration says
+  (Prairie View / Bruker: Windows `µ` bytes under UTF-8) are read as cp1252 (else
+  latin-1) with a `CompanionWarning` instead of failing; the Bruker T-series of Zenodo
+  15224926 opens as one 30000-frame image, and its members open the whole set.
+- CellVoyager CV7000 / CV8000 measurements whose files use another XML namespace prefix
+  than `bts:` (or none) were not recognised; elements and attributes are matched by
+  namespace, numbers with a decimal comma are read. A plane listed twice is read from the
+  first record whose file exists (a metadata-only record never shadows a real one). A
+  measurement of several timelines (`TimelineIndex`) is read, the timelines merged as
+  Bio-Formats merges them: each timeline's timepoints counted from its own first, a
+  plane a second timeline images again with the same channel and timepoint a channel of
+  its own, named after its timeline (checked against Bio-Formats' expected results for
+  all 14 synthetic packages of Zenodo 21334895); it was refused.
+- Harmony: the analysis folders `Evaluation1`, `Evaluation2`, ... of a measurement are
+  parts of its index (`group_files` lists them with the measurement; a converter given the
+  folder no longer takes their XML files as inputs), and a plate whose index gives no
+  `Name` nor `PlateID` is named after its measurement folder.
+- Olympus OIB / OIF: a time series whose T axis has `Interval` 0 (frames as fast as the
+  scan allows: a RICS series, Zenodo 11075037) gets its time step from the axis span
+  (`EndPosition` - `StartPosition` over n - 1), as Bio-Formats computes it; a Z or T axis
+  of one element gives no step.
+
+### Added
+
+- MetaXpress / ImageXpress z-series: a plate whose HTD gives `ZSteps` is read with its
+  z planes from the `ZStep_1` .. `ZStep_<n>` folders (per time point when there are
+  several); `ZStep_0`, the projection written when `ZProjection` is TRUE, is left out.
+  The copies of the HTD in those folders are parts of the plate's: `group_files` lists
+  one plate, and opening a copy opens the plate. The z step itself is not read (the HTD
+  gives none). Such plates were refused (Zenodo 23468516, 12724928).
+- Leica LIF / XLEF tile scans read with `tiles="mosaic"`: one image per scan, each tile
+  at its stage position (`TileScanInfo` PosX / PosY, along the image's axes) on one
+  canvas, nominal like the CZI and Olympus mosaics -- nothing registered, the later
+  tile supplying an overlap's pixels. LAS's own merged images are registered and differ
+  (checked on Intro.lif: same corner and orientation). They were refused; a scan whose
+  tiles have no position (SwapXY / FlipX / FlipY set) still is.
+- Olympus OIB / OIF lambda (spectral) scans: axis `L` gives one image per emission
+  band (index `emission`, its wavelength in `metadata.index_values` from the axis' start
+  and step), as for OIR. They were refused (Zenodo 14925254).
+- Leica LIF / XLEF channel names and widefield emission wavelengths, from the image's
+  hardware setting: confocal, the active detectors' dyes (`DyeName`, LAS's `Leica/`
+  prefix dropped) else the detector's name (`HyD S 2`); widefield, the user's channel
+  name (`UserDefName`) else the filter cube, with `EmissionWavelength`. Only when the
+  setting describes exactly the image's channels, as before.
 
 A minor release under the release policy: positions some users already have change (the
 QPTIFF overview and label pictures, the ND2 y step, a Leica SCN macro picture), so it is

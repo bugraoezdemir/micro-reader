@@ -10,19 +10,25 @@ does not list the images; it gives:
   ``SiteSelection<row>``; the selected grid cells, row by row, are sites 1,
   2, ... (as Bio-Formats numbers them);
 - the channels: ``Waves`` TRUE, ``NWavelengths``, ``WaveName<n>``;
-- ``TimePoints``: more than one -> folders ``TimePoint_<t>``.
+- ``TimePoints``: more than one -> folders ``TimePoint_<t>``;
+- ``ZSteps``: more than one -> folders ``ZStep_<z>`` (in the time point's
+  folder when there are several), ``ZStep_1`` .. ``ZStep_<ZSteps>`` the
+  planes; ``ZStep_0`` holds the projection when ``ZProjection`` is TRUE and
+  is left out.  Each such folder carries a copy of the ``.HTD``: a part of
+  the plate's (the one in the folder the ``ZStep_`` folders sit in).
 
 The files are named ``<plate>_<well>[_s<site>][_w<wave>]<anything>.TIF``
 (``_s`` / ``_w`` only when the plate has sites / waves; some versions add a
 GUID; ``_thumb`` files are previews and skipped).  The previews are parts of
 the ``.HTD`` (docs/COMPOSITE.md): opening one opens the plate.
 
-- One micro-reader image per site, axes ``t c z y x`` (z = 1).
+- One micro-reader image per site, axes ``t c z y x``.
 - Indices: ``plate`` 0, ``acquisition`` 0, ``well`` (row then column),
   ``field`` = site - 1.
 - Missing files: as for every file set (``_fileset.keep_fields``).
 - Metadata: channel names (``WaveName``); pixel sizes from the TIFFs'
-  MetaMorph calibration.  Not yet: z-series (``ZSteps``), stage positions.
+  MetaMorph calibration.  Not yet: the z step (the HTD gives none), stage
+  positions.
 """
 from __future__ import annotations
 
@@ -48,32 +54,53 @@ NAME_RE = re.compile(r"^(?P<base>.+?)_(?P<well>[A-Za-z]{1,2})(?P<col>\d{1,3})"
 
 
 TIMEPOINT_FOLDER = re.compile(r"^TimePoint_\d+$", re.IGNORECASE)
+ZSTEP_FOLDER = re.compile(r"^ZStep_\d+$", re.IGNORECASE)
 
 
 def may_own(folder: str, name: str, folders) -> bool:
     """``group_files``' cheap test (reads nothing): a ``_thumb`` TIFF may be
-    a plate's preview."""
+    a plate's preview; an ``.HTD`` in a ``ZStep_`` folder a copy of the plate's."""
     lower = name.lower()
+    if lower.endswith(".htd"):
+        return ZSTEP_FOLDER.match(folders.base(folder)) is not None
     return "thumb" in lower and lower.endswith((".tif", ".tiff"))
 
 
-def owner(path: str, head):
-    """A plate's ``_thumb`` previews are parts of its ``.HTD`` -- only when
-    that file exists (exact names: no folder listing), so a lone file named
-    like one is not taken for a part."""
-    match = NAME_RE.match(os.path.basename(path))
-    if match is None or "thumb" not in match["rest"].lower() or os.path.isdir(path):
-        return None
-    folder = os.path.dirname(os.path.abspath(path))
+def _plate_htd(folder: str, base: str):
+    """The plate's ``.HTD`` named *base* for a file in *folder*: in *folder*, or
+    above a ``ZStep_`` / ``TimePoint_`` folder (exact names: no listing); None
+    when none exists."""
     places = [folder]
+    if ZSTEP_FOLDER.match(os.path.basename(folder)):
+        folder = os.path.dirname(folder)
+        places.append(folder)
     if TIMEPOINT_FOLDER.match(os.path.basename(folder)):
         places.append(os.path.dirname(folder))
     for place in places:
         for ext in (".HTD", ".htd"):
-            htd = os.path.join(place, match["base"] + ext)
+            htd = os.path.join(place, base + ext)
             if os.path.isfile(htd):
-                return _parts.Part(htd, htd, standalone=True)
+                return htd
     return None
+
+
+def owner(path: str, head):
+    """A plate's ``_thumb`` previews, and the copies of its ``.HTD`` in its
+    ``ZStep_`` folders, are parts of its ``.HTD`` -- only when that file exists
+    (exact names: no folder listing), so a lone file named like one is not taken
+    for a part."""
+    if os.path.isdir(path):
+        return None
+    name = os.path.basename(path)
+    folder = os.path.dirname(os.path.abspath(path))
+    if name.lower().endswith(".htd") and ZSTEP_FOLDER.match(os.path.basename(folder)):
+        htd = _plate_htd(os.path.dirname(folder), os.path.splitext(name)[0])
+        return _parts.Part(htd, htd, standalone=True) if htd else None
+    match = NAME_RE.match(name)
+    if match is None or "thumb" not in match["rest"].lower():
+        return None
+    htd = _plate_htd(folder, match["base"])
+    return _parts.Part(htd, htd, standalone=True) if htd else None
 
 
 def may_index(name: str) -> bool:
@@ -158,8 +185,9 @@ class _MetaXpressFile(File):
         rows, columns = _one(htd, "YWells"), _one(htd, "XWells")
         if not isinstance(rows, int) or not isinstance(columns, int) or rows < 1 or columns < 1:
             raise CorruptFileError(f"{path!r}: the HTD file gives no plate size (XWells / YWells)")
-        if (_one(htd, "ZSteps", 1) or 1) > 1:
-            raise UnsupportedFormatError(f"{path!r}: z-series (ZSteps) are not read yet")
+        n_z = _one(htd, "ZSteps", 1) or 1
+        if not isinstance(n_z, int) or n_z < 1:
+            n_z = 1
         wells = _grid(htd, "WellsSelection", rows, columns)
         has_sites = _one(htd, "Sites") is True
         sites = (_grid(htd, "SiteSelection", _one(htd, "YSites", 1), _one(htd, "XSites", 1))
@@ -172,30 +200,33 @@ class _MetaXpressFile(File):
 
         folder = os.path.dirname(os.path.abspath(path))
         stem = os.path.splitext(os.path.basename(path))[0]
-        found = self._find(folder, stem, n_times, has_sites, has_waves)
-        def expected(r, c, s, w, t):
+        found = self._find(folder, stem, n_times, n_z, has_sites, has_waves)
+        def expected(r, c, s, w, t, z):
             """A missing plane's file as it would be named (for the warning)."""
             name = (f"{stem}_{row_label(r)}{c + 1:02d}" + (f"_s{s}" if has_sites else "")
                     + (f"_w{w}" if has_waves else "") + ".TIF")
-            return os.path.join(folder, f"TimePoint_{t}" if n_times > 1 else "", name)
+            return os.path.join(folder, f"TimePoint_{t}" if n_times > 1 else "",
+                                f"ZStep_{z}" if n_z > 1 else "", name)
 
         listed = {}
         for r, c in wells:
             for s in range(1, len(sites) + 1):
-                listed[(r, c, s)] = {(t, w, 1): found.get((r, c, s, w, t)) or expected(r, c, s, w, t)
+                listed[(r, c, s)] = {(t, w, z): found.get((r, c, s, w, t, z)) or expected(r, c, s, w, t, z)
                                      for t in range(1, n_times + 1)
-                                     for w in range(1, n_waves + 1)}
-        wanted = [(t, w, 1) for t in range(1, n_times + 1) for w in range(1, n_waves + 1)]
+                                     for w in range(1, n_waves + 1)
+                                     for z in range(1, n_z + 1)}
+        wanted = [(t, w, z) for t in range(1, n_times + 1) for w in range(1, n_waves + 1)
+                  for z in range(1, n_z + 1)]
         kept = keep_fields(listed, wanted, path)
 
         wells_rc = sorted({(r, c) for r, c, _s in kept})
         number = {rc: n for n, rc in enumerate(wells_rc)}
         first = next(iter(next(iter(kept.values())).values()))
         dtype, unit, shape_yx = self._members.plane_info(first)
-        shape = (n_times, n_waves, 1) + tuple(shape_yx)
+        shape = (n_times, n_waves, n_z) + tuple(shape_yx)
         images = []
         for r, c, s in sorted(kept, key=lambda k: (number[k[:2]], k[2])):
-            planes = {(t - 1, w - 1, 0): p for (t, w, _z), p in kept[(r, c, s)].items()}
+            planes = {(t - 1, w - 1, z - 1): p for (t, w, z), p in kept[(r, c, s)].items()}
             images.append(_MetaXpressImage(
                 self._members, len(images), planes, shape, dtype,
                 f"{stem} well {row_label(r)}{c + 1} field {s - 1}", unit,
@@ -207,26 +238,33 @@ class _MetaXpressFile(File):
         super().__init__(path, images, plates=[plate])
 
     @staticmethod
-    def _find(folder: str, stem: str, n_times: int, has_sites: bool, has_waves: bool) -> dict:
-        """{(row, col, site, wave, timepoint): path} of the plate's TIFFs."""
+    def _find(folder: str, stem: str, n_times: int, n_z: int, has_sites: bool,
+              has_waves: bool) -> dict:
+        """{(row, col, site, wave, timepoint, z): path} of the plate's TIFFs (z from 1;
+        ``ZStep_0``, the projection, is not a plane)."""
         found = {}
         for t in range(1, n_times + 1):
             sub = os.path.join(folder, f"TimePoint_{t}")
-            where = sub if os.path.isdir(sub) else (folder if n_times == 1 else None)
-            if where is None:
+            at_t = sub if os.path.isdir(sub) else (folder if n_times == 1 else None)
+            if at_t is None:
                 continue
-            for name in os.listdir(where):
-                m = NAME_RE.match(name)
-                if not m or m["base"].lower() != stem.lower() or "thumb" in m["rest"].lower():
+            for z in range(1, n_z + 1):
+                sub = os.path.join(at_t, f"ZStep_{z}")
+                where = sub if os.path.isdir(sub) else (at_t if n_z == 1 else None)
+                if where is None:
                     continue
-                if (m["site"] is not None) != has_sites or (m["wave"] is not None) != has_waves:
-                    continue
-                key = (_row_number(m["well"]), int(m["col"]) - 1,
-                       int(m["site"] or 1), int(m["wave"] or 1), t)
-                if key in found:
-                    raise CorruptFileError(
-                        f"{os.path.join(where, name)!r} and {found[key]!r} are the same plane")
-                found[key] = os.path.join(where, name)
+                for name in os.listdir(where):
+                    m = NAME_RE.match(name)
+                    if not m or m["base"].lower() != stem.lower() or "thumb" in m["rest"].lower():
+                        continue
+                    if (m["site"] is not None) != has_sites or (m["wave"] is not None) != has_waves:
+                        continue
+                    key = (_row_number(m["well"]), int(m["col"]) - 1,
+                           int(m["site"] or 1), int(m["wave"] or 1), t, z)
+                    if key in found:
+                        raise CorruptFileError(
+                            f"{os.path.join(where, name)!r} and {found[key]!r} are the same plane")
+                    found[key] = os.path.join(where, name)
         return found
 
     def close(self) -> None:

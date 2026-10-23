@@ -1,25 +1,30 @@
-"""Micro-Manager image-per-file acquisitions (Micro-Manager 1.4 and the 2.0 betas):
-a ``metadata.txt`` per stage position and one TIFF per plane (docs/COMPOSITE.md,
+"""Micro-Manager image-per-file acquisitions (Micro-Manager 1.4 and 2.0): a
+``metadata.txt`` per stage position and one TIFF per plane (docs/COMPOSITE.md,
 "Micro-Manager 1.4 image-per-file acquisitions").
 
-Layout (checked on the OME samples 1.4.16 serge, 1.4.22 and 2.0.0-beta3 thomas)::
+Layout (checked on the OME samples 1.4.16 serge, 1.4.22 and 2.0.0-beta3
+thomas, and the Zenodo 6659532 2.0.0 sample)::
 
     <acquisition>/                      Summary "Prefix"; the folder may be renamed
         display_and_comments.txt        display settings (JSON), optional
         <position>/                     one folder per stage position: its label
             metadata.txt                (InitialPositionList "Label"), else Pos<k>
             img_<t:9>_<channel>_<z:3>.tif                    (1.4)
-            img_channel<c:3>_position<p:3>_time<t:9>_z<z:3>.tif  (2.0 betas)
+            img_channel<c:3>_position<p:3>_time<t:9>_z<z:3>.tif  (2.0)
 
 ``metadata.txt`` is JSON: ``"Summary"`` (the whole acquisition: Frames,
 Channels, Slices, Positions, ChNames, ChColors, z-step_um, Interval_ms,
 PixelSize_um, InitialPositionList, ...; the same in every position's file but
 for PositionIndex and Time), then one entry per plane of this position:
 ``"FrameKey-<t>-<c>-<z>"`` (1.4; ``FileName``, stage, pixel size, ...) or
-``"Coords-<file name>"`` (2.0 betas: ``{"time", "channel", "z", "position"}``,
-the file's own metadata in its TIFF).  Each TIFF is a plain ImageJ TIFF of
-one plane, with the plane's Micro-Manager metadata as JSON in its ImageJ
-``Info``.
+``"Coords-<file name>"`` (2.0: the betas ``{"time", "channel", "z",
+"position"}``, the 2.0.0 release ``{"FrameIndex", "ChannelIndex",
+"SliceIndex", "PositionIndex"}`` with the plane's metadata in a
+``"Metadata-<file name>"`` entry; the file's own metadata in its TIFF too).
+A file name may carry the position folder (``Pos0/img_...``, the 2.0.0
+release): it is then relative to the acquisition folder, else to the
+position folder.  Each TIFF is a plain ImageJ TIFF of one plane, with the
+plane's Micro-Manager metadata as JSON in its ImageJ ``Info``.
 
 - A **composite** (metadata + pixels): ``metadata.txt`` says what each plane
   is, the TIFFs hold them; neither names the other folders' files.  The main
@@ -66,7 +71,7 @@ METADATA = "metadata.txt"
 DISPLAY = "display_and_comments.txt"
 #: relative tolerance when metadata.txt and a plane's TIFF give one value
 TOLERANCE = 1e-6
-#: the two plane file names (Micro-Manager 1.4; the 2.0 betas)
+#: the two plane file names (Micro-Manager 1.4; 2.0)
 NAME_14 = re.compile(r"img_(?P<t>\d+)_(?P<channel>.+)_(?P<z>\d+)\.tiff?", re.IGNORECASE)
 NAME_20 = re.compile(r"img_channel(?P<c>\d+)_position(?P<p>\d+)_time(?P<t>\d+)_z(?P<z>\d+)\.tiff?",
                      re.IGNORECASE)
@@ -330,6 +335,38 @@ def _unwrap(value):
     return value.get("PropVal") if isinstance(value, dict) and "PropVal" in value else value
 
 
+def _plane_path(folder: str, name: str) -> str:
+    """The path of plane file *name* of the position in *folder*: a bare name
+    is in *folder*; a name with a folder in it (``Pos0/img_...``, Micro-Manager
+    2.0.0) is relative to the acquisition folder above -- unless only the bare
+    name is there (the position folder was renamed): then that."""
+    if "/" not in name and "\\" not in name:
+        return os.path.join(folder, name)
+    path = os.path.join(os.path.dirname(folder), *re.split(r"[/\\]", name))
+    if not os.path.isfile(path):
+        bare = os.path.join(folder, os.path.basename(path))
+        if os.path.isfile(bare):
+            return bare
+    return path
+
+
+#: a Coords entry's (t, c, z): the 2.0 betas' keys, then the 2.0.0 release's
+_COORDS = (("time", "FrameIndex", "Frame"), ("channel", "ChannelIndex"),
+           ("z", "SliceIndex", "Slice"))
+
+
+def _coords(value: dict) -> tuple:
+    """(t, c, z) of a ``Coords-`` entry (the first key of each in ``_COORDS``
+    that is there; 0 when none is)."""
+    out = []
+    for keys in _COORDS:
+        found = next((value[k] for k in keys if k in value), 0)
+        if isinstance(found, bool) or not isinstance(found, (int, float)):
+            raise ValueError(found)
+        out.append(int(found))
+    return tuple(out)
+
+
 def _planes(data: dict, folder: str, summary: dict, path: str) -> tuple:
     """({(t, c, z): file path}, {(t, c, z): the plane's metadata}) that a
     position's ``metadata.txt`` lists; without any entry, the folder's files
@@ -347,16 +384,16 @@ def _planes(data: dict, folder: str, summary: dict, path: str) -> tuple:
             if not isinstance(name, str) or not name:
                 channel = value.get("Channel") or (names[c] if c < len(names) else None)
                 name = f"img_{t:09d}_{channel}_{z:03d}.tif" if channel else None
-            files[(t, c, z)] = os.path.join(folder, name) if name else None
+            files[(t, c, z)] = _plane_path(folder, name) if name else None
             meta[(t, c, z)] = value
         elif key.startswith("Coords-"):
             name = key[len("Coords-"):]
             value = value if isinstance(value, dict) else {}
             try:
-                t, c, z = (int(value.get(k, 0)) for k in ("time", "channel", "z"))
-            except (TypeError, ValueError):
+                t, c, z = _coords(value)
+            except ValueError:
                 raise CorruptFileError(f"{path!r}: entry {key!r} has no time / channel / z") from None
-            files[(t, c, z)] = os.path.join(folder, name)
+            files[(t, c, z)] = _plane_path(folder, name)
             extra = data.get("Metadata-" + name)
             meta[(t, c, z)] = extra if isinstance(extra, dict) else {}
     if not files:

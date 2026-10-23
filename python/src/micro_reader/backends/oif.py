@@ -15,7 +15,10 @@ specification document is available"):
   ``Storage00001/s_C001Z001.tif``) and the main settings stream.
 
 One image ``tczyx``, sizes from the main file's ``Axis <i> Parameters
-Common`` (``AxisCode`` / ``MaxSize``), planes from their file names.  Reads
+Common`` (``AxisCode`` / ``MaxSize``), planes from their file names; a lambda
+(spectral) scan (axis ``L``, planes ``s_C001L001.tif`` ...) is one image per
+emission band (index ``emission``, its wavelength in ``metadata.index_values``
+from the axis' start and step), as for OIR.  Reads
 are exact: a plane's TIFF layout is parsed once (tifffile), then only the
 strips holding the requested rows are read -- for OIB at their places in the
 ``.oib`` file (a stream's sectors mapped to file offsets).  A plane the
@@ -46,7 +49,7 @@ from .. import _cfb, _parts, _pool
 from .._base import File, Image
 from .._errors import CorruptFileError, MissingImagesWarning, UnsupportedFormatError
 from .._io import ThreadHandles
-from .._metadata import Channel, Metadata, color_hex, quantity
+from .._metadata import Quantity, Channel, Metadata, color_hex, quantity
 
 NAME = "oif"
 OIB_INFO = "OibInfo.txt"
@@ -56,6 +59,8 @@ PLANE = re.compile(r"^s_((?:[A-Za-z]\d{3})+)\.tif$", re.I)
 PLANE_AXIS = re.compile(r"([A-Za-z])(\d{3})")
 #: the axes micro-reader's image has, by their Olympus axis code
 AXES = {"C": "c", "Z": "z", "T": "t"}
+#: the lambda axis of a spectral scan: one image per band (index ``emission``)
+LAMBDA = "L"
 LUT_MARKER = "[ColorLUTData]"
 LEADING_NUMBER = re.compile(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
 
@@ -262,12 +267,14 @@ class _Layout:
 
 class _OifImage(Image):
 
-    def __init__(self, files, path: str, head: dict, sizes: dict, planes: dict, first: _Layout):
+    def __init__(self, files, path: str, head: dict, sizes: dict, planes: dict, first: _Layout,
+                 number: int = 0, emission=None):
         shape = (sizes["t"], sizes["c"], sizes["z"], first.rows, first.cols)
-        super().__init__(0, "tczyx", shape, first.dtype.newbyteorder("="),
+        super().__init__(number, "tczyx", shape, first.dtype.newbyteorder("="),
                          name=os.path.splitext(os.path.basename(path))[0])
         self._files, self._path, self._head = files, path, head
         self._planes = planes                    # (t, c, z) -> plane file name
+        self._emission = emission                # the band of a lambda scan (Quantity)
         self._layouts = {planes[min(planes)]: first} if planes else {}
         self._lock = threading.Lock()
         self._first = first
@@ -342,11 +349,11 @@ class _OifImage(Image):
             q = quantity(number(ref.get(key)), ref.get(unit))
             if q:
                 sizes[axis] = q
-        for code, axis in (("Z", "z"), ("T", "t")):
+        for code, axis, n in (("Z", "z", self.shape[2]), ("T", "t", self.shape[0])):
             info = _axis(head, code)
-            if info is None or (axis == "t" and self.shape[0] < 2):
+            if info is None or n < 2:
                 continue
-            q = quantity(number(info.get("Interval")), info.get("PixUnit"))
+            q = _axis_step(info, n)
             if q:
                 sizes[axis] = q
         channels = []
@@ -359,10 +366,26 @@ class _OifImage(Image):
                 color=lut_color(self._files.read(lut)) if lut in names else None,
                 emission_wavelength=_wavelength(params.get("EmissionWavelength")),
                 excitation_wavelength=_wavelength(params.get("ExcitationWavelength"))))
-        return Metadata(pixel_sizes=sizes, channels=tuple(channels))
+        index_values = {"emission": self._emission} if self._emission else {}
+        return Metadata(pixel_sizes=sizes, channels=tuple(channels), index_values=index_values)
 
     def close(self) -> None:
         self._closed = True
+
+
+def _axis_step(info: dict, n: int):
+    """The step of an axis of *n* elements: its ``Interval`` in ``PixUnit``, or --
+    when that is 0 or missing (a time series whose frames follow each other as
+    fast as the scan allows: FV writes the total in ``EndPosition``) -- the span
+    from ``StartPosition`` to ``EndPosition`` over ``n - 1`` steps, in ``UnitName``
+    (``PixUnit``), as Bio-Formats computes it."""
+    step = number(info.get("Interval"))
+    if step:
+        return quantity(step, info.get("PixUnit"))
+    start, end = number(info.get("StartPosition")), number(info.get("EndPosition"))
+    if start is None or end is None or n < 2:
+        return None
+    return quantity((end - start) / (n - 1), info.get("UnitName") or info.get("PixUnit"))
 
 
 def _axis(head: dict, code: str):
@@ -438,7 +461,8 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base") -> _OifF
         _parts.read_head(path)[:8] == _cfb.MAGIC else _OifFiles(path)
     try:
         head = settings(files.main())
-        sizes = {"t": 1, "c": 1, "z": 1}
+        sizes = {"t": 1, "c": 1, "z": 1, "l": 1}
+        bands = None                             # the lambda axis' settings
         for k in range(16):
             info = head.get(f"Axis {k} Parameters Common")
             if info is None:
@@ -446,6 +470,8 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base") -> _OifF
             code, size = info.get("AxisCode"), int(number(info.get("MaxSize")) or 0)
             if code in AXES:
                 sizes[AXES[code]] = max(1, size)
+            elif code == LAMBDA and size > 1:
+                sizes["l"], bands = size, info
             elif code not in ("X", "Y") and size > 1:
                 raise UnsupportedFormatError(
                     f"{path!r}: an axis {code!r} ({info.get('AxisName')}) of {size}: not supported yet")
@@ -454,26 +480,44 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base") -> _OifF
             match = PLANE.match(name)
             if match is None:
                 continue
-            index = {"t": 0, "c": 0, "z": 0}
+            index = {"t": 0, "c": 0, "z": 0, "l": 0}
             for letter, value in PLANE_AXIS.findall(match.group(1)):
-                axis = AXES.get(letter.upper())
+                axis = "l" if letter.upper() == LAMBDA else AXES.get(letter.upper())
                 if axis is None:
                     raise UnsupportedFormatError(f"{path!r}: plane {name!r}: axis {letter!r}")
                 index[axis] = int(value) - 1
             if any(index[a] >= sizes[a] for a in index):
                 raise CorruptFileError(f"{path!r}: plane {name!r} lies beyond the sizes the "
                                        f"settings give ({sizes})")
-            planes[(index["t"], index["c"], index["z"])] = name
+            planes[(index["t"], index["c"], index["z"], index["l"])] = name
         if not planes:
             raise CorruptFileError(f"{path!r}: no plane TIFF (s_C001Z001.tif ...)")
-        expected = sizes["t"] * sizes["c"] * sizes["z"]
+        expected = sizes["t"] * sizes["c"] * sizes["z"] * sizes["l"]
         if len(planes) < expected:
             warnings.warn(MissingImagesWarning(
                 f"{path!r}: {expected - len(planes)} of {expected} planes are missing: they "
                 "read as zeros"), stacklevel=3)
         first = _Layout(files, planes[min(planes)])
-        image = _OifImage(files, path, head, sizes, planes, first)
+        images = []
+        for band in range(sizes["l"]):
+            own = {key[:3]: name for key, name in planes.items() if key[3] == band}
+            if not own:
+                continue                         # a band without any plane: left out
+            emission = None
+            if bands is not None:
+                # the band's wavelength: the axis' start plus its step per band
+                first_band = quantity(number(bands.get("StartPosition")),
+                                      bands.get("UnitName") or bands.get("PixUnit"), positive=False)
+                step = _axis_step(bands, sizes["l"])
+                if first_band and step:
+                    emission = Quantity(first_band.value + band * step.to(first_band.unit).value,
+                                        first_band.unit)
+            image = _OifImage(files, path, head, sizes, own, first, number=len(images),
+                              emission=emission)
+            if sizes["l"] > 1:
+                image.index = {"series": 0, "emission": band}
+            images.append(image)
     except BaseException:
         files.close()
         raise
-    return _OifFile(path, files, [image])
+    return _OifFile(path, files, images)

@@ -8,11 +8,14 @@ element.
   ``NumberOfElements - 1`` in m) is LAS's index space -- FLIM "Phasor
   Plot", "Phasor Mask" and "Pattern Matching Scatter Plot", the only such
   images in every local Leica file -- and gives no pixel size.
-- Channels: colour from ``ChannelDescription`` ``LUTName``; names: the dye
-  names (``MultiBand DyeName``) of the active detectors of the image's
-  confocal setting, only when there is one per channel (sequential scans
-  spread channels over several settings: names unknown).  Channel
-  wavelengths: out of scope for now.
+- Channels: colour from ``ChannelDescription`` ``LUTName``; names from the
+  image's hardware setting (``_channel_names``): confocal, the active
+  detectors' dyes (``DyeName``, else the ``MultiBand`` dye; LAS's ``Leica/``
+  prefix dropped), else the detector's name; widefield, the user's channel
+  name (``UserDefName``), else the filter cube, else the contrasting method,
+  with the emission wavelength -- only when the setting describes exactly
+  the image's channels (sequential scans spread channels over several
+  settings: names unknown).  Excitation wavelengths: out of scope for now.
 - Index values (D5): the image's wavelength along a lambda (``emission``,
   DimID 5) or excitation (``excitation``, DimID 9) dimension, ``Origin`` +
   k x ``Length`` / (N - 1), in nm.
@@ -71,6 +74,57 @@ def _setting(element):
         if found is not None:
             return found
     return None
+
+
+#: LAS X's dye catalogue prefixes a dye's name (``Leica/ALEXA 488``)
+DYE_PREFIXES = ("Leica/",)
+
+
+def _dye(name):
+    """A dye's name as the user knows it: the catalogue prefix dropped; None for none."""
+    name = (name or "").strip()
+    for prefix in DYE_PREFIXES:
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+    return name or None
+
+
+def _channel_names(setting, n_c: int, luts: list) -> tuple:
+    """``([name or None, ...], [emission or None, ...])`` for the image's *n_c*
+    channels from its hardware setting, or ``([], [])`` when the setting does not
+    describe exactly them (a sequential scan spreads channels over settings).
+
+    Confocal (``ATLConfocalSettingDefinition``): the active detectors, in order; a
+    channel is named after its dye (the detector's ``DyeName``, else the ``MultiBand``
+    dye of its channel; ``_dye``), else after the detector (``HyD S 2``).  Widefield
+    (``ATLCameraSettingDefinition``): the active ``WideFieldChannelInfo`` entries; when
+    there are more than channels (an autofocus channel beside the image's), those whose
+    ``LUT`` matches the channels' ``LUTName``, in order.  A channel is named as the user
+    named it (``UserDefName``), else after its filter cube (``FluoCubeName``), else its
+    contrasting method (``FLUO``, ``BF``); its ``EmissionWavelength`` is in nm."""
+    if setting.tag == "ATLCameraSettingDefinition":
+        infos = [w for w in setting.iter("WideFieldChannelInfo") if w.get("Active") == "1"]
+        if len(infos) != n_c and len(luts) == n_c:
+            picked, left = [], list(infos)
+            for lut in luts:
+                hit = next((w for w in left if (w.get("LUT") or "").lower() == (lut or "").lower()), None)
+                if hit is None:
+                    break
+                picked.append(hit)
+                left.remove(hit)
+            infos = picked
+        if len(infos) != n_c:
+            return [], []
+        names = [w.get("UserDefName") or w.get("FluoCubeName") or w.get("ContrastingMethodName") or None
+                 for w in infos]
+        emissions = [quantity(w.get("EmissionWavelength"), "nanometer") for w in infos]
+        return names, emissions
+    bands = {b.get("Channel"): b.get("DyeName") or None for b in setting.iter("MultiBand")}
+    active = [d for d in setting.iter("Detector") if d.get("IsActive") == "1"]
+    if len(active) != n_c:
+        return [], []
+    return [_dye(d.get("DyeName") or bands.get(d.get("Channel"))) or d.get("Name") or None
+            for d in active], []
 
 
 def _stage_position(element, setting, tile) -> dict:
@@ -229,16 +283,13 @@ def lif_metadata(element, shape: dict, index: dict, tiled: bool = False,
     if shape.get("s", 1) > 1:                 # interleaved RGB: one channel, no LUT colour
         colors = []
     setting = _setting(element)
-    names = []
-    if setting is not None:
-        bands = {b.get("Channel"): b.get("DyeName") or None for b in setting.iter("MultiBand")}
-        active = [d.get("Channel") for d in setting.iter("Detector") if d.get("IsActive") == "1"]
-        if len(active) == n_c:
-            names = [bands.get(ch) for ch in active]
+    names, emissions = ([], []) if setting is None else _channel_names(
+        setting, n_c, [c.get("LUTName") for c in descriptions])
     channels = []
     for k in range(n_c):
         channels.append(Channel(name=names[k] if k < len(names) else None,
-                                color=colors[k] if k < len(colors) else None))
+                                color=colors[k] if k < len(colors) else None,
+                                emission_wavelength=emissions[k] if k < len(emissions) else None))
     position = {}
     stage = _stage_position(element, setting, tile)
     if stage:

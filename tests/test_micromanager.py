@@ -286,3 +286,106 @@ def test_mmstack_ome_colours_are_argb(tmp_path, micromanager):
     with micro_reader.open(path) as f:
         colours = [c.color for c in f.images[0].metadata.channels]
     assert colours == (["#33FF33", "#FF0000"] if micromanager else ["#FF33FF", "#FFFF00"])
+
+
+def test_the_2_0_0_naming_with_the_position_folder_in_the_file_name(tmp_path):
+    """Micro-Manager 2.0.0 (the Zenodo 6659532 sample): ``Coords-Pos0/img_...``
+    entries with FrameIndex / ChannelIndex / SliceIndex values and the plane's
+    metadata in ``Metadata-Pos0/img_...``.  The name is relative to the
+    acquisition folder, not the position folder."""
+    root = str(tmp_path / "HJ")
+    data, files = write_acquisition(root, style="2.0.0", frames=3, channels=("637", "532"),
+                                    positions=2, prefix="HJ",
+                                    stage=lambda p: (400.0 + p, 897.75, 99.7))
+    listed = json.load(open(files[1], encoding="utf-8"))
+    assert f"Coords-Pos1/{name_20(2, 1, 1, 0)}" in listed
+    assert listed[f"Coords-Pos1/{name_20(2, 1, 1, 0)}"]["FrameIndex"] == 2
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with micro_reader.open(os.path.join(root, "Pos1", name_20(0, 1, 1, 0))) as f:
+            assert f.backend == "micromanager" and os.path.samefile(f.path, files[0])
+            assert [im.name for im in f.images] == ["HJ Pos0", "HJ Pos1"]
+            assert [im.shape for im in f.images] == [(3, 2, 1, Y, X)] * 2
+            _check_all(f, data)
+            md = f.images[1].metadata
+            assert [c.name for c in md.channels] == ["637", "532"]
+            assert md.pixel_sizes == {}                           # PixelSizeUm 0: unknown
+            assert md.stage_position == {"x": (401.0, UM), "y": (897.75, UM), "z": (99.7, UM)}
+            assert len(f._member_files()) == 2 * 3 * 2
+    assert micromanager._coords({"Frame": 3, "FrameIndex": 3, "PositionIndex": 0, "Slice": 0,
+                                 "SliceIndex": 0, "ChannelIndex": 1}) == (3, 1, 0)
+    assert micromanager._coords({"position": 0, "time": 2, "z": 4, "channel": 1}) == (2, 1, 4)
+    with pytest.raises(ValueError):
+        micromanager._coords({"time": "two"})
+
+
+def test_a_renamed_position_folder_keeps_its_2_0_0_planes(tmp_path):
+    """``Pos0/img_...`` names a folder that is not there any more: the bare
+    name next to ``metadata.txt`` is used."""
+    root = str(tmp_path / "HJ")
+    data, files = write_acquisition(root, style="2.0.0", frames=2, prefix="HJ")
+    os.rename(os.path.join(root, "Pos0"), os.path.join(root, "site"))
+    md = os.path.join(root, "site", "metadata.txt")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with micro_reader.open(md) as f:
+            (im,) = f.images
+            assert im.shape == (2, 2, 1, Y, X)
+            _check_all(f, data)
+    assert micromanager._plane_path(os.path.join(root, "site"), "Pos0/x.tif") == \
+        os.path.join(root, "Pos0", "x.tif")                   # neither there: the listed one
+
+
+DATA = os.environ.get("MICROSCOPY_DATA", os.path.expanduser("~/Desktop/data/microscopy"))
+
+
+def _sample(*parts):
+    path = os.path.join(DATA, "formats", "tiff", "micromanager", *parts)
+    if not os.path.exists(path):
+        pytest.skip(f"sample not found: {path} (set MICROSCOPY_DATA)")
+    return path
+
+
+def test_zenodo_6659532_micro_manager_2_0_0_subset():
+    """The MARS subset (CC BY 4.0), cut to 2 of 20 positions and t 0-24 of
+    1000: two MissingImagesWarnings, and an image per position of the sizes
+    the Summary gives, with the planes that are there."""
+    root = _sample("zenodo-6659532-mars-subset")
+    with pytest.warns(micro_reader.MissingImagesWarning) as rec:
+        f = micro_reader.open(root)
+    messages = [str(w.message) for w in rec if w.category is micro_reader.MissingImagesWarning]
+    assert any("18 of the 20 stage positions" in m for m in messages)
+    assert any("3900 image files are missing" in m for m in messages)
+    with f:
+        assert os.path.samefile(f.path, os.path.join(root, "Pos0", "metadata.txt"))
+        assert [im.name for im in f.images] == ["HJ Pos0", "HJ Pos1"]
+        assert [im.shape for im in f.images] == [(1000, 2, 1, 1024, 1024)] * 2
+        assert len(f._member_files()) == 2 * 25 * 2
+        im = f.images[1]
+        assert [c.name for c in im.metadata.channels] == ["637", "532"]
+        assert im.metadata.pixel_sizes == {}                  # PixelSizeUm 0.0: unknown
+        assert im.metadata.stage_position["y"] == (897.85, UM)
+        ref = tifffile.imread(os.path.join(root, "Pos1", name_20(24, 1, 1, 0)))
+        np.testing.assert_array_equal(im[24, 1, 0], ref)
+        assert not im[25, 1, 0].any()                         # cut from the subset
+
+
+@pytest.mark.parametrize("parts, backend, shapes, names", [
+    (("ome-serge",), "micromanager", [(7, 4, 1, 2048, 2048)] * 2,
+     ["YAV_1724_1778_test_lectin_1 Pos0", "YAV_1724_1778_test_lectin_1 Pos1"]),
+    (("ome-thomas", "test", "test_sep"), "micromanager", [(4, 2, 1, 128, 128)], ["test_sep"]),
+    (("ome-thomas", "test", "test2_sep"), "micromanager", [(2, 2, 1, 128, 128)], ["test2_sep"]),
+    (("aics-mm2-2pos", "image_stack_tpzc_50tp_2p_5z_3c_512k_1_MMStack_2-Pos000_000.ome.tif"),
+     "tiff", [(50, 5, 3, 256, 256)] * 2, ["series0", "series1"]),
+], ids=["serge-1.4.16", "thomas-1.4.22", "thomas-2.0-beta3", "aics-2.0-mmstack"])
+def test_the_other_micro_manager_samples_still_open(parts, backend, shapes, names):
+    """1.4 image-per-file (bare FileName), the 2.0 beta and a 2.0 MMStack
+    (the TIFF backend's) as before."""
+    path = _sample(*parts)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", micro_reader.MissingImagesWarning)   # serge: 4 of 6 folders
+        with micro_reader.open(path) as f:
+            assert f.backend == backend
+            assert [im.shape for im in f.images] == shapes
+            assert [im.name for im in f.images] == names
+            assert f.images[-1][0, 0, 0].any()

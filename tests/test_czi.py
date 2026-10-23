@@ -202,6 +202,24 @@ def test_compressed_tiles_are_decoded_once(tmp_path):
         assert series.stats.pixels_read == first == 40 * 56
 
 
+def test_a_compressed_tile_is_not_decoded_again_for_every_row_band(tmp_path, monkeypatch):
+    """A scene is read in row bands, but a compressed tile is decoded whole: bands
+    shorter than the tile made every band decode it again (4x to 6x the work on a slide
+    scan of 2236-row JPEG XR tiles, with a cache that holds a few tiles).  With bands
+    forced to a few rows and no cache, each tile is decoded about once (at most
+    twice: it can straddle two bands)."""
+    from micro_reader.backends import czi
+    monkeypatch.setattr(czi, "RAW_TASK_BYTES", 64)           # a band of one or two rows
+    monkeypatch.setattr(czi, "DECODE_CACHE_BYTES", 0)
+    path, expected, _ = _write(tmp_path, "zstd1_mosaic")
+    with micro_reader.open(path, tiles="mosaic") as img:
+        assert {s.compression for s in img._level0} == {6}
+        series = img.images[0]
+        pixels = sum(s.height * s.width for s in img._level0)
+        np.testing.assert_array_equal(series[0, 0, 0], expected[0][0, 0, 0])
+        assert series.stats.pixels_read <= 2 * pixels
+
+
 def test_exact_reads_count_only_what_is_asked(tmp_path, monkeypatch):
     """With separate reads per row forced, only the rectangle is read."""
     from micro_reader.backends import czi
