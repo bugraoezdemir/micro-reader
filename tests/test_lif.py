@@ -156,8 +156,35 @@ def test_tiles_are_images_with_positions(tmp_path):
                                                              (2, 0, 2e-4, 0.0)]
         # the replacement: each tile's position, along the image's axes (um)
         assert [round(s.metadata.position["x"].value) for s in img.images] == [0, 100, 200]
-    with pytest.raises(UnsupportedFormatError, match="does not compose Leica tiles"):
-        micro_reader.open(path, tiles="mosaic")
+
+
+def test_tiles_compose_a_mosaic_at_their_stage_positions(tmp_path):
+    """tiles="mosaic": one image per scan, each tile at its stage position (9 px wide
+    tiles of 12.5 um pixels, 100 um apart: 8 px steps, one column of overlap that the
+    later tile supplies), placed at the first tile's position."""
+    data = _ints((1, 1, 1, 3, 8, 9))
+    grid = [(0, 0, 0.0, 0.0), (1, 0, 1e-4, 0.0), (2, 0, 2e-4, 0.0)]
+    path = str(tmp_path / "scan.lif")
+    write_lif(path, [image("scan", data, "tczmyx", tiles=grid)])
+    with micro_reader.open(path, tiles="mosaic") as f:
+        (mosaic,) = f.images
+        assert dict(mosaic.index) == {"series": 0} and mosaic.shape == (1, 1, 1, 8, 25)
+        canvas = mosaic[0, 0, 0]
+        expected = np.zeros((8, 25), data.dtype)
+        for m in range(3):                                       # later tiles on top
+            expected[:, 8 * m:8 * m + 9] = data[0, 0, 0, m]
+        np.testing.assert_array_equal(canvas, expected)
+        assert round(mosaic.metadata.position["x"].value) == 0
+        assert mosaic.metadata.pixel_sizes["x"].to("micrometer").value == pytest.approx(12.5)
+
+
+def test_a_mosaic_of_unplaced_tiles_is_refused(tmp_path):
+    data = _ints((1, 1, 1, 2, 8, 9))
+    path = str(tmp_path / "flipped.lif")
+    write_lif(path, [image("flipped", data, "tczmyx", tiles=[(0, 0, 0.0, 0.0), (1, 0, 1e-4, 0.0)],
+                           tile_flags={"FlipX": "1"})])
+    with pytest.raises(UnsupportedFormatError, match="no stage position"):
+        micro_reader.open(path, tiles="mosaic").images[0].metadata
 
 
 def test_untiled_images_of_a_tiled_file_get_tile_0(tmp_path):

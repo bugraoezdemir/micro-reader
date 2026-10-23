@@ -13,7 +13,13 @@ micro-reader reads the measurement in that folder.
 - ``MeasurementData.mlf``: one ``MeasurementRecord`` per plane: ``Type``
   ``IMG`` with 1-based ``Row`` / ``Column`` / ``TimePoint`` / ``FieldIndex``
   / ``ZIndex``, ``ActionIndex``, ``Ch``, stage ``X`` / ``Y`` / ``Z`` (um) and
-  the file name; ``ERR`` records log instrument errors (one warning).
+  the file name; ``ERR`` records log instrument errors (one warning).  A
+  plane listed twice is read from the first record whose file exists
+  (Bio-Formats' rule: a metadata-only record never shadows a real one).
+- The files name their elements and attributes in the BTS namespace with
+  any prefix (``bts:``, ``record:``, a default namespace) or none at all;
+  they are matched by namespace URI or local name, never by prefix.  Numbers
+  may use a decimal comma (``0,65``).
 - One micro-reader image per field, axes ``t c z y x``.  A channel is an
   (action, camera channel) pair, as Bio-Formats counts them.  Indices:
   ``plate`` 0, ``acquisition`` 0, ``well`` (row then column), ``field`` =
@@ -40,13 +46,23 @@ Harmony-format export (``Index.idx.xml``) and the settings files (``.wpp``,
 ``.mes``, ``.ppp``, ``.ppf``, ``.icr``, ``*_parameter.xml``) are its parts and
 open it.  The plane TIFFs are the index's members (they open alone).
 
-Missing files: as for every file set (``_fileset.keep_fields``).  Refused:
-several timelines, channels imaged at different timepoints, channels with
-different pixel sizes or image sizes.
+Missing files: as for every file set (``_fileset.keep_fields``).  The
+timelines of the settings file (``TimelineIndex``: each images its own wells,
+fields and actions, its TimePoint numbers running on from the timeline
+before) are merged, as Bio-Formats merges them (checked against its expected
+results for the 14 synthetic packages of Zenodo 21334895): each timeline's
+timepoints are counted from its own first one, a field holds every plane
+recorded for it, a well imaged by two timelines holds the channels of both,
+and the plate's channels are the (action, camera channel) pairs of all its
+records; a plane a second timeline images with the channel and timepoint of
+the first becomes a channel of its own, named after its timeline (Bio-Formats'
+"timeline-qualified overflow").  Refused: channels imaged at different
+timepoints, channels with different pixel sizes or image sizes.
 """
 from __future__ import annotations
 
 import os
+import re
 import warnings
 import xml.etree.ElementTree as ET
 from dataclasses import replace
@@ -65,8 +81,10 @@ NAME = "cv7000"
 SET_INDEX = True
 BTS = "{http://www.yokogawa.co.jp/BTS/BTSSchema/1.0}"
 DETAIL, DATA = "MeasurementDetail.mrf", "MeasurementData.mlf"
-#: the root elements of the files that open a measurement (not .wpp / .mes)
-ENTRY_ROOTS = (b"bts:WellPlate ", b"bts:MeasurementDetail ", b"bts:MeasurementData ")
+#: the root element of a file that opens a measurement (not .wpp / .mes),
+#: with any namespace prefix or none (``<bts:WellPlate ``, ``<plate:WellPlate ``,
+#: ``<WellPlate>``; not ``<bts:WellPlateProduct``)
+ENTRY_ROOT = re.compile(rb"<(?:[A-Za-z_][\w.-]*:)?(?:WellPlate|MeasurementDetail|MeasurementData)[\s/>]")
 
 
 #: the CellVoyager software's default channel ``Target``: it names no channel
@@ -131,11 +149,21 @@ def may_index(name: str) -> bool:
 
 
 def sniff(head: bytes, path: str) -> bool:
-    return b"yokogawa.co.jp/BTS" in head and any(r in head for r in ENTRY_ROOTS)
+    return b"yokogawa.co.jp/BTS" in head and ENTRY_ROOT.search(head) is not None
 
 
 def _a(e, name):
-    return e.get(BTS + name)
+    """Attribute *name* of *e*: in the BTS namespace (any prefix), else
+    unprefixed (no namespace, also under a default namespace)."""
+    value = e.get(BTS + name)
+    return e.get(name) if value is None else value
+
+
+def _number(value):
+    """A number's text with a decimal comma (``0,65``) made a point."""
+    if isinstance(value, str) and value.count(",") == 1 and "." not in value:
+        return value.replace(",", ".")
+    return value
 
 
 def _int(e, name):
@@ -147,7 +175,7 @@ def _int(e, name):
 
 def _float(e, name):
     try:
-        return float(_a(e, name))
+        return float(_number(_a(e, name)))
     except (TypeError, ValueError):
         return None
 
@@ -162,7 +190,7 @@ def _parse(path):
 
 
 class _CVImage(PlaneImage):
-    """A field (or a part of a ragged one); *channels*: its (action, Ch)
+    """A field (or a part of a ragged one); *channels*: its (action, Ch, run)
     keys, *records*: its planes' (t, key, z) -> (X, Y, Z, Time)."""
 
     def __init__(self, *args, info: dict, channels: list, dz, records: dict, times: list,
@@ -204,8 +232,19 @@ class _CVImage(PlaneImage):
         position = {a: q for a, q in position.items() if q is not None}
         return Metadata(pixel_sizes={a: q for a, q in sizes.items() if q}, position=position,
                         coordinate_system=self._system if position else None,
-                        channels=tuple(names.get(ch, Channel(name=f"Action {act}, Ch {ch}"))
-                                       for act, ch in self._channels))
+                        channels=tuple(self._channel(names, act, ch, run)
+                                       for act, ch, run in self._channels))
+
+    @staticmethod
+    def _channel(names: dict, act: int, ch: int, run: int) -> Channel:
+        """The channel's description: the settings file's for camera channel *ch*,
+        else a name from the action and channel; a channel a second timeline
+        added (*run*: its TimelineIndex, 0 for the first) says so."""
+        channel = names.get(ch, Channel(name=f"Action {act}, Ch {ch}"))
+        if run:
+            channel = replace(channel, name=f"{channel.name or f'Action {act}, Ch {ch}'} "
+                                            f"(timeline {run})")
+        return channel
 
 
 class _CVFile(File):
@@ -219,35 +258,59 @@ class _CVFile(File):
         detail = _parse(os.path.join(folder, DETAIL))
         data = _parse(os.path.join(folder, DATA))
         rows, columns = _int(detail, "RowCount"), _int(detail, "ColumnCount")
-        sample = detail.find(BTS + "MeasurementSamplePlate")
+        sample = detail.find("{*}MeasurementSamplePlate")
         plate_name = (_a(sample, "Name") if sample is not None else None) or os.path.basename(folder)
-        cameras = {_int(e, "Ch"): e for e in detail.findall(BTS + "MeasurementChannel")}
+        cameras = {_int(e, "Ch"): e for e in detail.findall("{*}MeasurementChannel")}
         settings = _a(detail, "MeasurementSettingFileName")
         channel_info = self._channels(os.path.join(folder, settings)) if settings else {}
 
-        listed: dict = {}     # (row, col, field) -> {(t, (action, ch), z): path}
-        records: dict = {}    # (row, col, field) -> {(t, (action, ch), z): (X, Y, Z, Time)}
-        timelines, errors = set(), []
-        for e in data.findall(BTS + "MeasurementRecord"):
+        # every IMG record of the measurement; the timelines of the settings file
+        # (TimelineIndex) are merged as Bio-Formats merges them: each timeline's
+        # timepoints counted from its own first one (TimePoint numbers run on from
+        # one timeline to the next), then the planes of a field put together
+        # (module docstring)
+        found: list = []      # (timeline, (row, col, field), (TimePoint, (action, ch), z), path, rec)
+        errors = []
+        for e in data.findall("{*}MeasurementRecord"):
             kind = _a(e, "Type")
             if kind == "ERR":
                 errors.append((e.text or "").strip())
                 continue
             if kind != "IMG":
                 continue
-            timelines.add(_a(e, "TimelineIndex"))
+            timeline = _int(e, "TimelineIndex") if _a(e, "TimelineIndex") is not None else 1
             key = (_int(e, "Row") - 1, _int(e, "Column") - 1, _int(e, "FieldIndex"))
             plane = (_int(e, "TimePoint"), (_int(e, "ActionIndex"), _int(e, "Ch")),
                      _int(e, "ZIndex"))
             name = (e.text or "").strip()
-            listed.setdefault(key, {})[plane] = os.path.join(folder, name) if name else None
-            records.setdefault(key, {})[plane] = (_float(e, "X"), _float(e, "Y"), _float(e, "Z"),
-                                                  self._time(_a(e, "Time")))
+            found.append((timeline, key, plane, os.path.join(folder, name) if name else None,
+                          (_float(e, "X"), _float(e, "Y"), _float(e, "Z"),
+                           self._time(_a(e, "Time")))))
+        ranks = {}            # timeline -> {TimePoint: its rank in the timeline}
+        for timeline, _key, (tp, _ch, _z), _p, _rec in found:
+            ranks.setdefault(timeline, set()).add(tp)
+        ranks = {line: {tp: k for k, tp in enumerate(sorted(tps))} for line, tps in ranks.items()}
+        listed: dict = {}     # (row, col, field) -> {(t, (action, ch), z): path}
+        records: dict = {}    # (row, col, field) -> {(t, (action, ch), z): (X, Y, Z, Time)}
+        owner: dict = {}      # (row, col, field), plane -> the timeline it came from
+        for timeline, key, (tp, (action, ch), z), file, rec in found:
+            # a channel is (action, camera channel, 0); a plane another timeline
+            # imaged already with the same channel and timepoint becomes a channel
+            # of its own, qualified by its timeline (Bio-Formats' "overflow")
+            plane = (ranks[timeline][tp], (action, ch, 0), z)
+            field = listed.setdefault(key, {})
+            if plane in field and owner[(key, plane)] != timeline and field[plane] != file:
+                plane = (plane[0], (action, ch, timeline), z)
+            if plane in field:
+                # a plane listed again: the first record whose file exists is kept
+                # (a metadata-only record never shadows a real one, module docstring)
+                if field[plane] and os.path.isfile(field[plane]):
+                    continue
+            field[plane] = file
+            owner[(key, plane)] = timeline
+            records.setdefault(key, {})[plane] = rec
         if not listed:
             raise CorruptFileError(f"{path!r}: the measurement lists no images")
-        if len(timelines) > 1:
-            raise UnsupportedFormatError(
-                f"{path!r}: {len(timelines)} timelines in one measurement are not read yet")
         if errors:
             warnings.warn(f"{path!r}: the instrument logged {len(errors)} error"
                           f"{'' if len(errors) == 1 else 's'} (e.g. {errors[0]!r})", stacklevel=3)
@@ -255,7 +318,7 @@ class _CVFile(File):
         wanted = sorted({p for field in listed.values() for p in field})
         times = sorted({t for t, _k, _z in wanted})
         check_times(wanted, path)
-        used = sorted({ch for _t, (_a_, ch), _z in wanted})
+        used = sorted({ch for _t, (_a_, ch, _run), _z in wanted})
         sizes = {(_float(cameras[ch], "HorizontalPixelDimension"),
                   _float(cameras[ch], "VerticalPixelDimension"),
                   _a(cameras[ch], "HorizontalPixels"), _a(cameras[ch], "VerticalPixels"))
@@ -274,8 +337,8 @@ class _CVFile(File):
             shape_hint = (_int(camera, "VerticalPixels"), _int(camera, "HorizontalPixels"))
         dtype, unit, shape_yx = self._members.plane_info(first, shape_hint)
         info = {"pixel_sizes": {} if camera is None else {
-                    "x": quantity(_a(camera, "HorizontalPixelDimension"), "micrometer"),
-                    "y": quantity(_a(camera, "VerticalPixelDimension"), "micrometer")},
+                    "x": quantity(_float(camera, "HorizontalPixelDimension"), "micrometer"),
+                    "y": quantity(_float(camera, "VerticalPixelDimension"), "micrometer")},
                 "channels": channel_info}
 
         wells_rc = sorted({(r, c) for r, c, _f in kept})
@@ -332,13 +395,13 @@ class _CVFile(File):
         if not os.path.isfile(mes):
             return {}
         root = _parse(mes)
-        lights = {e.get(BTS + "Name"): _float(e, "WaveLength")
-                  for e in root.iter(BTS + "LightSource")}
+        lights = {_a(e, "Name"): _float(e, "WaveLength")
+                  for e in root.iterfind(".//{*}LightSource")}
         out, fallback = {}, {}
-        for e in root.iter(BTS + "Channel"):
+        for e in root.iterfind(".//{*}Channel"):
             if _a(e, "Ch") is None:
                 continue
-            light = e.find(BTS + "LightSourceName")
+            light = e.find("{*}LightSourceName")
             light = light.text.strip() if light is not None and light.text else None
             ex = lights.get(light) if light else None
             em = None

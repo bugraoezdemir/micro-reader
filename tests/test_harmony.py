@@ -174,6 +174,54 @@ def test_new_style_hs_archive(tmp_path, version):
     assert len(g.groups[0].members) == len(data) and len(g.groups[0].parts) == 3
 
 
+def test_evaluation_folders_and_a_copied_index_are_parts_of_the_measurement(tmp_path):
+    """A full Opera Phenix export (zenodo-7351200): Harmony's analysis writes
+    ``Evaluation<n>/`` (PlateResults.xml, ObjectList_*.xml, the .aas script)
+    next to Images/; such files, and an Index.xml copied to the top, are
+    parts of the index, not inputs of their own (nor a second plate)."""
+    import shutil
+    measurement = tmp_path / "Screen__2022-11-19T14_18_30-Measurement 1"
+    index, data = _write_harmony(str(measurement), wells=((1, 1),), fields=1, channels=1,
+                                 version="V6")
+    (measurement / "Assaylayout").mkdir()
+    (measurement / "Assaylayout" / "Unnamed.xml").write_text("<AssayLayout/>")
+    for folder in ("Evaluation1", "evaluation12"):
+        (measurement / folder).mkdir()
+        (measurement / folder / "PlateResults.xml").write_text("<AnalysisResults/>")
+        (measurement / folder / "ObjectList_00000001.xml").write_text("<AnalysisResults/>")
+        (measurement / folder / "analysis.aas").write_text("// Acapella Assay Language\n")
+    shutil.copy(index, measurement / "Index.xml")
+    g = micro_reader.group_files(str(measurement))
+    assert len(g.groups) == 1 and g.singles == []
+    (group,) = g.groups
+    assert os.path.basename(group.main) == "Index.idx.xml" and len(group.members) == len(data)
+    assert sorted(os.path.relpath(p, measurement).replace(os.sep, "/") for p in group.parts) == [
+        "Assaylayout/Unnamed.xml", "Evaluation1/ObjectList_00000001.xml",
+        "Evaluation1/PlateResults.xml", "Evaluation1/analysis.aas", "Index.xml",
+        "evaluation12/ObjectList_00000001.xml", "evaluation12/PlateResults.xml",
+        "evaluation12/analysis.aas"]
+    for entry in (measurement / "Evaluation1", measurement / "Evaluation1" / "PlateResults.xml",
+                  measurement / "evaluation12" / "analysis.aas", measurement / "Index.xml"):
+        with micro_reader.open(entry) as f:
+            assert os.path.basename(f.path) == "Index.idx.xml"
+
+
+def test_a_plate_without_a_name_is_named_after_its_measurement_folder(tmp_path):
+    """An index whose <Name> and <PlateID> are empty (zenodo-7351200): the
+    plate is named after the folder above Images/, as outputs are."""
+    import re
+    measurement = tmp_path / "20221118_10x_PreScan__2022-11-19T14_18_30-Measurement 1"
+    index, _ = _write_harmony(str(measurement), wells=((1, 1),), fields=1, channels=1)
+    with open(index, encoding="utf-8") as fh:
+        xml = re.sub(r"<PlateID>[^<]*</PlateID><Name>[^<]*</Name>", "<PlateID /><Name />", fh.read())
+    assert "<PlateID /><Name />" in xml
+    with open(index, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    with micro_reader.open(index) as f:
+        assert f.plates[0].name == measurement.name
+        assert f.images[0].name == f"{measurement.name} well A1 field 0"
+
+
 def test_field_positions_are_first_pixels_relative_to_the_well(tmp_path):
     """PositionX / PositionY are the field's centre with y up (as Bio-Formats
     8.0.0 reads them on idr0034: x, -y); micro-reader gives the first pixel's

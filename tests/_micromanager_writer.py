@@ -1,9 +1,11 @@
 """Micro-Manager image-per-file acquisitions for tests, laid out as the OME
-samples (``formats/tiff/micromanager/ome-serge``, ``ome-thomas/test/*_sep``):
-``<acquisition>/display_and_comments.txt`` and one folder per stage position
-holding ``metadata.txt`` (JSON: ``"Summary"``, then ``"FrameKey-<t>-<c>-<z>"``
-entries (1.4) or ``"Coords-<file>"`` entries (2.0 betas)) and one ImageJ TIFF
-per plane, its plane metadata as JSON in the ImageJ ``Info`` (tifffile)."""
+samples (``formats/tiff/micromanager/ome-serge``, ``ome-thomas/test/*_sep``)
+and the Zenodo 6659532 2.0.0 sample: ``<acquisition>/display_and_comments.txt``
+and one folder per stage position holding ``metadata.txt`` (JSON:
+``"Summary"``, then ``"FrameKey-<t>-<c>-<z>"`` entries (1.4), ``"Coords-<file>"``
+entries (2.0 betas) or ``"Coords-<folder>/<file>"`` + ``"Metadata-<folder>/<file>"``
+entries (2.0.0)) and one ImageJ TIFF per plane, its plane metadata as JSON in
+the ImageJ ``Info`` (tifffile)."""
 from __future__ import annotations
 
 import json
@@ -23,8 +25,18 @@ def name_20(t, c, p, z):
 def summary(*, frames, channels, slices, positions, labels=None, pixel_size=0.0, z_step=0.0,
             interval=0.0, custom=None, colors=None, prefix="acq", uuid="79ab3210-c64c",
             style="1.4"):
-    """A Summary as the samples write it; *labels*: the position list's labels
-    (None: no list, ``InitialPositionList`` null)."""
+    """A Summary as the samples write it (*style* "1.4", "2.0" (beta) or
+    "2.0.0"); *labels*: the position list's labels (None: no list,
+    ``InitialPositionList`` null; the 2.0.0 sample lists none)."""
+    if style == "2.0.0":
+        return {"Prefix": prefix, "MicroManagerVersion": "2.0.0", "MetadataVersion": "12.0.0",
+                "ComputerName": "Dobby", "ChNames": list(channels),
+                "AxisOrder": ["channel", "time", "z", "position"], "TimeFirst": False,
+                "SlicesFirst": True, "Slices": slices, "z-step_um": z_step,
+                "IntendedDimensions": {"channel": len(channels), "position": positions,
+                                       "time": frames, "z": slices},
+                "Frames": frames, "Positions": positions, "Channels": len(channels),
+                "Width": 0, "Height": 0, "IJType": 1, "PixelType": "GRAY16"}
     if style == "2.0":
         return {"ChannelGroup": "Channel", "Slices": slices, "ChNames": list(channels),
                 "AxisOrder": ["channel", "time"], "Frames": frames, "Prefix": prefix,
@@ -94,6 +106,17 @@ def write_acquisition(root, *, frames=2, channels=("DAPI", "GFP"), slices=1, pos
                                  "Width": shape[1], "Height": shape[0]}
                         md[f"FrameKey-{t}-{c}-{z}"] = entry
                         info = dict(entry)
+                    elif style == "2.0.0":
+                        # the file name carries the position folder (as the sample)
+                        name = name_20(t, c, p, z)
+                        coords = {"Frame": t, "FrameIndex": t, "PositionIndex": p, "Slice": z,
+                                  "SliceIndex": z, "ChannelIndex": c}
+                        md[f"Coords-{folder}/{name}"] = coords
+                        info = dict(coords, Width=shape[1], Height=shape[0], PixelType="GRAY16",
+                                    PixelSizeUm=plane_pixel_size if plane_pixel_size is not None
+                                    else 0.0, PositionName=folder, XPositionUm=x, YPositionUm=y,
+                                    ZPositionUm=zz)
+                        md[f"Metadata-{folder}/{name}"] = info
                     else:
                         name = name_20(t, c, p, z)
                         md[f"Coords-{name}"] = {"position": p, "time": t, "z": z, "channel": c}

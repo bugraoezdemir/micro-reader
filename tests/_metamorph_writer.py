@@ -4,7 +4,8 @@ page's description) and STK members (written here: tifffile reads STK but
 does not write it -- one IFD, the planes stored one after the other, the
 UIC1 / UIC2 / UIC4 tags).  Layout as on the real samples
 (``formats/metamorph``): ``"Key", value`` lines ending ``\\r\\n``, a
-multi-line ``Description``, members ``<base>[_w<k><name>][_s<p>][_t<t>].TIF``.
+multi-line ``Description``, members ``<base>[_w<k><name>][_s<p>][_t<t>].TIF``
+(a ``_`` in a wave name written as ``-``, as MetaMorph does).
 """
 from __future__ import annotations
 
@@ -139,11 +140,13 @@ def member_name(base, s=None, t=None, w=None, wave_name="", ext=".TIF"):
 
 def write_set(folder, base="exp", *, times=None, stages=None, waves=None, nz=None, z_step=2.0,
               z0=100.0, waves_in_name=True, stk=False, skip=(), shape=(8, 12), seed=7,
-              illumination=True, stage_xy=None):
+              illumination=True, stage_xy=None, raw_wave_names=False):
     """A whole set: the ``.nd`` file and every member, random uint16 planes.
     *skip*: (s, t, w) (0-based) not written.  *illumination*: the members'
     ``_IllumSetting_`` -- True: the wavelength's name, a string: that, None:
-    none.  *stage_xy*: s -> (x, y) the members record.
+    none.  *stage_xy*: s -> (x, y) the members record.  *raw_wave_names*:
+    file names with the wave names as the ``.nd`` file spells them (else a
+    ``_`` becomes ``-``, as MetaMorph writes them).
     -> (nd path, {(s, t, w): (n, y, x) array}, {(s, t, w): member path})."""
     rng = np.random.default_rng(seed)
     os.makedirs(folder, exist_ok=True)
@@ -159,8 +162,11 @@ def write_set(folder, base="exp", *, times=None, stages=None, waves=None, nz=Non
                 # a plane without z sits at the middle slice of the stack
                 zs = ([z0 + k * z_step for k in range(depth)] if depth > 1 or not nz
                       else [z0 + z_step * ((nz - 1) // 2)])
+                in_file = name or ""
+                if not raw_wave_names:
+                    in_file = in_file.replace("_", "-")
                 fn = member_name(base, s + 1 if stages else None, t + 1 if times else None,
-                                 w + 1 if waves and waves_in_name else None, name or "",
+                                 w + 1 if waves and waves_in_name else None, in_file,
                                  ".STK" if stk else ".TIF")
                 path = os.path.join(folder, fn)
                 planes = rng.integers(1, 60000, (depth,) + tuple(shape)).astype("u2")
