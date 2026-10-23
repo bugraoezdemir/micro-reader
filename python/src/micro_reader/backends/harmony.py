@@ -13,6 +13,9 @@ the index file: micro-reader reads the plate it describes.
   0 or 1 depending on the instrument).
 - Indices: ``plate`` 0, ``acquisition`` 0 (one measurement per index file),
   ``well`` (the wells with images, row then column), ``field`` = FieldID - 1.
+- The plate's name: the index's ``Name``, else its ``PlateID``, else the
+  measurement folder's name (the folder above ``Images``; an index whose
+  ``Name`` and ``PlateID`` are empty is common), as outputs are named.
 - Missing planes (empty ``URL`` or no file; vendors list planes they did not
   write): a field missing some reads them as zeros, a field missing all is
   left out, with one ``MissingImagesWarning`` (``_fileset.keep_fields``).
@@ -25,9 +28,12 @@ the index file: micro-reader reads the plate it describes.
   the field's well.
 
 The measurement folder is also a composite (docs/COMPOSITE.md): next to
-``Images/`` it holds ``Assaylayout/`` (the plate map) and ``FFC_Profile/`` (the
-flat-field model); their files, those two folders and the measurement folder
-itself are parts of ``Images/Index.idx.xml`` and open it.
+``Images/`` it holds ``Assaylayout/`` (the plate map), ``FFC_Profile/`` (the
+flat-field model) and, once Harmony's analysis has run, ``Evaluation1/``,
+``Evaluation2/``, ... (its results: ``PlateResults.xml``, ``ObjectList_*.xml``,
+the ``.aas`` analysis script); their files, those folders, the other files in
+the measurement folder and the measurement folder itself are parts of
+``Images/Index.idx.xml`` and open it.
 """
 from __future__ import annotations
 
@@ -50,12 +56,20 @@ SET_INDEX = True
 #: where a measurement folder keeps its index (letter case aside: the "hs"
 #: archive of Harmony 5.2 / 6 writes ``images/index.xml``), and its side
 #: folders (lower case): classic ``Assaylayout`` / ``FFC_Profile``, hs
-#: ``flatfieldcorrection`` / ``index`` (measurement descriptions)
+#: ``flatfieldcorrection`` / ``index`` (measurement descriptions), and the
+#: analysis results ``Evaluation<n>`` (``SIDE_FOLDER_PATTERN``)
 IMAGES_FOLDERS = ("Images", "images")
 INDEX_FILES = ("Index.idx.xml", "Index.xml", "index.xml", "index.idx.xml")
 SIDE_FOLDERS = ("assaylayout", "ffc_profile", "flatfieldcorrection", "index")
+SIDE_FOLDER_PATTERN = re.compile(r"evaluation\d+")
 #: plane files: members of the index, opened as themselves (never parts)
 PLANE_SUFFIXES = (".tif", ".tiff")
+
+
+def _side_folder(name: str) -> bool:
+    """Is a folder called *name* (any letter case) a measurement's side folder?"""
+    name = name.lower()
+    return name in SIDE_FOLDERS or SIDE_FOLDER_PATTERN.fullmatch(name) is not None
 
 
 def _measurement_index(measurement: str):
@@ -69,6 +83,16 @@ def _measurement_index(measurement: str):
                 if os.path.isfile(path):
                     return _spelled(path)
     return None
+
+
+def _measurement_name(images: str) -> str:
+    """The name of the measurement folder of the index in folder *images*: the
+    folder above ``Images``, or *images* itself when the index sits among its
+    planes (zenodo-15149351); ``""`` at a drive root."""
+    folder = os.path.abspath(images)
+    if os.path.basename(folder).lower() == "images":
+        folder = os.path.dirname(folder)
+    return os.path.basename(folder)
 
 
 def _spelled(path: str) -> str:
@@ -91,7 +115,7 @@ def may_own(folder: str, name: str, folders) -> bool:
     in a measurement folder (next to ``Images``) or, unless it is a plane,
     in ``Images`` may be a part."""
     base = folders.base(folder).lower()
-    return base in SIDE_FOLDERS or "images" in folders.names(folder) or \
+    return _side_folder(base) or "images" in folders.names(folder) or \
         (base == "images" and not name.lower().endswith(PLANE_SUFFIXES))
 
 
@@ -102,10 +126,10 @@ def owner(path: str, head):
     path = os.path.abspath(path)
     parent = os.path.dirname(path)
     if os.path.isdir(path):
-        if os.path.basename(path).lower() in SIDE_FOLDERS:
+        if _side_folder(os.path.basename(path)):
             path = os.path.dirname(path)
         index = _measurement_index(path)
-    elif os.path.basename(parent).lower() in SIDE_FOLDERS:
+    elif _side_folder(os.path.basename(parent)):
         index = _measurement_index(os.path.dirname(parent))
     elif os.path.basename(parent).lower() == "images":
         if path.lower().endswith(PLANE_SUFFIXES):
@@ -296,8 +320,9 @@ class _HarmonyFile(File):
         shape = (len(tps), len(chs), len(pls)) + shape_yx
         position = {(tp, ch, pl): (tps.index(tp), chs.index(ch), pls.index(pl))
                     for tp, ch, pl in wanted}
-        plate_name = _text(plate_e, "Name") or _text(plate_e, "PlateID") or ""
-        base = plate_name or os.path.basename(os.path.dirname(folder)) or os.path.basename(path)
+        plate_name = (_text(plate_e, "Name") or _text(plate_e, "PlateID")
+                      or _measurement_name(folder) or "")
+        base = plate_name or os.path.basename(path)
         row_names, column_names = layout(rows, columns, wells_rc, path)
         plates = [Plate(name=plate_name, rows=row_names, columns=column_names,
                         wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))]

@@ -209,8 +209,67 @@ def test_a_three_d_action_next_to_a_two_d_one_is_ragged(tmp_path):
         np.testing.assert_array_equal(whole[0, 1, 3], data[(2, 2, 1, 1, 2, 4)])
 
 
+def test_timelines_are_merged_as_bio_formats_merges_them(tmp_path):
+    """The writer puts the last action on timeline 2: the same wells and fields imaged
+    by two timelines. One plate without acquisitions; each field holds the channels of
+    both timelines (Bio-Formats' expected results for Zenodo 21334895)."""
+    data = _write(str(tmp_path), timelines=2)
+    with micro_reader.open(tmp_path / "P1.wpi", plates=True) as f:
+        plate = f.plates[0]
+        assert plate.acquisitions == () and [w.name for w in plate.wells] == ["B2", "C5"]
+        assert len(f.images) == 4                                          # 2 wells x 2 fields
+        first = f.images[0]
+        assert dict(first.index) == {"plate": 0, "acquisition": 0, "well": 0, "field": 0}
+        assert first.shape[1] == len(TWO_D)
+        last_action = TWO_D[-1][0]
+        np.testing.assert_array_equal(first[0, len(TWO_D) - 1, 0], data[(2, 2, 1, 1, last_action, 1)])
+
+
+def test_a_plane_a_second_timeline_images_again_is_a_channel_of_its_own(tmp_path):
+    """Zenodo 21334895 'fallback-reused-channel': timeline 2 images well A1 again with
+    timeline 1's first action and channel. Bio-Formats keeps the plane as a third
+    channel; so do we, named after its timeline."""
+    data = _write(str(tmp_path), timelines=1, wells=((2, 2),), fields=1)
+    mlf = tmp_path / "MeasurementData.mlf"
+    text = mlf.read_text(encoding="utf-8")
+    first = TWO_D[0]
+    record = next(r for r in text.split("<bts:MeasurementRecord")[1:]
+                  if f'bts:ActionIndex="{first[0]}"' in r and f'bts:Ch="{first[1]}"' in r)
+    again = record.replace('bts:TimelineIndex="1"', 'bts:TimelineIndex="2"')
+    again = again.replace("L01A", "L02A", 1)                         # another file
+    name = again.split(">", 1)[1].split("<", 1)[0]
+    import shutil
+    shutil.copy(tmp_path / record.split(">", 1)[1].split("<", 1)[0], tmp_path / name)
+    text = text.replace("</bts:MeasurementData>", "<bts:MeasurementRecord" + again + "</bts:MeasurementData>")
+    mlf.write_text(text, encoding="utf-8")
+    with micro_reader.open(tmp_path / "P1.wpi", plates=True) as f:
+        (image,) = f.images
+        assert image.shape[1] == len(TWO_D) + 1
+        names = [c.name for c in image.metadata.channels]
+        added = [k for k, n in enumerate(names) if n.endswith("(timeline 2)")]
+        assert len(added) == 1 and len(set(names)) == len(names)
+        assert names[added[0]] == f"{names[added[0] - 1]} (timeline 2)"    # right after its twin
+        np.testing.assert_array_equal(image[0, added[0], 0], image[0, added[0] - 1, 0])
+
+
+def test_a_timeline_counts_its_timepoints_from_its_own_first(tmp_path):
+    """CV7000 numbers TimePoints on from one timeline to the next (the Zenodo 21334895
+    packages: timeline 2's first timepoint is TimePoint 2): ranked per timeline, both
+    timelines' planes sit at t = 0, as Bio-Formats puts them."""
+    _write(str(tmp_path), timelines=2)
+    mlf = tmp_path / "MeasurementData.mlf"
+    text = mlf.read_text(encoding="utf-8")
+    text = text.replace('bts:TimePoint="1" bts:FieldIndex="1" bts:ZIndex="1" bts:TimelineIndex="2"',
+                        'bts:TimePoint="2" bts:FieldIndex="1" bts:ZIndex="1" bts:TimelineIndex="2"')
+    text = text.replace('bts:TimePoint="1" bts:FieldIndex="2" bts:ZIndex="1" bts:TimelineIndex="2"',
+                        'bts:TimePoint="2" bts:FieldIndex="2" bts:ZIndex="1" bts:TimelineIndex="2"')
+    assert 'bts:TimePoint="2"' in text
+    mlf.write_text(text, encoding="utf-8")
+    with micro_reader.open(tmp_path / "P1.wpi", plates=True) as f:
+        assert f.images[0].shape[:3] == (1, len(TWO_D), 1)
+
+
 @pytest.mark.parametrize("kwargs, match", [
-    ({"timelines": 2}, "2 timelines"),
     ({"pixel": (0.65, 1.3)}, "different pixel or image sizes"),
 ])
 def test_refused(tmp_path, kwargs, match):
@@ -225,3 +284,73 @@ def test_only_the_entry_files_are_sniffed(tmp_path):
                            ("MeasurementData.mlf", True), ("s.wpp", False), ("s.mes", False)):
         with open(tmp_path / name, "rb") as fh:
             assert cv7000.sniff(fh.read(1024), str(tmp_path / name)) is expected, name
+
+
+def _reprefix(path, prefix, unprefixed=()):
+    """Rewrite a BTS file with namespace prefix *prefix* ("" for a default
+    namespace) and the attributes *unprefixed* without any prefix."""
+    text = path.read_text(encoding="utf-8")
+    for name in unprefixed:
+        text = text.replace(f" bts:{name}=", f" {name}=")
+    text = text.replace(" xmlns:bts=", f" xmlns:{prefix}=" if prefix else " xmlns=")
+    text = text.replace("bts:", f"{prefix}:" if prefix else "")
+    path.write_text(text, encoding="utf-8")
+
+
+def test_namespace_prefixes_do_not_matter(tmp_path):
+    """Bio-Formats' synthetic packages (zenodo-21334895, centralized-parsing):
+    each file with its own prefix, attributes with or without one, a default
+    namespace in the .wpi, decimal commas.  Elements and attributes are matched
+    by namespace or local name, never by prefix."""
+    data = _write(str(tmp_path), wells=((2, 2),), fields=1)
+    _reprefix(tmp_path / "MeasurementData.mlf", "record", unprefixed=("X", "Y", "Z"))
+    _reprefix(tmp_path / "MeasurementDetail.mrf", "detail", unprefixed=("RowCount",))
+    _reprefix(tmp_path / "P1.wpi", "")
+    _reprefix(tmp_path / "s.mes", "setting", unprefixed=("Target",))
+    mrf = tmp_path / "MeasurementDetail.mrf"
+    mrf.write_text(mrf.read_text(encoding="utf-8").replace('PixelDimension="0.65"', 'PixelDimension="0,65"'),
+                   encoding="utf-8")
+    for entry in ("P1.wpi", "MeasurementDetail.mrf", "MeasurementData.mlf"):
+        with open(tmp_path / entry, "rb") as fh:
+            assert cv7000.sniff(fh.read(1024), str(tmp_path / entry)), entry
+        with micro_reader.open(tmp_path / entry) as f:
+            assert f.backend == "cv7000" and f.plates[0].name == "P1"
+            assert len(f.plates[0].rows) == 16 and [w.name for w in f.plates[0].wells] == ["B2"]
+            (image,) = f.images
+            np.testing.assert_array_equal(image[0, 1, 0], data[(2, 2, 1, 1, 2, 1)])
+            md = image.metadata
+            assert [c.name for c in md.channels] == ["BFP", "GFP"]
+            assert md.channels[0].excitation_wavelength == micro_reader.Quantity(405.0, "nanometer")
+            assert md.pixel_sizes["x"] == micro_reader.Quantity(0.65, "micrometer")
+            assert md.position["x"].value == pytest.approx(100.0 - (X - 1) / 2 * 0.65)
+            assert md.position["z"].value == -3.0
+    with open(tmp_path / "s.wpp", "rb") as fh:
+        assert not cv7000.sniff(fh.read(1024), str(tmp_path / "s.wpp"))
+
+
+def test_a_plane_listed_twice_reads_the_first_record_with_a_file(tmp_path):
+    """Bio-Formats' duplicate-policy package: a metadata-only record (no file)
+    before the real one, more records after it (one with a file of its own):
+    the first record whose file exists is read; none shadows it."""
+    data = _write(str(tmp_path), wells=((2, 2),), fields=1)
+    real = "P1_B02_T0001F001L01A01Z01C01.tif"
+    other = "P1_B02_T0001F001L01A01Z01C01_ignored_tiff_duplicate.tif"
+    tifffile.imwrite(tmp_path / other, np.full((Y, X), 7, "u2"))
+    mlf = tmp_path / "MeasurementData.mlf"
+    text = mlf.read_text(encoding="utf-8")
+    start = text.rfind("<bts:MeasurementRecord", 0, text.index(real))
+    record = text[start:text.index("</bts:MeasurementRecord>", start) + len("</bts:MeasurementRecord>")]
+    twice = [record.replace(real, "P1_B02_T0001F001L01A01Z01C01_metadata_only_duplicate.tif"), record,
+             record.replace(real, other),
+             record.replace(real, "P1_B02_T0001F001L01A01Z01C01_metadata_only_duplicate_2.tif")]
+    mlf.write_text(text.replace(record, "".join(twice)), encoding="utf-8")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", micro_reader.MissingImagesWarning)
+        f = micro_reader.open(tmp_path / "P1.wpi")
+    with f:
+        (image,) = f.images
+        np.testing.assert_array_equal(image[0, 0, 0], data[(2, 2, 1, 1, 1, 1)])
+        assert image.metadata.position["z"].value == -3.0
+    g = micro_reader.group_files(str(tmp_path))
+    assert len(g.groups) == 1 and len(g.groups[0].members) == 2
+    assert [os.path.basename(s) for s in g.singles] == [other]

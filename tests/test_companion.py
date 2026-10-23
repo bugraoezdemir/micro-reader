@@ -277,6 +277,70 @@ def test_what_it_cannot_read_is_refused(tmp_path, edit, error):
         micro_reader.open(path)
 
 
+# -- a companion whose bytes are not in the encoding it declares ------------------
+
+def _rewrite_bytes(path, edit):
+    """The companion at *path* with its bytes changed by *edit*."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    with open(path, "wb") as fh:
+        fh.write(edit(raw))
+
+
+def _mis_encoded(raw: bytes, byte: bytes = b"\xb5") -> bytes:
+    """*raw* as Prairie View writes it: a UTF-8 BOM, the UTF-8 declaration
+    kept, every ``µ`` as the one Windows *byte*."""
+    return b"\xef\xbb\xbf" + raw.replace("µ".encode("utf-8"), byte)
+
+
+def test_a_companion_with_windows_bytes_under_a_utf8_declaration_is_read(tmp_path):
+    """Prairie View writes ``µ`` as the one byte 0xB5 into every unit attribute
+    of a companion that declares UTF-8 (Bruker, zenodo 15224926): it is read as
+    cp1252 with one CompanionWarning naming the file and the encoding, and the
+    set reads as it would with proper UTF-8, its members too."""
+    path, data = _write(str(tmp_path), positions_z=[1.0, 3.5, 6.0])
+    _rewrite_bytes(path, _mis_encoded)
+    assert b"\xb5" in open(path, "rb").read() and b"\xc2\xb5" not in open(path, "rb").read()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with micro_reader.open(path) as f:
+            (im,) = f.images
+            assert im.shape == (2, 2, 3, Y, X)
+            _check(im, data)
+            z = im.metadata.pixel_sizes["z"]
+            assert (z.value, z.unit) == (2.5, "micrometer")      # the µm unit was read
+        with micro_reader.open(_member(str(tmp_path), 2)) as f:  # a member opens the whole
+            assert f.backend == "companion" and f.images[0].shape == (2, 2, 3, Y, X)
+        with micro_reader.open(_member(str(tmp_path), 2), multifile=False) as f:
+            assert f.images[0].metadata.pixel_sizes["z"].unit == "micrometer"
+    told = [w for w in caught if issubclass(w.category, micro_reader.CompanionWarning)]
+    assert len(told) == 1                           # parsed once, warned once
+    message = str(told[0].message)
+    assert repr(path) in message and "'utf-8'" in message and "'cp1252'" in message
+
+
+def test_a_byte_cp1252_does_not_have_falls_back_to_latin_1(tmp_path):
+    path, _data = _write(str(tmp_path))
+    _rewrite_bytes(path, lambda raw: _mis_encoded(raw, b"\x81"))   # undefined in cp1252
+    with pytest.warns(micro_reader.CompanionWarning, match="read as 'latin-1'"):
+        with micro_reader.open(path) as f:
+            (im,) = f.images
+            assert im.shape == (2, 2, 3, Y, X)
+            assert im.metadata.pixel_sizes["x"].value == 0.5    # "\x81m" is no unit: no z
+
+
+@pytest.mark.parametrize("edit", [
+    lambda raw: _mis_encoded(raw).replace(b"</OME>", b""),     # bad bytes and broken XML
+    lambda raw: raw.replace(b"</OME>", b""),                    # fine bytes, broken XML
+    lambda raw: b"<OME \xb5 this is not XML at all",             # sniffed, not parsed
+], ids=["bad-bytes-broken-xml", "broken-xml", "no-xml"])
+def test_what_is_no_xml_in_any_encoding_stays_an_error(tmp_path, edit):
+    path, _data = _write(str(tmp_path))
+    _rewrite_bytes(path, edit)
+    with pytest.raises(micro_reader.CorruptFileError, match="not readable XML"):
+        micro_reader.open(path)
+
+
 # -- caching and member files ---------------------------------------------------
 
 def test_a_companion_is_parsed_once_while_it_does_not_change(tmp_path, monkeypatch):
@@ -657,6 +721,55 @@ def test_a_member_opened_alone_is_placed_by_its_own_first_plane(tmp_path):
     with micro_reader.open(_member(str(tmp_path), 1)) as f:      # the whole set
         assert f.backend == "companion"
         assert f.images[0].metadata.coordinate_system == "stage"
+
+
+DATA = os.environ.get("MICROSCOPY_DATA", os.path.expanduser("~/Desktop/data/microscopy"))
+BRUKER = os.path.join(DATA, "formats", "companion", "zenodo-15224926-bruker")
+
+
+def test_the_bruker_prairie_view_t_series_reads_as_one_time_series():
+    """Zenodo 15224926 (Bruker, CC BY 4.0): a Prairie View T-series, a
+    companion declaring UTF-8 with Windows ``µ`` bytes in 30,000 Plane units,
+    8 OME-TIFF members of 4089 pages (the last 1377) and Prairie's own .xml /
+    .env side files.  It opens as one image t=30000 (c=1, z=1, 112 x 128
+    uint16) with one CompanionWarning; a member opens the whole set, alone it
+    is its block of 4089 timepoints; the side files are no images."""
+    companion_path = os.path.join(BRUKER, "TSeries-02282025-1111-071.companion.ome")
+    if not os.path.exists(companion_path):
+        pytest.skip(f"sample not found: {companion_path} (set MICROSCOPY_DATA)")
+    stem = os.path.join(BRUKER, "TSeries-02282025-1111-071")
+    first_member, last_member = f"{stem}_Cycle00001_Ch2_000001.ome.tif", f"{stem}_Cycle00001_Ch2_000008.ome.tif"
+    companion._cores.clear()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with micro_reader.open(companion_path) as f:
+            assert f.backend == "companion" and len(f.images) == 1
+            (im,) = f.images
+            assert (im.axes, im.shape, im.dtype) == ("tczyx", (30000, 1, 1, 112, 128), np.uint16)
+            meta = im.metadata
+            assert meta.pixel_sizes["x"].value == meta.pixel_sizes["y"].value == 2.1484375
+            assert meta.pixel_sizes["x"].unit == "micrometer"      # µm read, not "?m"
+            assert [c.name for c in meta.channels] == ["Ch2"]
+            assert meta.coordinate_system == "stage" and set(meta.position) == {"x", "y"}
+            first, last = im[0, 0, 0], im[29999, 0, 0]
+            with tifffile.TiffFile(first_member) as tif:
+                np.testing.assert_array_equal(first, tif.pages[0].asarray())
+            with tifffile.TiffFile(last_member) as tif:
+                assert len(tif.pages) == 1377
+                np.testing.assert_array_equal(last, tif.pages[1376].asarray())
+            assert first.max() > 0 and last.max() > 0
+    told = [w for w in caught if issubclass(w.category, micro_reader.CompanionWarning)]
+    assert len(told) == 1 and "'cp1252'" in str(told[0].message)
+    with micro_reader.open(first_member) as f:                    # any part opens the whole
+        assert f.backend == "companion" and f.images[0].shape == (30000, 1, 1, 112, 128)
+    with micro_reader.open(last_member, multifile=False) as f:
+        assert f.backend == "tiff" and f.images[0].shape == (1377, 1, 1, 112, 128)
+        assert f.images[0].metadata.pixel_sizes["x"].unit == "micrometer"
+    for side in (f"{stem}.xml", f"{stem}.env"):
+        with open(side, "rb") as fh:
+            assert not companion.sniff(fh.read(4096), side)
+        with pytest.raises(micro_reader.UnsupportedFormatError):
+            micro_reader.open(side)
 
 
 def test_companion_sets_and_ome_tiffs_are_checked_strictly():

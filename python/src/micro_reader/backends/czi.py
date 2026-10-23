@@ -315,6 +315,10 @@ class _PlaneTiles:
         self.rects = [(s.y - oy, s.y - oy + s.height, s.x - ox, s.x - ox + s.width)
                       for s in subblocks]
         self.cell = (max(s.height for s in subblocks), max(s.width for s in subblocks))
+        # a compressed tile is decoded whole: a band shorter than it would decode the
+        # same tile again for every band it crosses (the cache holds a few tiles)
+        self.decoded_rows = max((s.height for s in subblocks if s.compression != UNCOMPRESSED),
+                                default=0)
         self.grid: dict = {}
         for i, (y0, y1, x0, x1) in enumerate(self.rects):
             for cy in range(y0 // self.cell[0], (y1 - 1) // self.cell[0] + 1):
@@ -782,8 +786,9 @@ class _CziImage(Image):
             if tiles is None:
                 continue                                    # nothing acquired: background
             dst = out[tuple(k - s.start for k, s in zip(key, plane_spans))]
-            for b0 in range(ys.start, ys.stop, per_task):
-                b1 = min(ys.stop, b0 + per_task)
+            rows_per_task = max(per_task, tiles.decoded_rows)
+            for b0 in range(ys.start, ys.stop, rows_per_task):
+                b1 = min(ys.stop, b0 + rows_per_task)
                 part = dst[b0 - ys.start:b1 - ys.start]
                 tasks.append(lambda a=(tiles, b0, b1, xs, part): self._draw_band(*a))
         read = _pool.run(tasks)
