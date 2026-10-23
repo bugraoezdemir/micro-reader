@@ -45,8 +45,9 @@ class CompositeWarning(UserWarning):
 
 class CompanionWarning(UserWarning):
     """An OME companion set's metadata came from somewhere other than the file
-    opened, or a member path had to be resolved differently than written
-    (docs/COMPANION.md)."""
+    opened, a member path had to be resolved differently than written, or the
+    companion's bytes had to be read in another encoding than its XML
+    declares (docs/COMPANION.md)."""
 
 
 class SkewedGridWarning(UserWarning):

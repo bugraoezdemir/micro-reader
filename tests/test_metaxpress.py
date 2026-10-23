@@ -151,10 +151,50 @@ def test_check_members(tmp_path):
         assert f.check_members() == 0                            # not a file set
 
 
+def _z_series(folder, zsteps, projection=True, **kwargs):
+    """A plate written by ``_write`` turned into a z-series: its planes moved into
+    ``ZStep_1`` .. ``ZStep_<zsteps>`` (new pixels per step), ``ZStep_0`` the projection
+    when *projection*, a copy of the HTD in every ZStep folder (as MetaXpress writes).
+    -> (HTD path, {(row, col, site, wave, t, z): array})."""
+    import shutil
+    htd, flat = _write(folder, extra=f'"ZSteps", {zsteps}\n"ZProjection", {"TRUE" if projection else "FALSE"}',
+                       **kwargs)
+    data = {}
+    for (r, c, s, w, t), plane in flat.items():
+        where = os.path.join(folder, f"TimePoint_{t}") if kwargs.get("timepoints", 1) > 1 else folder
+        name = next(n for n in os.listdir(where) if n.lower().endswith(".tif")
+                    and f"_{chr(65 + r)}{c + 1:02d}" in n and "thumb" not in n.lower()
+                    and (kwargs.get("sites") is None or f"_s{s}" in n)
+                    and (kwargs.get("waves", 1) is None or f"_w{w}" in n))
+        os.remove(os.path.join(where, name))
+        for z in range(0 if projection else 1, zsteps + 1):
+            sub = os.path.join(where, f"ZStep_{z}")
+            os.makedirs(sub, exist_ok=True)
+            shutil.copy(htd, os.path.join(sub, os.path.basename(htd)))
+            a = RNG.integers(0, 4000, (Y, X)).astype("u2")
+            tifffile.imwrite(os.path.join(sub, name), a)
+            if z:
+                data[(r, c, s, w, t, z)] = a
+    return htd, data
+
+
+def test_a_z_series(tmp_path):
+    htd, data = _z_series(str(tmp_path), 3, wells=[(0, 0), (1, 2)], sites=[[True, True]])
+    with micro_reader.open(htd, plates=True) as f:
+        assert len(f.images) == 4
+        image = f.images[0]
+        assert image.shape[:3] == (1, 2, 3)
+        for z in range(3):
+            np.testing.assert_array_equal(image[0, 1, z], data[(0, 0, 1, 2, 1, z + 1)])
+    copy = os.path.join(str(tmp_path), "ZStep_2", os.path.basename(htd))
+    with micro_reader.open(copy, plates=True) as f:                   # the copy opens the plate
+        assert os.path.normcase(f.path) == os.path.normcase(htd) and f.images[0].shape[2] == 3
+    grouping = micro_reader.group_files(str(tmp_path))
+    assert [g.kind for g in grouping.groups] == ["index"] and not [
+        s for s in grouping.singles if s.lower().endswith(".htd")]
+
+
 def test_refused(tmp_path):
-    htd, _ = _write(str(tmp_path / "z"), wells=[(0, 0)], extra='"ZSteps", 4')
-    with pytest.raises(micro_reader.UnsupportedFormatError, match="ZSteps"):
-        micro_reader.open(htd)
     htd, _ = _write(str(tmp_path / "dup"), wells=[(0, 0)], sites=None, waves=None)
     tifffile.imwrite(os.path.join(str(tmp_path / "dup"), f"{STEM}_A01.tiff"),
                      np.zeros((Y, X), "u2"))                     # same plane twice

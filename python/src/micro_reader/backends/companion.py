@@ -24,6 +24,9 @@ OME-TIFFs: each ``TiffData`` says which file (``UUID FileName``), which pages
   not exist falls back to the same name in the companion's folder, with a
   ``CompanionWarning``.
 - Missing members: as for every file set (``_fileset.keep_fields``).
+- A companion whose bytes are not in the encoding it declares (Prairie View:
+  Windows ``µ`` under UTF-8) is read as cp1252, else latin-1, with a
+  ``CompanionWarning``; one that is no XML either way is a ``CorruptFileError``.
 - The parsed companion is cached per process (``CORE_CACHE`` companions, by
   path, modification time and size), apart from the pixel caches.
 
@@ -34,8 +37,10 @@ separate images (docs/COMPANION.md, "A").
 from __future__ import annotations
 
 import builtins
+import codecs
 import math
 import os
+import re
 import threading
 import warnings
 import xml.etree.ElementTree as ET
@@ -289,6 +294,11 @@ class Core:
 
 #: the first bytes of a TIFF / BigTIFF, either byte order
 TIFF_MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
+#: encodings tried in turn when a companion's bytes are not in the encoding
+#: its XML declaration says: cp1252 first (what Windows software writes, and
+#: what tifffile falls back to for a TIFF description), latin-1 for the few
+#: bytes cp1252 leaves undefined
+FALLBACK_ENCODINGS = ("cp1252", "latin-1")
 
 
 def _ome_root(path: str):
@@ -298,7 +308,7 @@ def _ome_root(path: str):
     with builtins.open(path, "rb") as fh:
         magic = fh.read(4)
     if magic not in TIFF_MAGIC:
-        return ET.parse(path).getroot()
+        return _xml_file_root(path)
     import tifffile
     try:
         with tifffile.TiffFile(path, **PLAIN_PAGES) as tif:
@@ -308,6 +318,52 @@ def _ome_root(path: str):
     if "<OME" not in text:
         raise CorruptFileError(f"{path!r}: a TIFF without OME-XML in its first page")
     return ET.fromstring(text)
+
+
+def _xml_file_root(path: str):
+    """The root element of the XML file *path*.
+
+    A file whose bytes are not in the encoding its declaration says (Prairie
+    View writes ``µ`` as the one Windows byte 0xB5 into every unit attribute,
+    under ``encoding="UTF-8"``) is decoded as cp1252, else latin-1
+    (``FALLBACK_ENCODINGS``), with a ``CompanionWarning`` naming the file and
+    the encoding used.  A file that is no XML in any of them raises the
+    ``ET.ParseError`` of its declared encoding, as before."""
+    try:
+        return ET.parse(path).getroot()
+    except ET.ParseError as exc:
+        error = exc
+    with builtins.open(path, "rb") as fh:
+        raw = fh.read()
+    if raw.startswith(codecs.BOM_UTF8):           # a BOM is no character of the text
+        raw = raw[len(codecs.BOM_UTF8):]
+    declared = _declared_encoding(raw)
+    try:
+        raw.decode(declared)
+    except (UnicodeDecodeError, LookupError) as bad:
+        where = f"byte {bad.start}" if isinstance(bad, UnicodeDecodeError) else "unknown"
+    else:
+        raise error                               # the bytes are fine: it is no XML
+    for encoding in FALLBACK_ENCODINGS:
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        # the declaration is dropped: it names the encoding the bytes are not in
+        text = re.sub(r"^\s*<\?xml[^>]*\?>", "", text)
+        root = ET.fromstring(text)                # ParseError: no XML in this encoding either
+        warnings.warn(CompanionWarning(
+            f"{path!r}: its XML declares {declared!r} but its bytes are not ({where}); read "
+            f"as {encoding!r}"), stacklevel=5)
+        return root
+    raise error
+
+
+def _declared_encoding(raw: bytes) -> str:
+    """The encoding an XML declaration at the start of *raw* names, else
+    "utf-8" (the XML default)."""
+    found = re.match(rb'\s*<\?xml[^>]*?encoding\s*=\s*["\']([A-Za-z0-9._-]+)["\']', raw)
+    return found.group(1).decode("ascii").lower() if found else "utf-8"
 
 
 def _page_count(path: str) -> int:

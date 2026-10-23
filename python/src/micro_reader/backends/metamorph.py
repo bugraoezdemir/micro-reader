@@ -12,10 +12,13 @@ MetaMorph names the image files after it, by a rule -- a **composite**
 when the set has wavelengths (``DoWave``) and ``WaveInFileName`` is not
 FALSE, ``_s`` when it has stage positions (``DoStage``), ``_t`` when it is a
 time-lapse (``DoTimelapse``); numbers start at 1, without zero padding.  A
-dimension of one value may also be written without its part (both spellings
-are tried; two files for one name: a warning, neither is used).  Each file
-holds the z planes of one wavelength, position and timepoint: ``NZSteps``
-planes (``DoZSeries``), one for a wavelength with ``WaveDoZ<k>`` FALSE.
+``_`` in a wave name is written as ``-`` in the file name (``WaveName``
+``iSIM1_DAPI`` -> ``_w1iSIM1-DAPI``, checked on the Zenodo 7963332 sample),
+so both spellings are looked for.  A dimension of one value may also be
+written without its part (both spellings are tried; two files for one name:
+a warning, neither is used).  Each file holds the z planes of one wavelength,
+position and timepoint: ``NZSteps`` planes (``DoZSeries``), one for a
+wavelength with ``WaveDoZ<k>`` FALSE.
 
 - One micro-reader image per stage position (index ``series``), axes
   ``t c z y x``; channels are the wavelengths, named by ``WaveName<k>``.
@@ -206,11 +209,20 @@ def _name(value) -> Optional[str]:
 
 # -- the naming rule ------------------------------------------------------------
 
+def wave_spellings(name: Optional[str]) -> list:
+    """The spellings of wave name *name* in a file name: as written in the
+    ``.nd`` file, and with each ``_`` as ``-`` (MetaMorph's own; module
+    docstring) when they differ."""
+    name = name or ""
+    dashed = name.replace("_", "-")
+    return [name] if dashed == name else [name, dashed]
+
+
 def _wave_parts(lay: Layout, w: int) -> list:
     if not lay.wave_on or lay.waves_in_name is False:
         return [""]
-    part = f"_w{w + 1}{lay.waves[w][0] or ''}"
-    return [part, ""] if lay.waves_in_name is None and len(lay.waves) == 1 else [part]
+    parts = [f"_w{w + 1}{name}" for name in wave_spellings(lay.waves[w][0])]
+    return parts + [""] if lay.waves_in_name is None and len(lay.waves) == 1 else parts
 
 
 def _optional(on: bool, letter: str, value: int, count: int) -> list:
@@ -609,6 +621,7 @@ class _NDFile(File):
         names = [w[0] for w in lay.waves]
         firsts: dict = {}                       # wavelength -> a member file of it
         for part in (p for image in self.images for p in image.parts):
+            part = getattr(part, "source", part)    # the file's image behind an axes wrapper
             for (_t, c, _z), spec in part._planes.items():
                 firsts.setdefault(part._channels[c], spec[0])
                 if len(firsts) == len(names):

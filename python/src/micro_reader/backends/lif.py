@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import builtins
 import itertools
+from dataclasses import replace
 import os
 import warnings
 import re
@@ -82,6 +83,8 @@ from .._base import File, Image
 from .._errors import CorruptFileError, UnsupportedFormatError
 from .. import _parts
 from .._io import DecodeCache, ThreadHandles
+from .._metadata import Quantity
+from .._mosaic import Mosaic
 from .._spatial import CoordinateSystem
 from . import raster
 
@@ -399,6 +402,46 @@ class _StageFrames:
             return self._ids
 
 
+class _LifMosaic(Mosaic):
+    """A tile scan's tiles on one canvas (``tiles="mosaic"``); its metadata is the first
+    tile's, placed at the canvas corner (the scan's first pixel)."""
+
+    def __init__(self, position, tiles, name, index, corner: dict):
+        super().__init__(position, tiles, name, index)
+        self._corner = corner                     # axis -> Quantity of the canvas corner
+
+    def _read_metadata(self):
+        md = self._tiles[0][0].metadata
+        return replace(md, position={**md.position, **self._corner})
+
+
+def _mosaic(number: int, tiles: list, name: str, index: dict, path: str) -> "_LifMosaic":
+    """The tiles of one scan placed at their stage positions (``metadata.position``,
+    along the image's axes; module docstring), a whole number of pixels from the
+    corner: nominal, nothing registered -- LAS's own merged image is registered and
+    blends overlaps, so it differs; checked on Intro.lif "Region 2" against
+    "Region 2_Merged": same corner, same orientation.  Overlaps: the later tile
+    supplies the pixel.  A scan whose tiles have no position (SwapXY / FlipX / FlipY
+    set) is refused."""
+    placed = []
+    for tile in tiles:
+        md = tile.metadata
+        pos, px = md.position, md.pixel_sizes
+        if not all(a in pos and a in px for a in "xy"):
+            raise UnsupportedFormatError(
+                f"{path!r}: tiles='mosaic': the tiles of {name!r} have no stage position "
+                "(TileScanInfo with SwapXY / FlipX / FlipY set is not verified): read them "
+                "as separate tiles")
+        placed.append((tile, pos["y"], pos["x"], px["y"].to(pos["y"].unit).value,
+                       px["x"].to(pos["x"].unit).value))
+    y0 = min(y.value for _t, y, _x, _py, _px in placed)
+    x0 = min(x.value for _t, _y, x, _py, _px in placed)
+    canvas = [(tile, round((y.value - y0) / py), round((x.value - x0) / px))
+              for tile, y, x, py, px in placed]
+    corner = {"y": Quantity(y0, placed[0][1].unit), "x": Quantity(x0, placed[0][2].unit)}
+    return _LifMosaic(number, canvas, name, index, corner)
+
+
 class _LifImage(Image):
     """One tile / rotation of one Leica image."""
 
@@ -521,19 +564,23 @@ class _LifFile(File):
             # indices: those some image of the file has more than one of
             levels = [level for level in OTHER_INDICES
                       if any(lay.size.get(level, 1) > 1 for lay in layouts)]
-            if tiles == "mosaic" and "tile" in levels:
-                raise UnsupportedFormatError(
-                    f"{path!r}: tiles='mosaic': micro-reader does not compose Leica tiles "
-                    "(each tile is its own image; image.metadata.position gives its place)")
             self._frames = _StageFrames([(element, layout.size.get("tile", 1))
                                          for (_, element, _, _), layout in zip(entries, layouts)])
             images = []
+            compose = tiles == "mosaic" and "tile" in levels
+            rest = [level for level in levels if level != "tile"] if compose else levels
             for n, ((name, element, block, _), layout) in enumerate(zip(entries, layouts)):
+                n_tiles = layout.size.get("tile", 1) if compose else 1
                 for values in itertools.product(*(range(layout.size.get(level, 1))
-                                                  for level in levels)):
-                    key = {"series": n, **dict(zip(levels, values))}
-                    images.append(_LifImage(len(images), element, name, block, layout, key,
-                                            self._frames))
+                                                  for level in rest)):
+                    key = {"series": n, **dict(zip(rest, values))}
+                    if n_tiles < 2:
+                        images.append(_LifImage(len(images), element, name, block, layout, key,
+                                                self._frames))
+                        continue
+                    parts = [_LifImage(0, element, name, block, layout, {**key, "tile": m},
+                                       self._frames) for m in range(n_tiles)]
+                    images.append(_mosaic(len(images), parts, name, key, path))
         except BaseException:
             self._close_files()
             raise

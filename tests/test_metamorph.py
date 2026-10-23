@@ -265,3 +265,83 @@ def test_no_stage_coordinates_recorded(tmp_path):
     nd, _, _ = write_set(str(tmp_path), stages=["B2"], times=1)
     with micro_reader.open(nd) as f:
         assert f.images[0].metadata.stage_position == {}
+
+
+def test_an_underscore_in_a_wave_name_is_a_dash_in_the_file_name(tmp_path):
+    """MetaMorph writes WaveName ``iSIM1_DAPI`` as ``_w1iSIM1-DAPI`` (the Zenodo
+    7963332 sample); the channel keeps the ``.nd`` file's spelling."""
+    nd, data, paths = write_set(str(tmp_path), waves=[("iSIM1_DAPI", True), ("WF_BF", False)], nz=3)
+    assert os.path.basename(paths[(0, 0, 0)]) == "exp_w1iSIM1-DAPI.TIF"
+    assert os.path.basename(paths[(0, 0, 1)]) == "exp_w2WF-BF.TIF"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with micro_reader.open(nd) as f:
+            (im,) = f.images
+            assert im.is_ragged and im.shape == (1, 2, 3, Y, X)
+            assert [c.name for c in im.metadata.channels] == ["iSIM1_DAPI", "WF_BF"]
+            np.testing.assert_array_equal(im[0, 0], data[(0, 0, 0)])
+            np.testing.assert_array_equal(im[0, 1, 1], _plane(data, 0, 0, 1, 0))
+            assert len(f._member_files()) == 2
+        with micro_reader.open(paths[(0, 0, 1)]) as f:          # a member opens the set
+            assert f.backend == "metamorph" and os.path.samefile(f.path, nd)
+    assert metamorph.wave_spellings("iSIM1_DAPI") == ["iSIM1_DAPI", "iSIM1-DAPI"]
+    assert metamorph.wave_spellings("GFP") == ["GFP"] and metamorph.wave_spellings(None) == [""]
+    lay = metamorph.layout(metamorph.read_nd(nd), nd)
+    assert metamorph.member_key(lay, "exp_w1iSIM1-DAPI.TIF") == (0, 0, 0)
+    assert metamorph.member_key(lay, "exp_w1iSIM1_DAPI.TIF") == (0, 0, 0)    # as the .nd file spells it
+    assert metamorph.member_key(lay, "exp_w1iSIM1 DAPI.TIF") is None
+
+
+def test_the_nd_spelling_of_a_wave_name_is_found_too(tmp_path):
+    """A file named with the ``_`` as the ``.nd`` file spells it still reads;
+    both spellings there: neither is used."""
+    nd, data, paths = write_set(str(tmp_path), times=2, waves=[("a_b", True)], raw_wave_names=True)
+    assert os.path.basename(paths[(0, 1, 0)]) == "exp_w1a_b_t2.TIF"
+    with micro_reader.open(nd) as f:
+        np.testing.assert_array_equal(f.images[0][1, 0, 0], _plane(data, 0, 1, 0, 0))
+    write_metaseries(str(tmp_path / "exp_w1a-b_t2.TIF"), data[(0, 1, 0)])
+    with pytest.warns(micro_reader.CompositeWarning, match="more than one file"), \
+            pytest.warns(micro_reader.MissingImagesWarning):
+        f = micro_reader.open(nd)
+    with f:
+        np.testing.assert_array_equal(f.images[0][0, 0, 0], _plane(data, 0, 0, 0, 0))
+        assert not f.images[0][1, 0, 0].any()
+
+
+DATA = os.environ.get("MICROSCOPY_DATA", os.path.expanduser("~/Desktop/data/microscopy"))
+
+
+def test_zenodo_7963332_wave_names_with_underscores():
+    """KO_2789_002.nd (CC BY 4.0): WaveName ``iSIM1_DAPI`` ... ``WF_BF``, the
+    files ``_w1iSIM1-DAPI`` ... ``_w4WF-BF``.  The 4th wave has no z (WaveDoZ4
+    FALSE): one plane, placed at its focus position, the middle of the 29-plane
+    stacks; ZStepSize is 0, so the z step comes from the focus positions."""
+    folder = os.path.join(DATA, "formats", "metamorph", "zenodo-7963332")
+    nd = os.path.join(folder, "KO_2789_002.nd")
+    if not os.path.isfile(nd):
+        pytest.skip(f"sample not found: {nd} (set MICROSCOPY_DATA)")
+    w4 = os.path.join(folder, "KO_2789_002_w4WF-BF.TIF")
+    ref_bf = tifffile.imread(w4)                               # tifffile warns on its own (NumPy)
+    ref_gfp = tifffile.imread(os.path.join(folder, "KO_2789_002_w2iSIM2-GFP.TIF"), key=5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with micro_reader.open(nd) as f:
+            (im,) = f.images
+            assert im.is_ragged and im.shape == (1, 4, 29, 974, 1402) and im.dtype == "uint16"
+            assert [c.name for c in im.metadata.channels] == \
+                ["iSIM1_DAPI", "iSIM2_GFP", "iSIM3_RFP", "WF_BF"]
+            assert sorted(os.path.basename(p) for p in f._member_files()) == \
+                ["KO_2789_002_w1iSIM1-DAPI.TIF", "KO_2789_002_w2iSIM2-GFP.TIF",
+                 "KO_2789_002_w3iSIM3-RFP.TIF", "KO_2789_002_w4WF-BF.TIF"]
+            assert im.metadata.pixel_sizes["x"] == micro_reader.Quantity(0.065, UM)
+            assert im.metadata.pixel_sizes["z"] == (pytest.approx(0.2), UM)
+            stack, flat = im.parts
+            assert stack.shape == (1, 3, 29, 974, 1402) and flat.shape == (1, 1, 1, 974, 1402)
+            assert "z" not in flat.metadata.pixel_sizes
+            np.testing.assert_array_equal(flat[0, 0, 0], ref_bf)
+            bf = im[0, 3]                                   # the whole: WF_BF at z 14 only
+            np.testing.assert_array_equal(bf[14], ref_bf)
+            assert not np.delete(bf, 14, axis=0).any()
+            np.testing.assert_array_equal(im[0, 1, 5], ref_gfp)
+        with micro_reader.open(w4) as f:                     # a member opens the set
+            assert f.backend == "metamorph" and os.path.samefile(f.path, nd)

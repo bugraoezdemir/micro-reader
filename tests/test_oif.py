@@ -75,6 +75,24 @@ def test_metadata(tmp_path):
                                         ("CH3", "#FF0000", 618.0, 543.0)]
 
 
+def test_steps_from_the_axis_span_when_the_interval_is_zero(tmp_path):
+    """FV writes Interval 0 for frames taken as fast as the scan allows (a RICS series:
+    zenodo 11075037) and the total in EndPosition: the step is the span over n - 1
+    (the writer's EndPosition is 211,761.0: 211.761 with a decimal comma)."""
+    path = _write(tmp_path, "oib", _data((4, 1, 3, 5, 6)), z_interval=0, t_interval=0)
+    with micro_reader.open(path) as f:
+        meta = f.images[0].metadata
+    assert meta.pixel_sizes["t"].to("second").value == pytest.approx(211.761 / 3 / 1000)
+    assert meta.pixel_sizes["z"].to("micrometer").value == pytest.approx(211.761 / 2 / 1000)
+
+
+def test_a_single_plane_or_frame_has_no_step(tmp_path):
+    path = _write(tmp_path, "oib", _data((1, 1, 1, 5, 6)), z_interval=510, t_interval=2500)
+    with micro_reader.open(path) as f:
+        sizes = f.images[0].metadata.pixel_sizes
+    assert "z" not in sizes and "t" not in sizes
+
+
 @pytest.mark.parametrize("written, value", [("0,207.0", 0.207), ("1,35.0", 1.35), ("510", 510.0),
                                             ("-1530410.0", -1530410.0), ('"0.5"', 0.5), ("", None)])
 def test_numbers_in_the_acquiring_locale(written, value):
@@ -91,9 +109,30 @@ def test_missing_planes_read_as_zeros(tmp_path):
         np.testing.assert_array_equal(f.images[0][0, 0], data[0, 0])
 
 
+def test_a_lambda_scan_is_one_image_per_band(tmp_path):
+    """Axis L (``s_C001L001.tif`` ...): one image per emission band, its wavelength from
+    the axis' start and step (the writer's span 211.761 nm over 3 steps from 0)."""
+    from _oif_writer import oif_files
+    path = _write(tmp_path, "oif", _data((1, 1, 1, 9, 11)), extra_axis=("L", 4, "nm"))
+    storage = path + ".files"
+    os.remove(os.path.join(storage, "s_C001.tif"))
+    bands = [_data((1, 1, 1, 9, 11), seed=k) for k in range(4)]
+    for k, band in enumerate(bands):
+        _main, files = oif_files(band)
+        with open(os.path.join(storage, f"s_C001L{k + 1:03d}.tif"), "wb") as fh:
+            fh.write(files["s_C001.tif"])
+    with micro_reader.open(path) as f:
+        assert [dict(i.index) for i in f.images] == [{"series": 0, "emission": k} for k in range(4)]
+        for k, image in enumerate(f.images):
+            assert image.shape == (1, 1, 1, 9, 11)
+            np.testing.assert_array_equal(image[0, 0, 0], bands[k][0, 0, 0])
+            wavelength = image.metadata.index_values["emission"]
+            assert wavelength.to("nanometer").value == pytest.approx(k * 211.761 / 3)
+
+
 def test_an_axis_not_supported_yet_is_refused(tmp_path):
-    path = _write(tmp_path, "oif", _data((1, 1, 2, 9, 11)), extra_axis=("L", 4, "nm"))
-    with pytest.raises(UnsupportedFormatError, match="axis 'L'"):
+    path = _write(tmp_path, "oif", _data((1, 1, 2, 9, 11)), extra_axis=("A", 3, "deg"))
+    with pytest.raises(UnsupportedFormatError, match="axis 'A'"):
         micro_reader.open(path)
 
 
