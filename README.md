@@ -427,7 +427,10 @@ Images can be reached through the wells, or selected by well:
 
 ```python
 image = plate.wells[0].fields[0].image
-f.select(well=plate.well_index("B2"))
+f.select(well=plate.well_index("B2"))       # by its place in plate.wells
+f.select(well="B2")                         # by name
+f.select(row="B", column=range(1, 4))       # rows and columns: names, or 0-based numbers
+f.select(well=["B2", "C5"], field=[0, 1])   # a list, tuple, range or set: any of them
 ```
 
 `f.outline()` shows the plates, wells and fields of a file.

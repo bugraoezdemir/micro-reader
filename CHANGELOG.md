@@ -1,6 +1,34 @@
 # Changelog
 
-## 0.2.1 (unreleased): plates and composites from more real files
+## 0.3.0 (unreleased): select by well name, row and column
+
+A minor release: `select` takes new arguments, and refuses a plate, well, field or
+acquisition object it used to match nothing with. Ships together with ome_zarr_pyramid
+0.5.0, whose `PyramidCollection.select` takes the same arguments and gives the same
+images. eubi-bridge 0.3.2 and earlier bound micro-reader below 0.3 and keep 0.2.x;
+eubi-bridge calls `select` with single index values only, so widening its bound to
+`<0.4` needs no other change.
+
+### New
+
+- `File.select(well="C3")`: a well by name, in each plate (`well=` still takes a
+  well's place in `plates[p].wells`).
+- `File.select(row=..., column=...)`: a plate's wells by row and column, as 0-based
+  numbers (as `Well.row` / `Well.column`: `column=2` is the column named "3") or names
+  (`row="C"`, `column="3"`). They are another address of the well, so they do not go
+  with `well=` (TypeError).
+- Any index value may be a list, tuple, range or set, meaning any of them:
+  `select(illumination=[2, 3])`, `select(row=["B", "C"], column=range(2, 5))`;
+  `Field.select` too.
+
+### Changed
+
+- A `Plate`, `Well`, `Field` or `Acquisition` object given as an index value raises
+  `TypeError` (it selected nothing): `select(well=plate.wells[2])` names
+  `well=plate.well_index(...)` and `well="C3"`. Row, column and well names on a file
+  opened without `plates=True` raise `ValueError` naming it.
+
+## 0.2.1 (2026-10-23): plates and composites from more real files
 
 A patch release: what 0.2.0 read keeps its pixels and positions; files it refused or
 misread now open. Found on the 2026-10-22 round of new samples (three full plates and
@@ -66,6 +94,8 @@ misread now open. Found on the 2026-10-22 round of new samples (three full plate
   prefix dropped) else the detector's name (`HyD S 2`); widefield, the user's channel
   name (`UserDefName`) else the filter cube, with `EmissionWavelength`. Only when the
   setting describes exactly the image's channels, as before.
+
+## 0.2.0 (2026-10-22): coordinate systems, transformations and the file's tree
 
 A minor release under the release policy: positions some users already have change (the
 QPTIFF overview and label pictures, the ND2 y step, a Leica SCN macro picture), so it is

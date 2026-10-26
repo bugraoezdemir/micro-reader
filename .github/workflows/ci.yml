@@ -1,15 +1,17 @@
-# Tests, on every push to dev / main and every pull request, and before every
-# release (release.yml calls this workflow): build the codecs wheels, then test
-# micro-reader against exactly those wheels on every OS and supported Python,
-# once more on the reference decoders (no native module), once on the oldest
-# declared dependencies, and check the codecs' third-party licence notices are
-# current.
+# Tests run in two places: on a pull request (any target branch; when it is
+# opened, on every new commit, when it is reopened) and before every release
+# (release.yml calls this workflow; nothing is published unless it passes).
+# Plain pushes do not run them; workflow_dispatch runs them by hand.
+#
+# What runs: build the codecs wheels, then test micro-reader against exactly
+# those wheels on every OS and supported Python, once more on the reference
+# decoders (no native module), once on the oldest declared dependencies, and
+# check the codecs' third-party licence notices are current.
 name: CI
 
 on:
-  push:
-    branches: [dev, main]
   pull_request:
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
   workflow_call:
 

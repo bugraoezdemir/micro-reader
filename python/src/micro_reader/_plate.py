@@ -117,14 +117,17 @@ class Field:
 
     def select(self, **index) -> "Field":
         """This field with only the images whose index matches, e.g.
-        ``select(view=1)``."""
+        ``select(view=1)`` or ``select(view=[0, 1])``.  A field sits in one
+        well: ``row`` / ``column`` are ``File.select``'s."""
         from ._base import INDEX_NAMES
         unknown = set(index) - set(INDEX_NAMES)
         if unknown:
             raise KeyError(f"unknown indices {sorted(unknown)}; the indices are {INDEX_NAMES}")
+        wanted = {name: index_values(name, value, "Field.select")
+                  for name, value in index.items()}
         return replace(self, images=tuple(
             image for image in self.images
-            if all(image.index.get(name) == value for name, value in index.items())))
+            if all(image.index.get(name) in allowed for name, allowed in wanted.items())))
 
     def __repr__(self) -> str:
         return f"<micro_reader.Field {self.index}: {len(self.images)} images>"
@@ -173,6 +176,70 @@ class Plate:
         n = len(self.wells)
         return (f"<micro_reader.Plate {self.name!r} {len(self.rows)} x {len(self.columns)}, "
                 f"{n} well{'' if n == 1 else 's'} with images>")
+
+
+#: ``select``'s other address of a plate's wells (0-based numbers or names);
+#: not index names, so not on the images
+WELL_ADDRESS = ("row", "column")
+#: a value of one of these types is "any of" its items, in ``select``
+_SEQUENCES = (list, tuple, range, set, frozenset)
+
+
+def index_values(name: str, value, where: str = "select") -> tuple:
+    """``select``'s values for *name*: one value, or a list, tuple, range or
+    set of them (any of).  A plate, well, field or acquisition object is
+    refused: it is no index value."""
+    values = tuple(value) if isinstance(value, _SEQUENCES) else (value,)
+    for v in values:
+        kind = type(v)
+        if kind.__name__ in ("Plate", "Well", "Field", "Acquisition") and \
+                kind.__module__.split(".")[0] in ("micro_reader", "ome_zarr_pyramid"):
+            raise TypeError(
+                f"{where}({name}=...): a {kind.__name__} object is no index value; give "
+                f"its index (well=plate.well_index('C3')) or its name (well='C3')")
+    return values
+
+
+def _on_axis(values, number: int, labels) -> bool:
+    """Whether a well's row (or column) *number* is among *values*: 0-based
+    numbers, or names (*labels*: the plate's row or column names); None takes
+    every one."""
+    if values is None:
+        return True
+    name = labels[number] if 0 <= number < len(labels) else None
+    return any((v == name) if isinstance(v, str) else (v == number) for v in values)
+
+
+def wells_selected(plates, wanted: dict):
+    """The (plate, well) indices of the wells *wanted* names by name, row or
+    column (those entries are taken out of *wanted*), or None when it names
+    wells by place only (matched as any other index)."""
+    rows, columns = wanted.pop("row", None), wanted.pop("column", None)
+    wells = wanted.get("well")
+    if wells is not None and (rows is not None or columns is not None):
+        raise TypeError("select: give well= or row= / column=, not both (row and "
+                        "column are another address of the well)")
+    names = {v for v in wells if isinstance(v, str)} if wells is not None else set()
+    if rows is None and columns is None and not names:
+        return None
+    if not plates:
+        raise ValueError("select: row=, column= and well names select a plate's "
+                         "wells; the file has no plates (open it with plates=True)")
+    del_well = wells is not None
+    places = {v for v in wells if not isinstance(v, str)} if wells is not None else set()
+    out = set()
+    for p, plate in enumerate(plates):
+        for w, well in enumerate(plate.wells):
+            if wells is not None:
+                hit = w in places or well.name in names
+            else:
+                hit = _on_axis(rows, well.row, plate.rows) and \
+                    _on_axis(columns, well.column, plate.columns)
+            if hit:
+                out.add((p, w))
+    if del_well:
+        del wanted["well"]
+    return out
 
 
 def navigate(plates, images) -> list:
