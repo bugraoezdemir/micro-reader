@@ -269,3 +269,42 @@ def test_an_image_without_levels_is_its_own_pyramid(tmp_path):
         (image,) = f.images
         assert image.is_pyramid and image.level == 0 and image.pyramid is image
         assert not image.is_pyramidal
+
+
+# -- select by well name, row and column; several values ---------------------------
+
+#: wells B2 (2 fields), C5 and D7 (one field each), in an 8 x 12 plate
+WELLS = {0: (3, 5, "C5"), 1: (2, 2, "B2"), 2: (2, 2, "B2"), 3: (4, 7, "D7")}
+
+
+def test_select_by_well_name_row_and_column(tmp_path):
+    path = str(tmp_path / "plate.czi")
+    _write(path, WELLS, _plate_xml(WELLS))
+    with micro_reader.open(path, plates=True) as f:
+        plate = f.plates[0]
+        b2 = plate.well_index("B2")
+        assert f.select(well="B2") == f.select(well=b2) == f.images[:2]
+        assert f.select(well=["B2", "D7"]) == f.select(well=[b2, plate.well_index("D7")])
+        assert f.select(row="C") == f.select(row=2) == f.select(well="C5")    # 0-based
+        assert f.select(column="5") == f.select(column=4) == f.select(well="C5")
+        assert f.select(row=["B", "C"]) == f.images[:3]
+        assert f.select(row=range(1, 3), column="2") == f.images[:2]
+        assert f.select(row="H") == []                  # a row without images
+        assert f.select(field=[0, 1]) == f.images
+        assert f.select(well="B2", field=range(1, 5)) == [f.images[1]]
+
+
+def test_select_refuses_what_is_no_index_value(tmp_path):
+    path = str(tmp_path / "plate.czi")
+    _write(path, WELLS, _plate_xml(WELLS))
+    with micro_reader.open(path, plates=True) as f:
+        plate = f.plates[0]
+        with pytest.raises(TypeError, match="a Well object is no index value"):
+            f.select(well=plate.wells[0])
+        with pytest.raises(TypeError, match="not both"):
+            f.select(well=0, column=1)
+        with pytest.raises(KeyError, match="unknown indices"):
+            plate.wells[0].fields[0].select(row=0)
+    with micro_reader.open(path) as f:                  # no plates=True: no plates
+        with pytest.raises(ValueError, match="plates=True"):
+            f.select(row="B")

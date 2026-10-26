@@ -441,17 +441,38 @@ class File:
         return {name: len(seen[name]) for name in INDEX_NAMES if name in seen}
 
     def select(self, **index) -> list:
-        """The images whose index matches, e.g. ``select(series=1, view=0)``."""
-        unknown = set(index) - set(INDEX_NAMES)
+        """The images whose index matches, e.g. ``select(series=1, view=0)``.
+
+        - A value may be a list, tuple, range or set: any of them
+          (``select(illumination=[2, 3])``).
+        - ``well`` is a well's place in ``plates[p].wells`` or its name
+          (``well="C3"``, in each plate).
+        - ``row`` and ``column`` select a plate's wells by row and column:
+          0-based numbers (as ``Well.row`` / ``Well.column``: ``column=2`` is
+          the column named "3") or names (``row="C"``, ``column="3"``), one or
+          several (``row=["B", "C"]``, ``column=range(2, 5)``).  They are
+          another address of the well, so they do not go with ``well``.
+        - A ``Plate``, ``Well``, ``Field`` or ``Acquisition`` object is no
+          value (TypeError).
+
+        An unknown index name raises ``KeyError``; a known one no image has
+        selects nothing."""
+        from ._plate import WELL_ADDRESS, index_values, wells_selected
+        unknown = set(index) - set(INDEX_NAMES) - set(WELL_ADDRESS)
         if unknown:
             if _OLD_SERIES in unknown:
                 raise KeyError(_RENAMED)
             raise KeyError(f"unknown indices {sorted(unknown)}; the indices are {INDEX_NAMES}")
-        get, wanted, out = dict.get, tuple(index.items()), []
+        wanted = {name: index_values(name, value) for name, value in index.items()}
+        wells = wells_selected(self.plates, wanted)   # (plate, well) pairs, or None
+        get, out = dict.get, []
+        items = tuple(wanted.items())
         for image in self.images:              # dict.get: not ImageIndex's checks
             key = image.index
-            for name, value in wanted:
-                if not get(key, name) == value:
+            if wells is not None and (get(key, "plate", 0), get(key, "well")) not in wells:
+                continue
+            for name, allowed in items:
+                if get(key, name) not in allowed:
                     break
             else:
                 out.append(image)
