@@ -13,6 +13,12 @@ from micro_reader import UnsupportedFormatError, _codecs
 
 from _czi_writer import raw_payload, write_czi
 
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
+
 imagecodecs = pytest.importorskip("imagecodecs")
 zstandard = pytest.importorskip("zstandard")
 
@@ -139,7 +145,7 @@ def decoders(request, monkeypatch):
 @pytest.mark.parametrize("name", CASES)
 def test_every_compression_decodes(tmp_path, name, decoders):
     path, expected, tol, code = _write(tmp_path, name)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         assert {s.compression for s in img._level0} == {code}
         got = series[0, 0, 0]
@@ -159,7 +165,7 @@ def test_jpegxr_agrees_with_libczi(tmp_path, name):
     with pyczi.open_czi(path) as czi:
         ref = czi.read(plane={"C": 0})
     ref = ref[..., 0] if ref.shape[-1] == 1 else ref[..., ::-1]
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         np.testing.assert_array_equal(img.images[0][0, 0, 0], ref)
     np.testing.assert_array_equal(ref, expected)
 
@@ -169,7 +175,7 @@ def test_vendor_raw_is_refused_clearly(tmp_path):
     write_czi(path, [dict(plane={"C": 0}, x=0, y=0, height=H, width=W, dtype="u2",
                           compression=150, payload=raw_payload(_gray("u2")))])
     with pytest.raises(UnsupportedFormatError, match="camera RAW"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_refused_file_leaves_nothing_open(tmp_path):
@@ -188,7 +194,7 @@ def test_refused_file_leaves_nothing_open(tmp_path):
         warnings.simplefilter("always")
         for plates in (False, True):                 # plates=True reads the XML first
             with pytest.raises(UnsupportedFormatError, match="pixel types"):
-                micro_reader.open(path, plates=plates)
+                _native(path, plates=plates)
         gc.collect()
     assert not [w for w in caught if issubclass(w.category, ResourceWarning)]
     os.remove(path)

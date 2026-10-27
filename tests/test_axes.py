@@ -230,6 +230,20 @@ def test_open_folds_rgb_samples_into_channels_by_default(tmp_path):
         micro_reader.open(rgb, samples="rgb")
 
 
+def test_a_folded_image_keeps_its_backend_attributes(tmp_path):
+    """A backend's own public attributes (a CZI series' ``origin``) stay readable
+    on an RGB image that open's default folds; private ones are not passed on."""
+    tifffile = pytest.importorskip("tifffile")
+    rgb = str(tmp_path / "rgb.tif")
+    tifffile.imwrite(rgb, RNG.integers(0, 255, (20, 30, 3)).astype("u1"), photometric="rgb")
+    with micro_reader.open(rgb) as f:
+        im = f.images[0]
+        im.source.vendor_origin = (5, 7)
+        assert im.vendor_origin == (5, 7)
+        with pytest.raises(AttributeError):
+            im._not_passed_on
+
+
 def test_folded_channels_are_named_as_eubi_bridge_names_them():
     from micro_reader._axes import folded_channels
     from micro_reader._metadata import Channel

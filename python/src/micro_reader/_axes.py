@@ -233,5 +233,14 @@ class AxesImage(Image):
     def close(self) -> None:
         self.source.close()
 
+    def __getattr__(self, name):
+        """The native image's own public attributes (a CZI series' ``origin``, ...):
+        an RGB image folded by ``open``'s default stays the backend's image to read
+        them from.  Private ones are not passed on."""
+        source = self.__dict__.get("source")
+        if source is None or name.startswith("_"):
+            raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+        return getattr(source, name)
+
     def __repr__(self) -> str:
         return super().__repr__()[:-1] + f" of {self.source.axes!r}>"
