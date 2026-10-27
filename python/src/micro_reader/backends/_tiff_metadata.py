@@ -191,7 +191,9 @@ def _children(element, name: str) -> list:
 
 
 def _ome_images(tif, cache: dict) -> list:
-    """(first IFD of this file, Image element) per OME Image, parsed once."""
+    """(first IFD of this file, {(file name, IFD) where a TiffData starts},
+    Image element) per OME Image, parsed once; file names lower case, without
+    folders (this file's own for a TiffData naming none)."""
     if "ome" not in cache:
         images = []
         try:
@@ -203,15 +205,17 @@ def _ome_images(tif, cache: dict) -> list:
             if _local(element.tag) != "Image":
                 continue
             pixels = _children(element, "Pixels")
-            first = None
+            first, starts = None, set()
             for data in (_children(pixels[0], "TiffData") if pixels else []):
                 uuid = _children(data, "UUID")
                 name = uuid[0].get("FileName") if uuid else None
-                if name and os.path.basename(name) != here:
-                    continue                           # planes in another file
+                name = os.path.basename((name or here).replace("\\", "/"))
                 ifd = int(data.get("IFD", 0))
+                starts.add((name.lower(), ifd))
+                if name.lower() != here.lower():
+                    continue                           # planes in another file
                 first = ifd if first is None else min(first, ifd)
-            images.append((first, element))
+            images.append((first, starts, element))
         cache["ome"] = images
     return cache["ome"]
 
@@ -224,13 +228,24 @@ def _ome_image(image, cache: dict):
         # Micro-Manager positions are one tifffile series (axis R, read as
         # series); its OME-XML has one Image per position, in position order
         n = image.index["series"]
-        return images[n][1] if n < len(images) else None
-    first_ifd = getattr(image._series.keyframe, "index", None)
-    matches = [e for ifd, e in images if ifd is not None and ifd == first_ifd]
+        return images[n][2] if n < len(images) else None
+    keyframe = image._series.keyframe
+    first_ifd = getattr(keyframe, "index", None)
+    # the series' first page, in its own file: a multi-file set's series may
+    # begin at IFD 0 of a member, as another Image begins at IFD 0 of this file
+    # (CQ1: the title image here, each field in its own files)
+    try:
+        own = os.path.basename(keyframe.parent.filehandle.path).lower()
+    except AttributeError:
+        own = None
+    if own is not None and own != os.path.basename(image._tif.filehandle.path).lower():
+        matches = [e for _first, starts, e in images if (own, first_ifd) in starts]
+    else:
+        matches = [e for ifd, _starts, e in images if ifd is not None and ifd == first_ifd]
     if len(matches) == 1:
         return matches[0]
     n = getattr(image, "_series_index", image._position)
-    return images[n][1] if n < len(images) else None
+    return images[n][2] if n < len(images) else None
 
 
 def _ome(image, n_channels: int, cache: dict):

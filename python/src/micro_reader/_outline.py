@@ -56,7 +56,7 @@ def outline_lines(f) -> list:
         for p, plate in enumerate(f.plates):
             name = f" {plate.name!r}" if plate.name else ""
             n = len(plate.wells)
-            lines.append(f"plate {p}{name}: {len(plate.rows)} x {len(plate.columns)}, "
+            lines.append(f"plate {p}{name}: {len(plate.row_names)} x {len(plate.column_names)}, "
                          f"{n} well{'' if n == 1 else 's'} with images")
             for well in plate.wells:
                 lines.append(INDENT + f"well {well.name}")

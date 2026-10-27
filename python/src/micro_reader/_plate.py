@@ -13,8 +13,10 @@ Navigation follows containment only (docs/AXES.md, index architecture):
 are picked with ``select``."""
 from __future__ import annotations
 
+import numbers
+import re
 from dataclasses import dataclass, field as _field, replace
-from typing import Tuple
+from typing import Any, ClassVar, Tuple
 
 #: indices that nest (docs/AXES.md); every other index is orthogonal
 CONTAINMENT = ("plate", "well", "field", "series", "tile", "part", "resolution")
@@ -57,6 +59,39 @@ def layout(rows: int, columns: int, wells, where: str) -> tuple:
     return tuple(row_label(r) for r in range(rows)), tuple(str(c + 1) for c in range(columns))
 
 
+#: the standard plate formats (rows, columns), smallest first: 6 to 1536 wells
+STANDARD_LAYOUTS = ((2, 3), (3, 4), (4, 6), (6, 8), (8, 12), (16, 24), (32, 48))
+#: a well's name in a free-form label: letters, then the column (zero-padded or
+#: not), then optionally a separator and a number (a field or point counter):
+#: ``A10_0000``, ``B02_0003``, ``E8.1``, ``Well C5``
+WELL_LABEL = re.compile(r"^(?:well[\s_-]*)?([A-Za-z]{1,2})0*(\d{1,2})(?:[\s_.#-]+\d+)?$",
+                        re.IGNORECASE)
+
+
+def well_of(label: str):
+    """(row, column), 0-based, of a label that names a well (``WELL_LABEL``),
+    else None."""
+    found = WELL_LABEL.match((label or "").strip())
+    if found is None or int(found.group(2)) < 1:
+        return None
+    letters = found.group(1).upper()
+    row = 0
+    for ch in letters:
+        row = row * 26 + ord(ch) - ord("A") + 1
+    return row - 1, int(found.group(2)) - 1
+
+
+def standard_layout(wells, minimum: int = 0) -> tuple:
+    """(rows, columns) of the smallest standard plate (``STANDARD_LAYOUTS``)
+    of at least *minimum* wells holding every well in *wells* ((row, column),
+    0-based), for files that name their wells but not their plate; None when
+    none holds them."""
+    rows = max(r for r, _ in wells) + 1
+    columns = max(c for _, c in wells) + 1
+    return next(((r, c) for r, c in STANDARD_LAYOUTS
+                 if rows <= r and columns <= c and r * c >= minimum), None)
+
+
 def well_system(plates, plate: int, well: int) -> str:
     """The id of the coordinate system of well *well* of plate *plate*
     (indices into *plates* and its ``wells``), for backends whose positions
@@ -84,9 +119,11 @@ class Field:
     in ``File.images`` order).  ``tiles`` and ``image`` reach them; when an
     orthogonal index (view, illumination, acquisition, ...) also varies in
     the field, ``select`` picks one first:
-    ``field.select(view=1).tiles[7]``."""
+    ``field.select(view=1).tiles[7]``.  ``parent`` is its well."""
     index: int
     images: Tuple = ()
+    parent: Any = _field(default=None, compare=False, repr=False)
+    kind: ClassVar[str] = "field"
 
     def _orthogonal(self) -> list:
         """The orthogonal indices that take several values in this field."""
@@ -129,6 +166,9 @@ class Field:
             image for image in self.images
             if all(image.index.get(name) in allowed for name, allowed in wanted.items())))
 
+    def __getattr__(self, name):
+        return _wrong_level(self, name)
+
     def __repr__(self) -> str:
         return f"<micro_reader.Field {self.index}: {len(self.images)} images>"
 
@@ -137,11 +177,16 @@ class Field:
 class Well:
     """A well that holds images: its 0-based row and column, its name (e.g.
     "B2": row 1, column 1) and its fields (``fields[j]`` is the j-th field
-    present; ``.index`` is its field index)."""
+    present; ``.index`` is its field index).  ``parent`` is its plate."""
     row: int
     column: int
     name: str
     fields: Tuple[Field, ...] = _field(default=(), compare=False, repr=False)
+    parent: Any = _field(default=None, compare=False, repr=False)
+    kind: ClassVar[str] = "well"
+
+    def __getattr__(self, name):
+        return _wrong_level(self, name)
 
 
 @dataclass(frozen=True)
@@ -154,42 +199,194 @@ class Acquisition:
 @dataclass(frozen=True)
 class Plate:
     """A plate: its name (``""`` when the file has none), the row and column
-    names of its layout (``rows[i]`` is the name of row ``i``), the wells
+    names of its layout (``row_names[i]`` is the name of row ``i``), the wells
     that hold images (index ``"well": i`` is ``wells[i]``) and its imaging
-    runs (``acquisitions``; empty when the file does not record them)."""
+    runs (``acquisitions``; empty when the file does not record them).
+    ``parent`` is its file.
+
+    ``rows`` and ``columns`` slice it (decision C-19): an index, a slice, a
+    name or a list of them gives the part of the plate in those rows (or
+    columns), still a plate - ``plate.rows[2:5].columns[3:7]``, as
+    ``File.select(row=slice(2, 5), column=slice(3, 7))``.  Positions are the
+    whole layout's, so a part's ``rows[3]`` is still row D; rows and columns
+    are a well's address, not levels of containment."""
     name: str
-    rows: Tuple[str, ...]
-    columns: Tuple[str, ...]
+    row_names: Tuple[str, ...]
+    column_names: Tuple[str, ...]
     wells: Tuple[Well, ...]
     acquisitions: Tuple[Acquisition, ...] = ()
+    parent: Any = _field(default=None, compare=False, repr=False)
+    #: the whole plate's wells, for a part of it (``rows`` / ``columns``):
+    #: ``well_index`` answers with the index the images carry
+    whole: Tuple[Well, ...] = _field(default=(), compare=False, repr=False)
+    kind: ClassVar[str] = "plate"
+
+    @property
+    def rows(self) -> "Axis":
+        """The plate's rows as a slicer: ``rows[2:5]``, ``rows["B"]``,
+        ``rows[["B", "D"]]`` give the part of the plate in those rows."""
+        return Axis(self, "row")
+
+    @property
+    def columns(self) -> "Axis":
+        """The plate's columns as a slicer (see ``rows``)."""
+        return Axis(self, "column")
+
+    @property
+    def is_part(self) -> bool:
+        """Whether this is a part of its plate (``rows`` / ``columns``)."""
+        return bool(self.whole) and len(self.wells) != len(self.whole)
+
+    def _cut(self, axis: str, keep) -> "Plate":
+        keep = set(keep)
+        wells = tuple(w for w in self.wells if getattr(w, axis) in keep)
+        return replace(self, wells=wells, whole=self.whole or self.wells)
 
     def well_index(self, name: str) -> int:
         """The index of the well called *name* (e.g. ``"B2"``), for
-        ``File.select(well=...)`` and ``wells[...]``."""
-        for i, well in enumerate(self.wells):
+        ``File.select(well=...)``: its place in the whole plate's wells (the
+        index its images carry), also for a part of the plate."""
+        for i, well in enumerate(self.whole or self.wells):
             if well.name == name:
                 return i
         raise KeyError(f"no well {name!r} with images in plate {self.name!r}; "
-                       f"wells: {[w.name for w in self.wells]}")
+                       f"wells: {[w.name for w in self.whole or self.wells]}")
+
+    def __getattr__(self, name):
+        return _wrong_level(self, name)
 
     def __repr__(self) -> str:
         n = len(self.wells)
-        return (f"<micro_reader.Plate {self.name!r} {len(self.rows)} x {len(self.columns)}, "
-                f"{n} well{'' if n == 1 else 's'} with images>")
+        part = " (part)" if self.is_part else ""
+        return (f"<micro_reader.Plate {self.name!r}{part} {len(self.row_names)} x "
+                f"{len(self.column_names)}, {n} well{'' if n == 1 else 's'} with images>")
+
+
+class Axis:
+    """A plate's rows or columns as a slicer (``Plate.rows``, ``Plate.columns``;
+    decision C-19): ``axis[i]``, ``axis[a:b]``, ``axis["C"]`` and
+    ``axis[["B", "D"]]`` give the part of the plate in those rows or columns.
+    Positions count from 0 in the whole layout; a slice's negative bounds count
+    from its end.  ``len`` is the layout's row (column) count; the names are
+    ``plate.row_names`` (``column_names``)."""
+
+    def __init__(self, plate: Plate, axis: str):
+        self.plate, self.axis = plate, axis
+        self.names = plate.row_names if axis == "row" else plate.column_names
+
+    def __len__(self) -> int:
+        return len(self.names)
+
+    def __iter__(self):
+        raise TypeError(f"plate.{self.axis}s is a slicer, not a sequence: its names are "
+                        f"plate.{self.axis}_names; plate.{self.axis}s[...] gives a part of "
+                        f"the plate")
+
+    def _positions(self, value) -> list:
+        n = len(self.names)
+        if isinstance(value, slice):
+            return list(range(*value.indices(n)))
+        if isinstance(value, str):
+            if value not in self.names:
+                raise KeyError(f"plate {self.plate.name!r} has no {self.axis} {value!r}; its "
+                               f"{self.axis}s are {list(self.names)}")
+            return [self.names.index(value)]
+        if isinstance(value, _SEQUENCES):
+            return [p for v in value for p in self._positions(v)]
+        if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+            i = int(value) + n if value < 0 else int(value)
+            if not 0 <= i < n:
+                raise IndexError(f"{self.axis} {value} of a plate with {n} {self.axis}s")
+            return [i]
+        raise TypeError(f"plate.{self.axis}s[...]: a position, slice, name or a list of "
+                        f"them, not {value!r}")
+
+    def __getitem__(self, value) -> Plate:
+        return self.plate._cut(self.axis, self._positions(value))
+
+    def __repr__(self) -> str:
+        shown = ", ".join(self.names[:4]) + (", ..." if len(self.names) > 4 else "")
+        return f"<{self.axis}s of plate {self.plate.name!r}: {shown} ({len(self.names)})>"
+
+
+#: what each level holds (decision C-19): accessors go down only
+_BELOW = {"file": ("plates",), "plate": ("wells", "rows", "columns"), "well": ("fields",),
+          "field": ("images", "tiles", "image")}
+_ABOVE = {"wells": "plate", "fields": "well", "images": "field", "tiles": "field",
+          "plates": "file", "rows": "plate", "columns": "plate"}
+
+
+def _wrong_level(obj, name: str):
+    """``AttributeError`` for an accessor of another level (``well.plates``),
+    naming the way: what the object holds, and its ``parent`` going up."""
+    if name.startswith("__") or name not in _ABOVE:
+        raise AttributeError(f"{type(obj).__name__!r} object has no attribute {name!r}")
+    holds = ", ".join(f".{a}" for a in _BELOW.get(obj.kind, ()))
+    raise AttributeError(
+        f"a {obj.kind} holds no {name} ({name} sit in a {_ABOVE[name]}); a {obj.kind} "
+        f"holds {holds or 'images'}, and .parent is what holds it")
 
 
 #: ``select``'s other address of a plate's wells (0-based numbers or names);
 #: not index names, so not on the images
 WELL_ADDRESS = ("row", "column")
+#: ``select``'s name keywords, beside the positions (``well`` is a place in
+#: ``plates[p].wells``, ``well_name`` its name), as the columns of ozp's
+#: table.  A string given to a position keyword is its name too
+#: (``well="B2"``).
+PLACE_NAMES = ("plate_name", "acquisition_name", "well_name", "row_name", "column_name")
+#: the positions whose names ``select`` matches: plate, acquisition and well
+#: are indices of the images, row and column the well's address
+_PLACES = ("plate", "acquisition", "well", "row", "column")
 #: a value of one of these types is "any of" its items, in ``select``
 _SEQUENCES = (list, tuple, range, set, frozenset)
 
 
+class Span:
+    """A slice as a ``select`` value: every position from ``start`` (0 when None) up to
+    ``stop`` (no end when None) in steps of ``step``, as a ``range`` (``row=slice(2,
+    None)``: row C onward). Equal to each position it covers, so it matches as any other
+    value. Positions count from 0; a negative bound is refused (which position is last
+    depends on what is selected)."""
+
+    __slots__ = ("start", "stop", "step")
+
+    def __init__(self, value: slice, where: str, name: str):
+        def whole(x):
+            return isinstance(x, numbers.Integral) and not isinstance(x, bool)
+        for bound in (value.start, value.stop):
+            if bound is not None and (not whole(bound) or bound < 0):
+                raise ValueError(f"{where}({name}={value!r}): a slice's bounds are 0-based "
+                                 f"positions, not {bound!r} (no negative bounds: which "
+                                 f"position is last depends on what is selected)")
+        if value.step is not None and (not whole(value.step) or value.step < 1):
+            raise ValueError(f"{where}({name}={value!r}): a slice's step is a whole number "
+                             f"from 1, not {value.step!r}")
+        self.start = int(value.start or 0)
+        self.stop = None if value.stop is None else int(value.stop)
+        self.step = int(value.step or 1)
+
+    def __eq__(self, other):
+        if isinstance(other, Span):
+            return (self.start, self.stop, self.step) == (other.start, other.stop, other.step)
+        if not isinstance(other, numbers.Integral) or isinstance(other, bool):
+            return False
+        return other >= self.start and (self.stop is None or other < self.stop) \
+            and (other - self.start) % self.step == 0
+
+    def __hash__(self):
+        return hash((Span, self.start, self.stop, self.step))
+
+    def __repr__(self):
+        return f"slice({self.start}, {self.stop}, {self.step})"
+
+
 def index_values(name: str, value, where: str = "select") -> tuple:
     """``select``'s values for *name*: one value, or a list, tuple, range or
-    set of them (any of).  A plate, well, field or acquisition object is
-    refused: it is no index value."""
+    set of them (any of); a slice of positions is a :class:`Span`.  A plate,
+    well, field or acquisition object is refused: it is no index value."""
     values = tuple(value) if isinstance(value, _SEQUENCES) else (value,)
+    values = tuple(Span(v, where, name) if isinstance(v, slice) else v for v in values)
     for v in values:
         kind = type(v)
         if kind.__name__ in ("Plate", "Well", "Field", "Acquisition") and \
@@ -200,46 +397,67 @@ def index_values(name: str, value, where: str = "select") -> tuple:
     return values
 
 
-def _on_axis(values, number: int, labels) -> bool:
-    """Whether a well's row (or column) *number* is among *values*: 0-based
-    numbers, or names (*labels*: the plate's row or column names); None takes
-    every one."""
-    if values is None:
-        return True
-    name = labels[number] if 0 <= number < len(labels) else None
-    return any((v == name) if isinstance(v, str) else (v == number) for v in values)
-
-
-def wells_selected(plates, wanted: dict):
-    """The (plate, well) indices of the wells *wanted* names by name, row or
-    column (those entries are taken out of *wanted*), or None when it names
-    wells by place only (matched as any other index)."""
-    rows, columns = wanted.pop("row", None), wanted.pop("column", None)
-    wells = wanted.get("well")
-    if wells is not None and (rows is not None or columns is not None):
-        raise TypeError("select: give well= or row= / column=, not both (row and "
-                        "column are another address of the well)")
-    names = {v for v in wells if isinstance(v, str)} if wells is not None else set()
-    if rows is None and columns is None and not names:
-        return None
-    if not plates:
-        raise ValueError("select: row=, column= and well names select a plate's "
-                         "wells; the file has no plates (open it with plates=True)")
-    del_well = wells is not None
-    places = {v for v in wells if not isinstance(v, str)} if wells is not None else set()
-    out = set()
-    for p, plate in enumerate(plates):
-        for w, well in enumerate(plate.wells):
-            if wells is not None:
-                hit = w in places or well.name in names
-            else:
-                hit = _on_axis(rows, well.row, plate.rows) and \
-                    _on_axis(columns, well.column, plate.columns)
-            if hit:
-                out.add((p, w))
-    if del_well:
-        del wanted["well"]
+def place_conditions(wanted: dict, where: str = "select") -> list:
+    """``select``'s conditions on a plate's places, taken out of *wanted*:
+    ``(place, positions, names)`` for each keyword that names a place - a
+    ``*_name`` keyword, ``row`` or ``column``, or a position keyword given a
+    name (``well="B2"``).  A position keyword given numbers only stays in
+    *wanted*, matched as any other index.  Every condition must hold; within
+    one, any of its positions or names."""
+    out = []
+    for place in _PLACES:
+        named = f"{place}_name"
+        if named in wanted:
+            values = wanted.pop(named)
+            wrong = [v for v in values if not isinstance(v, str)]
+            if wrong:
+                raise TypeError(f"{where}({named}=...): a name, not {wrong[0]!r}; for a "
+                                f"0-based position, {place}={wrong[0]!r}")
+            out.append((place, (), frozenset(values)))
+        values = wanted.get(place)
+        if values is not None and (place in WELL_ADDRESS
+                                   or any(isinstance(v, str) for v in values)):
+            del wanted[place]
+            out.append((place, tuple(v for v in values if not isinstance(v, str)),
+                        frozenset(v for v in values if isinstance(v, str))))
+    given = {place for place, _, _ in out}
+    if "well" in given or "well" in wanted:
+        if given & {"row", "column"}:
+            raise TypeError(f"{where}: give well= / well_name= or row= / column= (and "
+                            f"their _name), not both (row and column are another "
+                            f"address of the well)")
     return out
+
+
+def place_matches(conditions, positions: dict, names: dict) -> bool:
+    """Whether an image at *positions* (0-based plate, acquisition, well, row,
+    column) with *names* (their names) meets every place condition
+    (``place_conditions``)."""
+    for place, numbers, labels in conditions:
+        if positions.get(place) not in numbers and names.get(place) not in labels:
+            return False
+    return True
+
+
+def places_of(plates, index: dict):
+    """(positions, names) of an image's places, from its index and the plates
+    (``place_matches``); None for an image in no plate."""
+    p, w = index.get("plate", 0), index.get("well")
+    if w is None or not 0 <= p < len(plates) or not 0 <= w < len(plates[p].wells):
+        return None
+    plate = plates[p]
+    well = plate.wells[w]
+    a = index.get("acquisition")
+    acq = plate.acquisitions[a].name if a is not None and 0 <= a < len(plate.acquisitions) \
+        else None
+    positions = {"plate": p, "acquisition": a, "well": w, "row": well.row,
+                 "column": well.column}
+    names = {"plate": plate.name, "acquisition": acq, "well": well.name,
+             "row": plate.row_names[well.row] if 0 <= well.row < len(plate.row_names)
+             else None,
+             "column": plate.column_names[well.column]
+             if 0 <= well.column < len(plate.column_names) else None}
+    return positions, names
 
 
 def navigate(plates, images) -> list:
@@ -258,5 +476,10 @@ def navigate(plates, images) -> list:
             numbers = sorted(f for (pp, ww, f) in groups if pp == p and ww == w)
             fields = tuple(Field(f, tuple(groups[(p, w, f)])) for f in numbers)
             wells.append(replace(well, fields=fields))
-        out.append(replace(plate, wells=tuple(wells)))
+        new = replace(plate, wells=tuple(wells))
+        for well in new.wells:                 # each level knows what holds it
+            object.__setattr__(well, "parent", new)
+            for f in well.fields:
+                object.__setattr__(f, "parent", well)
+        out.append(new)
     return out

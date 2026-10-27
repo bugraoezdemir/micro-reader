@@ -12,7 +12,14 @@ experiment loops, outermost first.  Structure parsing is ported from nd2
 - "Lossless" frames are one zlib stream each: decoded whole, cached.
 
 Images are the XY positions, indexed by ``series`` (bioio-nd2 calls them scenes); axes ``tczyx``, plus ``s``
-for RGB components.  Legacy JPEG 2000 ND2 (versions 1 / 2): ``_nd2_legacy``.
+for RGB components.  With ``plates=True``, a file whose every XY point is
+named after a well as NIS-Elements names them (``A10_0000``, ``B02_0003``,
+``E8.1``: JOBS and ND acquisitions over a well plate; a counter after the well
+or a zero-padded column, ``NIS_WELL_POINT``, so that ``P1``, ``S2`` stay
+positions) reads as a plate: images indexed ``plate`` / ``acquisition`` / ``well`` / ``field``, a
+field being the point's place among its well's points, in acquisition order.
+The file names no plate format: the layout is the smallest standard plate
+holding the wells (``_plate.standard_layout``), the plate's name the file's.  Legacy JPEG 2000 ND2 (versions 1 / 2): ``_nd2_legacy``.
 Not supported:
 lossy compression, tiled frames, custom loops.
 """
@@ -21,6 +28,7 @@ from __future__ import annotations
 import builtins
 import itertools
 import os
+import re
 import threading
 import zlib
 
@@ -35,6 +43,12 @@ from . import _nd2_legacy as legacy
 from . import _nd2_structure as structure
 
 NAME = "nd2"
+#: a point NIS-Elements names after its well: a counter follows (``A10_0000``,
+#: ``E8.1``) or the column is zero-padded (``B02``)
+NIS_WELL_POINT = re.compile(r"^(?:well[\s_-]*)?[A-Za-z]{1,2}(?:\d{1,2}[\s_.#-]+\d+|0\d)$",
+                            re.IGNORECASE)
+#: takes plates=True: a file whose XY points are named after wells reads as a plate
+PLATES = True
 DECODE_CACHE_BYTES = 64 << 20
 RAW_TASK_BYTES = 8 << 20          # uncompressed frames are read in row pieces of this size
 SEPARATE_READ_BYTES = 32 << 10    # bytes worth skipping rather than issuing one more read
@@ -123,7 +137,7 @@ class Nd2Parser:
 class _Nd2Image(Image):
     """One XY position: axes 'tczyx' (+ 's' for RGB components)."""
 
-    def __init__(self, nd2: Nd2Parser, position: int):
+    def __init__(self, nd2: Nd2Parser, position: int, index: dict = None):
         a = nd2.attrs
         self._f = nd2
         self._p = position
@@ -139,7 +153,7 @@ class _Nd2Image(Image):
             if a.compression == "lossless" else None
         super().__init__(position, axes, shape, nd2.dtype,
                          name=f"{os.path.basename(nd2.path)} position {position}",
-                         read_unit=unit)
+                         read_unit=unit, index=index)
 
     def _read_block(self, block):
         if self._closed:
@@ -252,8 +266,8 @@ class _Nd2Image(Image):
 class _Nd2File(File):
     backend = NAME
 
-    def __init__(self, path, images, nd2: Nd2Parser):
-        super().__init__(path, images)
+    def __init__(self, path, images, nd2: Nd2Parser, plates=()):
+        super().__init__(path, images, plates=plates)
         self._nd2 = nd2
 
     def _declare_coordinate_systems(self):
@@ -267,9 +281,44 @@ class _Nd2File(File):
         self._nd2.handles.close()
 
 
-def open(path: str, tiles: str = "separate", resolutions: str = "base"):  # noqa: A001 - backend protocol name
+def _point_plate(nd2: Nd2Parser):
+    """(per position its plate index, [Plate]) when every XY point is named
+    after a well (module docstring), else None."""
+    from ._nd2_metadata import _xy_points
+    from .._plate import Plate, Well, layout, row_label, standard_layout, well_of
+    names = [p.get("dPosName") for p in _xy_points(nd2.experiment)]
+    if not names or len(names) != nd2.size("P"):
+        return None
+    # a bare "P1", "S2" names a position, not a well: every name must carry what
+    # NIS-Elements writes, a counter after the well or a zero-padded column
+    if not all(NIS_WELL_POINT.match(n or "") for n in names):
+        return None
+    at = [well_of(n) for n in names]
+    if None in at:
+        return None
+    size = standard_layout(at)
+    if size is None:
+        return None
+    wells = sorted(set(at))
+    number = {rc: w for w, rc in enumerate(wells)}
+    seen: dict = {}
+    index = []
+    for rc in at:                                      # fields in acquisition order
+        index.append({"plate": 0, "acquisition": 0, "well": number[rc], "field": seen.get(rc, 0)})
+        seen[rc] = seen.get(rc, 0) + 1
+    row_names, column_names = layout(*size, wells, nd2.path)
+    name = os.path.splitext(os.path.basename(nd2.path))[0]
+    return index, [Plate(name=name, row_names=row_names, column_names=column_names,
+                         wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells))]
+
+
+def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa: A001 - backend protocol name
+         plates: bool = False):
     with builtins.open(path, "rb") as fh:
         if legacy.is_legacy(fh.read(12)):
             return legacy._LegacyNd2File(path)
     nd2 = Nd2Parser(path)
-    return _Nd2File(path, [_Nd2Image(nd2, p) for p in range(nd2.size("P"))], nd2)
+    plate = _point_plate(nd2) if plates else None
+    index, found = plate if plate is not None else ([None] * nd2.size("P"), [])
+    return _Nd2File(path, [_Nd2Image(nd2, p, index[p]) for p in range(nd2.size("P"))], nd2,
+                    plates=found)

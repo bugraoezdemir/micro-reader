@@ -19,6 +19,12 @@ from micro_reader.backends import lif  # noqa: E402
 
 from _lif_writer import image, write_lifext, write_lof, write_xlef, write_xlif  # noqa: E402
 
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
+
 RNG = np.random.default_rng(7)
 
 
@@ -81,7 +87,7 @@ def decode_threads(request):
 
 def test_experiment_tree(tree, decode_threads):
     root, truth = tree
-    with micro_reader.open(str(root / "exp.xlef")) as img:
+    with _native(str(root / "exp.xlef")) as img:
         assert img.backend == "lif" and img.format == "xlef"
         assert [s.name for s in img.images] == ["a", "b", "coll/d", "coll/e", "coll/f", "coll/g"]
         for series in img.images:
@@ -97,7 +103,7 @@ def test_experiment_tree(tree, decode_threads):
 ])
 def test_opening_a_member(tree, name, flavour, names):
     root, truth = tree
-    with micro_reader.open(str(root / name)) as img:
+    with _native(str(root / name)) as img:
         assert img.format == flavour.lower()
         assert [s.name for s in img.images] == names
         for series in img.images:
@@ -108,7 +114,7 @@ def test_agrees_with_liffile(tree):
     liffile = pytest.importorskip("liffile")
     root, _ = tree
     path = str(root / "exp.xlef")
-    with micro_reader.open(path) as img, liffile.LifFile(path) as lf:
+    with _native(path) as img, liffile.LifFile(path) as lf:
         assert [s.name for s in img.images] == [i.path for i in lf.images]
         for series, ref_image in zip(img.images, lf.images):
             ref = np.asarray(ref_image.asarray())
@@ -122,7 +128,7 @@ def test_lof(tmp_path, legacy, decode_threads):
     data = _grey()
     path = str(tmp_path / "one.lof")
     write_lof(path, image("one", data, "czyx"), legacy=legacy)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert img.format == "lof" and [s.name for s in img.images] == ["one"]
         for key in _keys((1,) + data.shape):
             np.testing.assert_array_equal(img.images[0][key], data[None][key])
@@ -132,7 +138,7 @@ def test_lifext(tmp_path):
     a, b = _grey(), _grey("u1")
     path = str(tmp_path / "x.lifext")
     write_lifext(path, [("MemBlock_7", [image("x1", a, "czyx"), image("x2", b, "czyx")])])
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert img.format == "lifext"
         assert [s.name for s in img.images] == ["MemBlock_7/x1", "MemBlock_7/x2"]
         np.testing.assert_array_equal(img.images[0][...], a[None])
@@ -149,7 +155,7 @@ def test_rgb_frame_for_a_grey_image_gives_its_first_sample(tmp_path):
     plane = tmp_path / "g_frames" / "plane_001.png"
     with open(plane, "wb") as fh:                              # replace plane 1 by RGB
         fh.write(imagecodecs.png_encode(np.stack([data[0, 1]] * 3, axis=-1)))
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         np.testing.assert_array_equal(img.images[0][...], data[None])
 
 
@@ -158,7 +164,7 @@ def test_float16_in_tiff_frames(tmp_path):
     data = RNG.normal(size=(1, 2, 16, 12)).astype("f2")
     path = str(tmp_path / "flim.xlif")
     write_xlif(path, image("Fast Flim", data, "czyx"), frames="tif")
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert img.images[0].dtype == np.float16
         np.testing.assert_array_equal(img.images[0][...], data[None])
 
@@ -168,13 +174,13 @@ def test_missing_frame_file_is_named(tmp_path):
     write_xlif(path, image("a", _grey(), "czyx"), frames="png")
     os.remove(tmp_path / "a_frames" / "plane_002.png")
     with pytest.raises(CorruptFileError, match="plane_002.png"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_reference_cycle_is_refused(tmp_path):
     write_xlef(str(tmp_path / "loop.xlef"), ["loop.xlef"])
     with pytest.raises(CorruptFileError, match="cycle"):
-        micro_reader.open(str(tmp_path / "loop.xlef"))
+        _native(str(tmp_path / "loop.xlef"))
 
 
 def test_sniff_claims_only_leica_xml():
@@ -185,7 +191,7 @@ def test_sniff_claims_only_leica_xml():
 
 def test_close_releases_frame_files(tree, decode_threads):
     root, _ = tree
-    img = micro_reader.open(str(root / "exp.xlef"))
+    img = _native(str(root / "exp.xlef"))
     for series in img.images:
         series[...]
     img.close()
@@ -195,7 +201,7 @@ def test_close_releases_frame_files(tree, decode_threads):
 def test_concurrent_reads_of_frames(tree, decode_threads):
     root, truth = tree
     errors = []
-    with micro_reader.open(str(root / "exp.xlef")) as img:
+    with _native(str(root / "exp.xlef")) as img:
         def work(seed):
             for series in img.images:
                 want = _expected(truth, series.name[-1], series)

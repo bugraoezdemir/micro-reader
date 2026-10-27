@@ -5,8 +5,8 @@ separate 2-D files (Harmony, MetaXpress, ...), listed by an index file.
   most ``OPEN_MEMBERS`` at once (or the set's own limit), never one that a
   read is using; as plain pages when the index file says what every page is
   (OME companion files, docs/COMPANION.md).
-- ``PlaneImage``: one field, its planes stacked to ``t c z y x``; a missing
-  plane reads as zeros.
+- ``PlaneImage``: one field, its planes stacked to ``t c z y x`` (``+ s`` for
+  pages of several samples, RGB); a missing plane reads as zeros.
 - ``keep_fields``: the rule for missing files (Bugra, 2026-10-13): a field
   missing some planes is kept (zeros there), a field missing all of them is
   left out; one ``MissingImagesWarning`` says how many of each.
@@ -106,14 +106,15 @@ class Members:
         finally:
             self.release(entry)
 
-    def page_info(self, path: str, ifd: int) -> tuple:
+    def page_info(self, path: str, ifd: int, samples: int = 1) -> tuple:
         """(dtype, read_unit (y, x), shape (y, x)) of page *ifd* of member
-        *path* (opened as pages); a page that is not one 2-D plane raises."""
+        *path* (opened as pages); a page that is not one 2-D plane of
+        *samples* samples raises."""
         entry = self.acquire(path)
         try:
-            image, _k = _page(entry[0], ifd, path)
-            unit = image.read_unit[-2:] if image.read_unit is not None else None
-            return image.dtype, unit, image.shape[-2:]
+            image, _k = _page(entry[0], ifd, path, samples)
+            unit = _yx(image, image.read_unit) if image.read_unit is not None else None
+            return image.dtype, unit, _yx(image, image.shape)
         finally:
             self.release(entry)
 
@@ -124,17 +125,29 @@ class Members:
             self._open.clear()
 
 
-def _page(member, ifd: int, path: str):
-    """(image, page in it) of IFD *ifd* of a member opened as pages."""
+def _page(member, ifd: int, path: str, samples: int = 1):
+    """(image, page in it) of IFD *ifd* of a member opened as pages: one plane
+    (``yx``), or one of *samples* samples when above 1 (``yxs``, RGB: the
+    index file says so)."""
     found = member.pages.get(int(ifd))
     if found is None:
         raise CorruptFileError(f"{path!r} has no page {ifd} (IFD)")
     image, k = found
-    if image.axes not in ("yx", "zyx"):
-        raise UnsupportedFormatError(
-            f"{path!r} page {ifd}: a {image.axes} image, not one plane (RGB / multi-sample "
-            f"pages in a file set are not read yet)")
+    if samples == 1:
+        if image.axes not in ("yx", "zyx"):
+            raise UnsupportedFormatError(
+                f"{path!r} page {ifd}: a {image.axes} image, not one plane (the file set's "
+                f"index says one sample per pixel)")
+    elif image.axes not in ("yxs", "zyxs") or image.shape[-1] != samples:
+        raise CorruptFileError(
+            f"{path!r} page {ifd}: a {image.axes} {tuple(image.shape)} image, not one plane of "
+            f"{samples} samples (as the file set's index says)")
     return image, k
+
+
+def _yx(image, values) -> tuple:
+    """The (y, x) entries of *values* (a shape or read unit over *image*'s axes)."""
+    return values[image.axes.index("y")], values[image.axes.index("x")]
 
 
 def _read_page(member, ifd: int, ys, xs, path: str):
@@ -151,16 +164,20 @@ class PlaneImage(Image):
     *planes*: (t, c, z) position -> member path, or (member path, IFD) for
     members opened as pages (a missing plane reads as zeros).  The backend
     gives the metadata (``_read_metadata``).  A ragged whole whose parts share
-    no grid is not *readable*."""
+    no grid is not *readable*.  *samples* above 1: pages of that many samples
+    (RGB, members opened as pages), axes ``t c z y x s``; *shape* is still
+    (t, c, z, y, x)."""
 
     def __init__(self, members: Members, position: int, planes: dict, shape, dtype,
-                 name: str, read_unit, index: dict, readable: bool = True):
-        super().__init__(position, "tczyx", shape, dtype, name=name,
-                         read_unit=None if read_unit is None else (1, 1, 1) + tuple(read_unit),
-                         index=index)
+                 name: str, read_unit, index: dict, readable: bool = True, samples: int = 1):
+        s = (samples,) if samples > 1 else ()
+        super().__init__(position, "tczyx" + "s" * len(s), tuple(shape) + s, dtype, name=name,
+                         read_unit=None if read_unit is None
+                         else (1, 1, 1) + tuple(read_unit) + s, index=index)
         self._members = members
         self._planes = planes
         self._readable = readable
+        self._samples = samples
         self._closed = False
 
     def _read_block(self, block):
@@ -174,10 +191,11 @@ class PlaneImage(Image):
                 f"parts (image.parts)")
         (t0, t1), (c0, c1), (z0, z1) = ((s.start, s.stop) for s in block[:3])
         ys, xs = block[3], block[4]
-        out = np.empty((t1 - t0, c1 - c0, z1 - z0, ys.stop - ys.start, xs.stop - xs.start),
-                       dtype=self.dtype)
+        extra = tuple(block[5:])                # the samples, for pages of several
+        out = np.empty((t1 - t0, c1 - c0, z1 - z0, ys.stop - ys.start, xs.stop - xs.start)
+                       + tuple(s.stop - s.start for s in extra), dtype=self.dtype)
         if self._members._pages:
-            return out, self._read_pages(out, (t0, t1), (c0, c1), (z0, z1), ys, xs)
+            return out, self._read_pages(out, (t0, t1), (c0, c1), (z0, z1), ys, xs, extra)
         read = 0
         for t in range(t0, t1):
             for c in range(c0, c1):
@@ -201,7 +219,7 @@ class PlaneImage(Image):
                     read += n
         return out, read
 
-    def _read_pages(self, out, ts, cs, zs, ys, xs) -> int:
+    def _read_pages(self, out, ts, cs, zs, ys, xs, extra=()) -> int:
         """Fill *out* from members opened as pages: every plane's reads are
         planned straight into *out* first, then all of them run in one batch on
         the decode pool, as a multi-page TIFF's pages do (no copy per plane, the
@@ -220,12 +238,13 @@ class PlaneImage(Image):
                         path, ifd = member
                         entry = self._members.acquire(path)
                         entries.append(entry)
-                        image, k = _page(entry[0], ifd, path)
+                        image, k = _page(entry[0], ifd, path, self._samples)
                         self._fits(path, image, ifd)
-                        if image.axes == "yx":
-                            plan = image._plan_series((ys, xs), dest)
+                        if image.axes[0] != "z":
+                            plan = image._plan_series((ys, xs) + extra, dest)
                         else:
-                            plan = image._plan_series((slice(k, k + 1), ys, xs), dest[None])
+                            plan = image._plan_series((slice(k, k + 1), ys, xs) + extra,
+                                                      dest[None])
                         plans.append((image, plan))
             return _pool.run(itertools.chain.from_iterable(
                 image._tasks(*plan) for image, plan in plans))
@@ -238,9 +257,9 @@ class PlaneImage(Image):
         plane of this image's size and type: the index decides what a plane
         is, a file that differs would be cropped or cast without a word.  Run
         on every read (a comparison; the member is open anyway)."""
-        y, x = self.shape[-2:]
+        y, x = self.shape[3:5]
         if ifd is not None:
-            fits = tuple(image.shape[-2:]) == (y, x)
+            fits = _yx(image, image.shape) == (y, x)
         else:
             fits = image.axes == "yx" and tuple(image.shape) == (y, x)
         if fits and image.dtype == self.dtype:
@@ -271,7 +290,7 @@ class PlaneImage(Image):
             if ifd is None:
                 self._fits(path, entry[0].images[0])
             else:
-                self._fits(path, _page(entry[0], ifd, path)[0], ifd)
+                self._fits(path, _page(entry[0], ifd, path, self._samples)[0], ifd)
         except (CorruptFileError, UnsupportedFormatError) as exc:
             return str(exc)
         finally:
@@ -282,13 +301,15 @@ class PlaneImage(Image):
         self._closed = True                     # the file closes the members
 
 
-def keep_fields(fields: dict, wanted, path: str) -> dict:
+def keep_fields(fields: dict, wanted, path: str, tally: dict = None) -> dict:
     """*fields*: field key -> {plane: member path, (member path, IFD), or None
     when the index lists a plane without a usable file}; *wanted*: every plane
     a field should have.  -> {field key: {plane: path or (path, IFD)}} for the
     fields with at least one file, after one MissingImagesWarning about what is
-    missing."""
-    kept, partial, empty, missing, example = {}, 0, 0, 0, None
+    missing (a file holding several planes counts once).  *tally*: add to it
+    instead of warning, for a backend that calls this per image and warns once
+    (``missing_warning``)."""
+    kept, partial, empty, missing, example = {}, 0, 0, set(), None
     for key, listed in fields.items():
         files = {}
         for plane in wanted:
@@ -297,25 +318,39 @@ def keep_fields(fields: dict, wanted, path: str) -> dict:
             if file and os.path.isfile(file):
                 files[plane] = p
             else:
-                missing += 1
+                missing.add(file or (key, plane))
                 example = example or (os.path.basename(file) if file else f"{key}: no file listed")
         if not files:
             empty += 1
             continue
         partial += len(files) < len(wanted)
         kept[key] = files
-    if missing:
-        told = []
-        if partial:
-            told.append(f"{partial} fields miss some planes, which read as zeros")
-        if empty:
-            told.append(f"{empty} fields have no files and are left out")
-        warnings.warn(MissingImagesWarning(
-            f"{path!r}: {missing} image files are missing (e.g. {example!r}): "
-            + "; ".join(told) + f" (of {len(fields)} fields)"), stacklevel=4)
+    own = tally is None
+    tally = {} if own else tally
+    tally.setdefault("missing", set()).update(missing)
+    tally["example"] = tally.get("example") or example
+    for name, n in (("partial", partial), ("empty", empty), ("fields", len(fields))):
+        tally[name] = tally.get(name, 0) + n
+    if own:
+        missing_warning(tally, path, stacklevel=5)
     if not kept:
         raise CorruptFileError(f"{path!r}: none of the fields it lists has any of its files")
     return kept
+
+
+def missing_warning(tally: dict, path: str, stacklevel: int = 4) -> None:
+    """The one MissingImagesWarning of ``keep_fields``' *tally*, when files are missing."""
+    if not tally.get("missing"):
+        return
+    told = []
+    if tally["partial"]:
+        told.append(f"{tally['partial']} fields miss some planes, which read as zeros")
+    if tally["empty"]:
+        told.append(f"{tally['empty']} fields have no files and are left out")
+    warnings.warn(MissingImagesWarning(
+        f"{path!r}: {len(tally['missing'])} image files are missing (e.g. "
+        f"{tally['example']!r}): " + "; ".join(told) + f" (of {tally['fields']} fields)"),
+        stacklevel=stacklevel)
 
 
 def check_times(wanted, path: str) -> None:

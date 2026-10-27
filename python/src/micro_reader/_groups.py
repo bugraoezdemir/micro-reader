@@ -135,9 +135,12 @@ def group_files(paths: Union[str, os.PathLike, Iterable]) -> Grouping:
     owners = [m for m in BACKENDS if hasattr(m, "may_own")]
     folders = _Folders()
     found = []                                   # (rank, path, key, module, member keys, members, notes)
+    named = set()                                # members of the index files opened so far
     for key, (path, folder, name) in files.items():
         modules = [m for m in indexers if m.may_index(name)]
-        if not modules:
+        if not modules or key in named:
+            # a member of an index opened already is not opened again: every
+            # .flex file of a plate opens the whole plate
             continue
         try:
             head = _parts.read_head(path)
@@ -161,6 +164,7 @@ def group_files(paths: Union[str, os.PathLike, Iterable]) -> Grouping:
         notes = [str(w.message) for w in caught] + notes
         found.append((rank[module.NAME], path, key, module, frozenset(map(_key, members)),
                       members, tuple(notes), sides))
+        named.update(map(_key, members))
     member_keys = set().union(*(f[4] for f in found)) if found else set()
     consumed = set(member_keys)
     by_members: dict = {}                        # the same members: one set of images

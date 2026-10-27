@@ -14,6 +14,12 @@ from micro_reader import CorruptFileError, UnsupportedFormatError
 
 from _lif_writer import folder, image, write_lif
 
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
+
 RNG = np.random.default_rng(0)
 
 
@@ -95,7 +101,7 @@ def _write(tmp_path, name):
 @pytest.mark.parametrize("name", list(CASES))
 def test_matches_written_data(tmp_path, name, decode_threads):
     path, expected = _write(tmp_path, name)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert img.backend == "lif"
         assert [(s.name, s.axes) for s in img.images] == [(n, a) for n, a, _ in expected]
         for series, (_, _, ref) in zip(img.images, expected):
@@ -117,7 +123,7 @@ def test_agrees_with_readlif(tmp_path, name):
     readlif = pytest.importorskip("readlif.reader")
     path, expected = _write(tmp_path, name)
     lf = readlif.LifFile(path)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert list(dict.fromkeys(s.name for s in img.images)) == \
             [i["name"] for i in lf.image_list]
         for series in img.images:
@@ -142,14 +148,14 @@ def test_rgb_samples_follow_the_channel_tags(tmp_path):
         el = image("c", rgb, "tzyxs", rgb=stored_bgr,
                    tags=None if stored_bgr else [1, 2, 3])
         write_lif(path, [el])
-        with micro_reader.open(path) as img:
+        with _native(path) as img:
             np.testing.assert_array_equal(img.images[0][0, 0, 0], rgb[0, 0])     # rgb: t z y x s
             np.testing.assert_array_equal(img.images[0][0, 0, 0, :, :, 2], rgb[0, 0, :, :, 2])
 
 
 def test_tiles_are_images_with_positions(tmp_path):
     path, _ = _write(tmp_path, "tiles")
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert img.indices == [{"series": 0, "tile": m} for m in range(3)]
         with pytest.warns(DeprecationWarning, match="metadata.position"):
             assert [s.tile_position for s in img.images] == [(0, 0, 0.0, 0.0), (1, 0, 1e-4, 0.0),
@@ -166,7 +172,7 @@ def test_tiles_compose_a_mosaic_at_their_stage_positions(tmp_path):
     grid = [(0, 0, 0.0, 0.0), (1, 0, 1e-4, 0.0), (2, 0, 2e-4, 0.0)]
     path = str(tmp_path / "scan.lif")
     write_lif(path, [image("scan", data, "tczmyx", tiles=grid)])
-    with micro_reader.open(path, tiles="mosaic") as f:
+    with _native(path, tiles="mosaic") as f:
         (mosaic,) = f.images
         assert dict(mosaic.index) == {"series": 0} and mosaic.shape == (1, 1, 1, 8, 25)
         canvas = mosaic[0, 0, 0]
@@ -184,7 +190,7 @@ def test_a_mosaic_of_unplaced_tiles_is_refused(tmp_path):
     write_lif(path, [image("flipped", data, "tczmyx", tiles=[(0, 0, 0.0, 0.0), (1, 0, 1e-4, 0.0)],
                            tile_flags={"FlipX": "1"})])
     with pytest.raises(UnsupportedFormatError, match="no stage position"):
-        micro_reader.open(path, tiles="mosaic").images[0].metadata
+        _native(path, tiles="mosaic").images[0].metadata
 
 
 def test_untiled_images_of_a_tiled_file_get_tile_0(tmp_path):
@@ -192,7 +198,7 @@ def test_untiled_images_of_a_tiled_file_get_tile_0(tmp_path):
     u8 = _ints((1, 1, 1, 8, 9), "u1")
     path = str(tmp_path / "mixed.lif")
     write_lif(path, [image("plain", u8), image("scan", tiles, "tczmyx")])
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert img.indices == [{"series": 0, "tile": 0}, {"series": 1, "tile": 0},
                                   {"series": 1, "tile": 1}]
         assert img.index_range == {"series": 2, "tile": 2}
@@ -211,7 +217,7 @@ def test_rotations_are_images(tmp_path):
     """DimID 6 (rotation): one image per rotation, like tiles."""
     path, expected = _write(tmp_path, "tiles")
     _patch(path, 'DimID="10"', 'DimID="6" ')                     # same length
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert img.indices == [{"series": 0, "rotation": r} for r in range(3)]
         for r, image_ in enumerate(img.images):
             np.testing.assert_array_equal(image_[...], expected[r][2])
@@ -219,10 +225,10 @@ def test_rotations_are_images(tmp_path):
 
 def test_lambda_scans_are_emission_and_excitation_indices(tmp_path):
     path, expected = _write(tmp_path, "time_lambda")
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert img.indices == [{"series": 0, "emission": k} for k in range(4)]
     _patch(path, 'DimID="5"', 'DimID="9"')
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert img.indices == [{"series": 0, "excitation": k} for k in range(4)]
         for k, image_ in enumerate(img.images):
             assert image_.axes == "tczyx"
@@ -232,7 +238,7 @@ def test_lambda_scans_are_emission_and_excitation_indices(tmp_path):
 def test_reads_only_the_rows_asked(tmp_path):
     """A window is one contiguous read from its first to its last pixel."""
     path, expected = _write(tmp_path, "stack_12bit")
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         np.testing.assert_array_equal(series[1, 2, 3, 5:9, 4:10], expected[0][2][1, 2, 3, 5:9, 4:10])
         assert series.stats.pixels_read == 3 * 30 + 6       # rows 5..8, columns 4..9
@@ -247,7 +253,7 @@ def test_unsupported_dimension_is_named(tmp_path):
     with open(path, "wb") as fh:
         fh.write(patched)
     with pytest.raises(UnsupportedFormatError, match="XT slice"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_bit_packed_samples_are_refused(tmp_path):
@@ -260,7 +266,7 @@ def test_bit_packed_samples_are_refused(tmp_path):
     with open(path, "wb") as fh:
         fh.write(data.replace(text, 'BitInc="4"'.encode("utf-16-le"), 1))
     with pytest.raises(UnsupportedFormatError, match="bit-packed"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_truncated_file_is_reported(tmp_path):
@@ -268,12 +274,12 @@ def test_truncated_file_is_reported(tmp_path):
     with open(path, "r+b") as fh:
         fh.truncate(os.path.getsize(path) - 100)
     with pytest.raises(CorruptFileError, match="truncated"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_close_releases_the_file(tmp_path, decode_threads):
     path, _ = _write(tmp_path, "stack_12bit")
-    img = micro_reader.open(path)
+    img = _native(path)
     img.images[0][...]
     img.close()
     os.remove(path)                                        # Windows: fails if still open
@@ -285,7 +291,7 @@ def test_concurrent_reads(tmp_path, decode_threads):
     path, expected = _write(tmp_path, "time_lambda")
     ref = expected[0][2]
     errors = []
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
 
         def work(seed):
@@ -307,7 +313,7 @@ def test_one_metre_per_pixel_is_index_space(tmp_path):
     path = str(tmp_path / "flim.lif")
     write_lif(path, [image("Fast Flim", np.ones((8, 10), np.float16), "yx"),
                      image("Phasor Plot", plot, "yx", lengths={"x": 50, "y": 29})])
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         fast, phasor = f.images
         assert set(fast.metadata.pixel_sizes) == {"x", "y"}
         assert phasor.metadata.pixel_sizes == {}
@@ -360,7 +366,7 @@ def _systems(path, metadata_reads):
     from micro_reader._spatial import check_invariants
     from micro_reader.backends._lif_metadata import has_position
     metadata_reads[0] = 0
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         ids = [s.id for s in f.coordinate_systems]
         assert metadata_reads[0] == 0                        # declared without metadata
         assert all(s.axes is None and not s.estimated for s in f.coordinate_systems)
@@ -379,7 +385,7 @@ def test_one_session_is_one_stage_system(tmp_path, metadata_reads):
     write_lif(path, [_placed("a", 100.0), _placed("b", 250.0, start=T0 + HOUR),
                      folder("f", [_placed("c", 400.0, start=T0 + 2 * HOUR)])])
     assert _systems(path, metadata_reads) == (["stage"], ["stage"] * 3)
-    with micro_reader.open(path) as f:                      # positions as before
+    with _native(path) as f:                      # positions as before
         assert [round(i.metadata.position["x"].value) for i in f.images] == [100, 250, 400]
 
 
@@ -468,7 +474,7 @@ def test_tiles_of_a_swapped_or_flipped_scan_are_unplaced(tmp_path, metadata_read
                                **session),
                          image("plain", tiles, "tczmyx", tiles=grid, **session)])
         assert _systems(path, metadata_reads) == (["stage"], [None, None, "stage", "stage"])
-        with micro_reader.open(path) as f:
+        with _native(path) as f:
             assert all(i.metadata.position == {} for i in f.select(series=0))
 
 
@@ -482,7 +488,7 @@ def test_tiles_share_their_series_system(tmp_path, metadata_reads):
 def test_systems_survive_open_with_axes(tmp_path):
     path = str(tmp_path / "a.lif")
     write_lif(path, [_placed("a", 100.0), _placed("b", 250.0, start=T0 + HOUR)])
-    with micro_reader.open(path, axes="tczyx") as f:
+    with _native(path, axes="tczyx") as f:
         assert [s.id for s in f.coordinate_systems] == ["stage"]
         assert [i.metadata.coordinate_system for i in f.images] == ["stage", "stage"]
 

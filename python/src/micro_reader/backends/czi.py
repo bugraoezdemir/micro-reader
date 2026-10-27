@@ -1138,7 +1138,7 @@ class _CziFile(File):
             fields[place] = fields.get(place, 0) + 1
         row_names, column_names = layout_names(layout["rows"], layout["columns"], wells,
                                                self.path)
-        plate = Plate(name="", rows=row_names, columns=column_names,
+        plate = Plate(name="", row_names=row_names, column_names=column_names,
                       wells=tuple(Well(r, c, names[(r, c)]) for r, c in wells))
         return well_field, plate
 

@@ -13,6 +13,12 @@ import micro_reader  # noqa: E402
 from micro_reader import UnsupportedFormatError  # noqa: E402
 from micro_reader.backends import tiff as tiff_backend  # noqa: E402
 
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
+
 try:
     import imagecodecs  # noqa: F401
     HAVE_CODECS = True
@@ -115,7 +121,7 @@ def test_matches_tifffile(files, name, decode_threads):
     if name not in files:
         pytest.skip("needs imagecodecs")
     ref, axes = _reference(files[name])
-    with micro_reader.open(files[name]) as img:
+    with _native(files[name]) as img:
         series = img.images[0]
         assert img.backend == "tiff"
         assert series.shape == ref.shape and series.axes == axes and series.dtype == ref.dtype
@@ -132,7 +138,7 @@ def test_uncompressed_strips_read_exactly(files, name, monkeypatch):
     # the exact path: no skipped columns are read (see test_*_spans for merged rows)
     monkeypatch.setattr(tiff_backend, "SEPARATE_READ_BYTES", 0)
     ref, _ = _reference(files[name])
-    with micro_reader.open(files[name]) as img:
+    with _native(files[name]) as img:
         series = img.images[0]
         assert series.read_unit is None
         for key in _keys(ref.shape, seed=7):
@@ -149,7 +155,7 @@ def test_uncompressed_single_strip_reads_only_the_rectangle(tmp_path, monkeypatc
     tifffile.imwrite(path, data)
     with tifffile.TiffFile(path) as tf:
         assert len(tf.pages[0].dataoffsets) == 1           # really one strip
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         np.testing.assert_array_equal(series[1000:1064, 1500:1564], data[1000:1064, 1500:1564])
         assert series.stats.pixels_read == 64 * 64
@@ -164,7 +170,7 @@ def test_uncompressed_runs_split_into_pool_tasks(files, name, decode_threads, mo
     monkeypatch.setattr(tiff, "RAW_TASK_BYTES", 3000)
     monkeypatch.setattr(tiff, "SEPARATE_READ_BYTES", 0)   # the exact path
     ref, _ = _reference(files[name])
-    with micro_reader.open(files[name]) as img:
+    with _native(files[name]) as img:
         series = img.images[0]
         for key in _keys(ref.shape, seed=5):
             np.testing.assert_array_equal(series[key], ref[key], err_msg=f"{name} {key}")
@@ -174,7 +180,7 @@ def test_uncompressed_runs_split_into_pool_tasks(files, name, decode_threads, mo
 
 def test_compressed_read_unit_and_decode_cache(files):
     ref, _ = _reference(files["zlib_tiled"])
-    with micro_reader.open(files["zlib_tiled"]) as img:
+    with _native(files["zlib_tiled"]) as img:
         series = img.images[0]
         assert series.read_unit == (64, 64)
         np.testing.assert_array_equal(series[10:20, 10:20], ref[10:20, 10:20])
@@ -188,7 +194,7 @@ def test_compressed_read_unit_and_decode_cache(files):
 def test_rgb_sample_subset(files):
     ref, axes = _reference(files["rgb_contig"])
     assert axes == "yxs"
-    with micro_reader.open(files["rgb_contig"]) as img:
+    with _native(files["rgb_contig"]) as img:
         np.testing.assert_array_equal(img.images[0].read(s=1), ref[..., 1])
         np.testing.assert_array_equal(img.images[0].read(s=slice(0, 2), y=slice(5, 9)),
                                       ref[5:9, :, 0:2])
@@ -203,7 +209,7 @@ def test_multiple_series(tmp_path):
         tw.write(b, compression="zlib", photometric="rgb", planarconfig="separate",
                  metadata={"axes": "ZYX"})
         tw.write(c, photometric="minisblack", tile=(16, 16), metadata={"axes": "ZYX"})
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert [s.axes for s in img.images] == ["yx", "zyx", "zyx"]
         for series, data in zip(img.images, (a, b, c)):
             np.testing.assert_array_equal(series[...], data)
@@ -218,7 +224,7 @@ def test_truncated_imagej_hyperstack(tmp_path):
     tifffile.imwrite(path, data, imagej=True, truncate=True, metadata={"axes": "ZYX"})
     with tifffile.TiffFile(path) as tf:
         assert len(tf.pages) == 1 and tf.series[0].is_truncated
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         assert series.shape == data.shape
         np.testing.assert_array_equal(series[...], data)
@@ -244,7 +250,7 @@ def test_sparse_tiles_read_as_fill(tmp_path):
     expect = data.copy()
     expect[0:64, 64:128] = 0
     np.testing.assert_array_equal(tifffile.imread(path), expect)   # tifffile agrees
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         np.testing.assert_array_equal(img.images[0][...], expect)
         np.testing.assert_array_equal(img.images[0][32:96, 32:96], expect[32:96, 32:96])
 
@@ -253,7 +259,7 @@ def test_volumetric_tiles_are_refused(tmp_path):
     path = str(tmp_path / "vol.tif")
     tifffile.imwrite(path, _data((8, 64, 64)), volumetric=True, tile=(4, 32, 32))
     with pytest.raises(UnsupportedFormatError, match="volumetric"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_imaris3_is_refused_not_misread(tmp_path):
@@ -267,20 +273,22 @@ def test_imaris3_is_refused_not_misread(tmp_path):
         for _ in range(3):
             tw.write(_data((64, 64)), photometric="minisblack")
     with pytest.raises(UnsupportedFormatError, match="Imaris 3"):
-        micro_reader.open(path)
+        _native(path)
     os.remove(path)                                  # Windows: fails while a handle is open
 
 
 def test_opera_flex_is_refused_not_misread(tmp_path):
     """An Opera Flex file (a TIFF with a FlexXML tag) read as a plain TIFF gave
-    each page as an image (112 for one well, real-data round): refused."""
-    path = str(tmp_path / "001001.flex")
+    each page as an image (112 for one well, real-data round): the flex backend
+    reads it when it is named .flex (test_flex.py); renamed, the TIFF backend
+    refuses it, naming the flex backend."""
+    path = str(tmp_path / "001001.tif")
     with tifffile.TiffWriter(path) as tw:
         for k in range(4):
             tw.write(_data((16, 16), seed=k), photometric="minisblack",
                      extratags=[(65200, "s", 0, "<Root><Arrays/></Root>", True)] if k == 0 else None)
-    with pytest.raises(UnsupportedFormatError, match="Opera Flex"):
-        micro_reader.open(path)
+    with pytest.raises(UnsupportedFormatError, match="Opera Flex.*backend='flex'"):
+        _native(path)
     os.remove(path)                                  # Windows: fails while a handle is open
 
 
@@ -291,7 +299,7 @@ def test_a_harmony_plane_with_a_flexxml_tag_is_a_plain_tiff(tmp_path):
     data = _data((16, 16))
     tifffile.imwrite(path, data, photometric="minisblack",
                      extratags=[(65200, "s", 0, "<Root><Arrays><Array FrameIndex=\"0\"/></Arrays></Root>", True)])
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         np.testing.assert_array_equal(np.asarray(f.images[0][...]), data)
 
 
@@ -301,9 +309,9 @@ def test_one_pixel_per_inch_is_no_pixel_size(tmp_path):
     placeholder, real = str(tmp_path / "placeholder.tif"), str(tmp_path / "real.tif")
     tifffile.imwrite(placeholder, _data((8, 8)), resolution=(1, 1), resolutionunit="INCH")
     tifffile.imwrite(real, _data((8, 8)), resolution=(10000, 10000), resolutionunit="CENTIMETER")
-    with micro_reader.open(placeholder) as f:
+    with _native(placeholder) as f:
         assert f.images[0].metadata.pixel_sizes == {}
-    with micro_reader.open(real) as f:
+    with _native(real) as f:
         assert f.images[0].metadata.pixel_sizes["x"].to("micrometer").value == pytest.approx(1.0)
 
 
@@ -318,7 +326,7 @@ def test_planes_the_metadata_names_but_the_file_never_got(tmp_path):
             tw.write(plane, compression="zlib", metadata=None, contiguous=False,
                      description="ImageJ=1.11a\nimages=8\nslices=8\n" if k == 0 else None)
     with pytest.warns(micro_reader.MissingImagesWarning, match="holds 3 of the 8 planes"):
-        f = micro_reader.open(path)
+        f = _native(path)
     with f:
         got = np.asarray(f.images[0][...])
         assert got.shape == (8, 16, 16)
@@ -334,7 +342,7 @@ def test_imaris_tiff_export_is_a_plain_tiff(tmp_path):
     tifffile.imwrite(path, data, photometric="minisblack",
                      description="[ImarisDataSet]\nNumberOfImages=1\nVersion = 10.2.0\n\n[Image]\n"
                                  "OriginalFormat = TIFF\n")
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert len(f.images) == 1
         np.testing.assert_array_equal(np.asarray(f.images[0][...]).reshape(data.shape), data)
 
@@ -345,7 +353,7 @@ def test_truncated_file_is_reported(tmp_path):
     with open(path, "r+b") as fh:
         fh.truncate(os.path.getsize(path) // 2)
     with pytest.raises(micro_reader.MicroReaderError):
-        with micro_reader.open(path) as img:
+        with _native(path) as img:
             img.images[0][...]
 
 
@@ -355,7 +363,7 @@ def test_close_releases_the_file(tmp_path, compression, decode_threads):
     including those the decode threads keep per series."""
     path = str(tmp_path / "a.tif")
     tifffile.imwrite(path, _data((150, 160)), compression=compression, tile=(32, 32))
-    img = micro_reader.open(path)
+    img = _native(path)
     img.images[0][0:100, 0:100]
     img.close()
     os.remove(path)
@@ -373,7 +381,7 @@ def test_corrupt_compressed_segment_raises(tmp_path, decode_threads):
     with open(path, "r+b") as fh:
         fh.seek(offset)
         fh.write(b"\x00" * 16)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         np.testing.assert_array_equal(series[0:64, 0:64], data[0:64, 0:64])   # intact tile
         with pytest.raises(Exception):
@@ -385,7 +393,7 @@ def test_concurrent_reads(files, name, decode_threads):
     if name not in files:
         pytest.skip("needs imagecodecs")
     ref, _ = _reference(files[name])
-    with micro_reader.open(files[name]) as img:
+    with _native(files[name]) as img:
         series, errors = img.images[0], []
         keys = _keys(ref.shape, n=40, seed=11)
 
@@ -411,7 +419,7 @@ def test_uncompressed_narrow_reads_merge_rows(files, name):
     """Part of the columns of many rows: the skipped bytes per row cost less than one
     more read per row, so a run of rows is one read (as in LIF); pixels stay exact."""
     ref, _ = _reference(files[name])
-    with micro_reader.open(files[name]) as img:
+    with _native(files[name]) as img:
         series = img.images[0]
         for key in _keys(ref.shape, seed=11):
             np.testing.assert_array_equal(series[key], ref[key], err_msg=f"{name} {key}")
@@ -423,13 +431,13 @@ def test_uncompressed_single_strip_merged_span(tmp_path):
     data = _data((2000, 3000))
     path = str(tmp_path / "a.tif")
     tifffile.imwrite(path, data)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         np.testing.assert_array_equal(series[1000:1064, 1500:1564], data[1000:1064, 1500:1564])
         assert series.stats.pixels_read == 63 * 3000 + 64
     big = _data((64, 40000))                                    # 80 KB skipped per row
     tifffile.imwrite(path, big)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         np.testing.assert_array_equal(series[:, 100:164], big[:, 100:164])
         assert series.stats.pixels_read == 64 * 64              # rows read separately

@@ -15,6 +15,12 @@ from micro_reader.backends import raster
 
 from _raster_writer import write_bmp, write_png
 
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
+
 RNG = np.random.default_rng(11)
 H, W = 13, 21                                    # odd sizes: partial bytes, padding
 
@@ -30,7 +36,7 @@ def decoders(request, monkeypatch):
 
 
 def _read(path):
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.backend == "raster" and f.indices == [{"series": 0}]
         image = f.images[0]
         whole = image[...]
@@ -106,7 +112,7 @@ def test_png_interlaced(tmp_path, decoders, bits, colour, samples):
     write_png(path, values, bits=bits, colour=colour, plte=pal, filters=(1, 4), interlace=True)
     if decoders == "reference" and (bits < 8 or colour == 3):
         with pytest.raises(UnsupportedFormatError, match="interlaced"):
-            micro_reader.open(path).images[0][...]
+            _native(path).images[0][...]
         return
     _, whole, _ = _read(path)
     np.testing.assert_array_equal(whole, values)
@@ -222,7 +228,7 @@ def test_cmyk_jpeg_is_refused_by_name(tmp_path):
     path = str(tmp_path / "cmyk.jpg")
     Image.new("CMYK", (8, 8)).save(path)
     with pytest.raises(UnsupportedFormatError, match="CMYK"):
-        micro_reader.open(path)
+        _native(path)
 
 
 # -- the backend ----------------------------------------------------------------------
@@ -231,7 +237,7 @@ def test_decoded_once_and_read_unit_is_the_image(tmp_path):
     values = RNG.integers(0, 256, (H, W)).astype("u1")
     path = str(tmp_path / "v.png")
     write_png(path, values)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         assert image.read_unit == (H, W)
         image[0:2, 0:2]
@@ -247,7 +253,7 @@ def test_truncated_png_is_reported(tmp_path, cut):  # libpng tolerates it, png-r
     write_png(str(path), RNG.integers(0, 256, (H, W)).astype("u1"))
     path.write_bytes(path.read_bytes()[:-cut])
     with pytest.raises(CorruptFileError, match="t.png"):
-        with micro_reader.open(str(path)) as f:             # at open or at the first read
+        with _native(str(path)) as f:             # at open or at the first read
             f.images[0][...]
 
 

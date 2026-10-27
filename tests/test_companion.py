@@ -14,6 +14,12 @@ import pytest
 import micro_reader
 from micro_reader.backends import companion
 
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
+
 tifffile = pytest.importorskip("tifffile")
 RNG = np.random.default_rng(7)
 NS = "http://www.openmicroscopy.org/Schemas/OME/2016-06"
@@ -138,7 +144,7 @@ def _check(image, data, im=0):
 @pytest.mark.parametrize("order", ["XYZCT", "XYCZT"])
 def test_a_set_reads_as_one_image_with_its_metadata(tmp_path, layout, order):
     path, data = _write(str(tmp_path), layout=layout, order=order)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert (f.backend, f.format) == ("companion", "ome-companion")
         assert f.indices == [{"series": 0}]
         im = f.images[0]
@@ -159,7 +165,7 @@ def test_a_set_reads_as_one_image_with_its_metadata(tmp_path, layout, order):
 
 def test_two_images_in_one_companion(tmp_path):
     path, data = _write(str(tmp_path), images=2, layout="stacks")
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.indices == [{"series": 0}, {"series": 1}]
         assert [im.name for im in f.images] == ["series 0", "series 1"]
         _check(f.images[1], data, im=1)
@@ -167,7 +173,7 @@ def test_two_images_in_one_companion(tmp_path):
 
 def test_a_companion_named_ome_xml_is_recognised(tmp_path):
     path, data = _write(str(tmp_path), name="meta.ome.xml")
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.backend == "companion"
         _check(f.images[0], data)
 
@@ -176,7 +182,7 @@ def test_missing_members_read_as_zeros_and_an_image_without_files_is_left_out(tm
     path, data = _write(str(tmp_path), images=2, layout="stacks",
                         skip={(0, 1), (1, 0), (1, 1)})
     with pytest.warns(micro_reader.MissingImagesWarning):
-        f = micro_reader.open(path)
+        f = _native(path)
     with f:
         assert f.indices == [{"series": 0}]               # image 1 has none of its files
         got = f.images[0][...]
@@ -194,7 +200,7 @@ def test_missing_members_read_as_zeros_and_an_image_without_files_is_left_out(tm
 ])
 def test_a_member_that_passes_a_check_belongs(tmp_path, own, points_to):
     path, data = _write(str(tmp_path), own=own, points_to=points_to)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         _check(f.images[0], data)
 
 
@@ -203,25 +209,25 @@ def test_a_member_that_passes_a_check_belongs(tmp_path, own, points_to):
 def test_a_member_that_fails_and_passes_no_check_is_an_error(tmp_path, own, points_to):
     path, _data = _write(str(tmp_path), own=own, points_to=points_to)
     with pytest.raises(micro_reader.CorruptFileError, match="is not part of the set"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_without_uuids_in_the_companion_the_name_decides(tmp_path):
     path, data = _write(str(tmp_path), own="other", points_to=None, list_uuids=False)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         _check(f.images[0], data)
 
 
 def test_a_member_of_another_size_is_an_error(tmp_path):
     path, _data = _write(str(tmp_path), member_shape=(Y, X + 1))
     with pytest.raises(micro_reader.CorruptFileError, match="expects"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_an_absolute_path_that_does_not_exist_falls_back_to_the_folder(tmp_path):
     path, data = _write(str(tmp_path), absolute=True)
     with pytest.warns(micro_reader.CompanionWarning, match="absolute"):
-        f = micro_reader.open(path)
+        f = _native(path)
     with f:
         _check(f.images[0], data)
 
@@ -230,7 +236,7 @@ def test_an_absolute_path_that_does_not_exist_falls_back_to_the_folder(tmp_path)
 
 def test_without_physical_size_z_the_even_position_z_steps_give_it(tmp_path):
     path, _data = _write(str(tmp_path), physical_z=False, positions_z=[10.0, 13.0, 16.0])
-    with micro_reader.open(path) as f, pytest.warns(micro_reader.CompanionWarning,
+    with _native(path) as f, pytest.warns(micro_reader.CompanionWarning,
                                                     match="PositionZ"):
         sizes = f.images[0].metadata.pixel_sizes
     assert sizes["z"] == micro_reader.Quantity(3.0, "micrometer")
@@ -238,7 +244,7 @@ def test_without_physical_size_z_the_even_position_z_steps_give_it(tmp_path):
 
 def test_uneven_positions_give_no_z_and_members_without_metadata_neither(tmp_path):
     path, _data = _write(str(tmp_path), physical_z=False, positions_z=[10.0, 13.0, 19.0])
-    with micro_reader.open(path) as f, warnings.catch_warnings():
+    with _native(path) as f, warnings.catch_warnings():
         warnings.simplefilter("error")                   # nothing taken from elsewhere
         assert "z" not in f.images[0].metadata.pixel_sizes
 
@@ -250,7 +256,7 @@ def test_the_members_own_metadata_fills_a_missing_z(tmp_path):
         member = os.path.join(str(tmp_path), f"img0_part{t:03d}.tif")
         stack = tifffile.imread(member)
         tifffile.imwrite(member, stack, imagej=True, metadata={"spacing": 1.5, "unit": "um"})
-    with micro_reader.open(path) as f, pytest.warns(micro_reader.CompanionWarning,
+    with _native(path) as f, pytest.warns(micro_reader.CompanionWarning,
                                                     match="member file"):
         sizes = f.images[0].metadata.pixel_sizes
     assert sizes["z"] == micro_reader.Quantity(1.5, "micrometer")
@@ -260,8 +266,12 @@ def test_the_members_own_metadata_fills_a_missing_z(tmp_path):
 # -- refused ------------------------------------------------------------------
 
 @pytest.mark.parametrize("edit, error", [
-    (lambda x: x.replace('SamplesPerPixel="1"', 'SamplesPerPixel="3"'),
+    # channels of different samples per pixel in one image
+    (lambda x: x.replace('SamplesPerPixel="1"', 'SamplesPerPixel="3"', 1),
      micro_reader.UnsupportedFormatError),
+    # SizeC 2 cannot be channels of 3 samples
+    (lambda x: x.replace('SamplesPerPixel="1"', 'SamplesPerPixel="3"'),
+     micro_reader.CorruptFileError),
     (lambda x: x.replace("</Pixels>", '<BinData Length="0"/></Pixels>'),
      micro_reader.UnsupportedFormatError),
     (lambda x: x.replace('<UUID FileName="img0_part000.tif">urn:uuid:member-0-0</UUID>', ""),
@@ -274,7 +284,7 @@ def test_what_it_cannot_read_is_refused(tmp_path, edit, error):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(edit(text))
     with pytest.raises(error):
-        micro_reader.open(path)
+        _native(path)
 
 
 # -- a companion whose bytes are not in the encoding it declares ------------------
@@ -303,15 +313,15 @@ def test_a_companion_with_windows_bytes_under_a_utf8_declaration_is_read(tmp_pat
     assert b"\xb5" in open(path, "rb").read() and b"\xc2\xb5" not in open(path, "rb").read()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with micro_reader.open(path) as f:
+        with _native(path) as f:
             (im,) = f.images
             assert im.shape == (2, 2, 3, Y, X)
             _check(im, data)
             z = im.metadata.pixel_sizes["z"]
             assert (z.value, z.unit) == (2.5, "micrometer")      # the µm unit was read
-        with micro_reader.open(_member(str(tmp_path), 2)) as f:  # a member opens the whole
+        with _native(_member(str(tmp_path), 2)) as f:  # a member opens the whole
             assert f.backend == "companion" and f.images[0].shape == (2, 2, 3, Y, X)
-        with micro_reader.open(_member(str(tmp_path), 2), multifile=False) as f:
+        with _native(_member(str(tmp_path), 2), multifile=False) as f:
             assert f.images[0].metadata.pixel_sizes["z"].unit == "micrometer"
     told = [w for w in caught if issubclass(w.category, micro_reader.CompanionWarning)]
     assert len(told) == 1                           # parsed once, warned once
@@ -323,7 +333,7 @@ def test_a_byte_cp1252_does_not_have_falls_back_to_latin_1(tmp_path):
     path, _data = _write(str(tmp_path))
     _rewrite_bytes(path, lambda raw: _mis_encoded(raw, b"\x81"))   # undefined in cp1252
     with pytest.warns(micro_reader.CompanionWarning, match="read as 'latin-1'"):
-        with micro_reader.open(path) as f:
+        with _native(path) as f:
             (im,) = f.images
             assert im.shape == (2, 2, 3, Y, X)
             assert im.metadata.pixel_sizes["x"].value == 0.5    # "\x81m" is no unit: no z
@@ -338,7 +348,7 @@ def test_what_is_no_xml_in_any_encoding_stays_an_error(tmp_path, edit):
     path, _data = _write(str(tmp_path))
     _rewrite_bytes(path, edit)
     with pytest.raises(micro_reader.CorruptFileError, match="not readable XML"):
-        micro_reader.open(path)
+        _native(path)
 
 
 # -- caching and member files ---------------------------------------------------
@@ -350,18 +360,18 @@ def test_a_companion_is_parsed_once_while_it_does_not_change(tmp_path, monkeypat
     monkeypatch.setattr(companion, "Core", lambda p: parsed.append(p) or real(p))
     companion._cores.clear()
     for _ in range(3):
-        micro_reader.open(path).close()
+        _native(path).close()
     assert len(parsed) == 1
     stat = os.stat(path)
     os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10**9))
-    micro_reader.open(path).close()
+    _native(path).close()
     assert len(parsed) == 2
 
 
 def test_few_members_stay_open_and_threads_read_safely(tmp_path, monkeypatch):
     monkeypatch.setattr(companion, "OPEN_MEMBERS", 2)
     path, data = _write(str(tmp_path), T=3, C=2, Z=4)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         im = f.images[0]
 
         def region(y0):
@@ -383,7 +393,7 @@ def _member(folder, number=0):
 
 def test_a_plane_opened_alone_takes_its_metadata_from_the_companion(tmp_path):
     path, data = _write(str(tmp_path), dpi96=True)       # its 96 dpi is no pixel size
-    with micro_reader.open(_member(str(tmp_path), 4), multifile=False) as f:
+    with _native(_member(str(tmp_path), 4), multifile=False) as f:
         assert f.backend == "tiff" and f.companion == path
         im = f.images[0]
         # plane 4 in XYZCT order: z 1, c 1, t 0; t, c and z are explicit, so kept
@@ -398,18 +408,18 @@ def test_a_plane_opened_alone_takes_its_metadata_from_the_companion(tmp_path):
 
 def test_only_axes_the_companion_says_something_about_are_added(tmp_path):
     path, _data = _write(str(tmp_path), physical_z=False, time=False)
-    with micro_reader.open(_member(str(tmp_path)), multifile=False) as f:
+    with _native(_member(str(tmp_path)), multifile=False) as f:
         assert f.images[0].axes == "cyx"                 # channel information only
     path, _data = _write(str(tmp_path / "bare"), physical_z=False, time=False,
                          channel_info=False)
-    with micro_reader.open(_member(str(tmp_path / "bare")), multifile=False) as f:
+    with _native(_member(str(tmp_path / "bare")), multifile=False) as f:
         im = f.images[0]
         assert im.axes == "yx" and im.metadata.pixel_sizes["x"].value == 0.5
 
 
 def test_a_multi_page_member_opens_as_its_block_of_the_image(tmp_path):
     path, data = _write(str(tmp_path), layout="stacks")  # one file per t: 2 c x 3 z pages
-    with micro_reader.open(_member(str(tmp_path), 1), multifile=False) as f:
+    with _native(_member(str(tmp_path), 1), multifile=False) as f:
         im = f.images[0]
         assert im.axes == "tczyx" and im.shape == (1, 2, 3, Y, X)
         got = im[...]
@@ -423,7 +433,7 @@ def test_without_its_companion_a_stub_opens_plainly_with_a_loud_warning(tmp_path
     path, data = _write(str(tmp_path), dpi96=True)
     os.remove(path)
     with pytest.warns(micro_reader.CompanionWarning, match="is not there"):
-        f = micro_reader.open(_member(str(tmp_path)), multifile=False)
+        f = _native(_member(str(tmp_path)), multifile=False)
     with f:
         im = f.images[0]
         assert im.axes == "yx" and im.metadata.pixel_sizes == {}   # never the 96 dpi
@@ -439,7 +449,7 @@ def test_a_member_is_recognised_when_a_check_passes(tmp_path, own, points_to, re
     path, _data = _write(str(tmp_path), own=own, points_to=points_to)
     with warnings.catch_warnings(record=True) as told:
         warnings.simplefilter("always")
-        f = micro_reader.open(_member(str(tmp_path)), multifile=False)
+        f = _native(_member(str(tmp_path)), multifile=False)
     with f:
         assert (getattr(f, "companion", None) == path) is bool(recognised)
         refused = [w for w in told if issubclass(w.category, micro_reader.CompanionWarning)]
@@ -456,7 +466,7 @@ def test_a_stub_may_point_to_an_ome_tiff(tmp_path):
                      description=xml.encode("utf-8"), metadata=None)   # the master: XML + plane 0
     with warnings.catch_warnings():
         warnings.simplefilter("error", micro_reader.CompanionWarning)
-        f = micro_reader.open(_member(str(tmp_path), 1), multifile=False)
+        f = _native(_member(str(tmp_path), 1), multifile=False)
     with f:
         assert os.path.samefile(f.companion, _member(str(tmp_path), 0))
         im = f.images[0]
@@ -482,9 +492,9 @@ def _xml_in_every_file(folder, T=3):
 
 def test_multifile_false_opens_one_file_of_a_multi_file_ome_tiff(tmp_path):
     paths, data = _xml_in_every_file(str(tmp_path))
-    with micro_reader.open(paths[1]) as f:                       # default: the whole set
+    with _native(paths[1]) as f:                       # default: the whole set
         assert f.images[0].shape[0] == 3
-    with micro_reader.open(paths[1], multifile=False) as f:      # only its own timepoint
+    with _native(paths[1], multifile=False) as f:      # only its own timepoint
         (im,) = f.images
         assert im.shape[:3] == (1, 2, 3)
         got = im[...]
@@ -502,7 +512,7 @@ def test_multifile_false_leaves_micro_manager_stacks_whole(tmp_path, monkeypatch
     paths, _data = _xml_in_every_file(str(tmp_path))
     # tifffile takes the file's flags from its first page
     monkeypatch.setattr(tifffile.TiffPage, "is_micromanager", property(lambda self: True))
-    with micro_reader.open(paths[1], multifile=False) as f:
+    with _native(paths[1], multifile=False) as f:
         assert f.images[0].shape[0] == 3
 
 
@@ -512,7 +522,7 @@ def test_multifile_false_leaves_single_file_ome_tiffs_and_others_alone(tmp_path)
     plain = str(tmp_path / "plain.tif")
     tifffile.imwrite(plain, np.zeros((Y, X), "u2"))
     for p in (single, plain):
-        with micro_reader.open(p) as a, micro_reader.open(p, multifile=False) as b:
+        with _native(p) as a, _native(p, multifile=False) as b:
             assert [im.shape for im in a.images] == [im.shape for im in b.images]
 
 
@@ -520,7 +530,7 @@ def test_a_renamed_member_is_found_by_its_uuid(tmp_path):
     path, data = _write(str(tmp_path), own="listed", points_to="this")
     renamed = os.path.join(str(tmp_path), "renamed.tif")
     os.rename(_member(str(tmp_path)), renamed)
-    with micro_reader.open(renamed, multifile=False) as f:
+    with _native(renamed, multifile=False) as f:
         assert f.companion == path
         np.testing.assert_array_equal(f.images[0][0, 0, 0], data[(0, 0, 0, 0)])
 
@@ -529,7 +539,7 @@ def test_an_absolute_pointer_that_does_not_exist_falls_back_to_the_folder(tmp_pa
     gone = os.path.join(os.path.abspath(os.sep), "acquisition-pc-x7", "set.companion.ome")
     path, _data = _write(str(tmp_path), metadata_file=gone)
     with pytest.warns(micro_reader.CompanionWarning, match="does not exist"):
-        f = micro_reader.open(_member(str(tmp_path)), multifile=False)
+        f = _native(_member(str(tmp_path)), multifile=False)
     with f:
         assert f.companion == path
 
@@ -537,7 +547,7 @@ def test_an_absolute_pointer_that_does_not_exist_falls_back_to_the_folder(tmp_pa
 def test_a_companion_that_does_not_fit_the_file_is_not_used(tmp_path):
     _path, _data = _write(str(tmp_path), member_shape=(Y, X + 1))
     with pytest.warns(micro_reader.CompanionWarning, match="another size"):
-        f = micro_reader.open(_member(str(tmp_path)), multifile=False)
+        f = _native(_member(str(tmp_path)), multifile=False)
     with f:
         assert f.images[0].axes == "yx" and f.images[0].metadata.pixel_sizes == {}
 
@@ -561,7 +571,7 @@ def test_pages_that_are_not_one_block_are_refused(tmp_path):
         fh.write(text)
     companion._cores.clear()
     with pytest.raises(micro_reader.UnsupportedFormatError, match="not one block"):
-        micro_reader.open(_member(str(tmp_path)), multifile=False)
+        _native(_member(str(tmp_path)), multifile=False)
 
 
 # -- multifile=True (the default): a member opens its whole set ---------------------
@@ -571,7 +581,7 @@ def test_pages_that_are_not_one_block_are_refused(tmp_path):
 def test_a_member_opens_the_whole_set_as_its_companion_would(tmp_path, own, points_to):
     path, data = _write(str(tmp_path), own=own, points_to=points_to, dpi96=True)
     member = _member(str(tmp_path), 4)
-    with micro_reader.open(member) as f, micro_reader.open(path) as g:
+    with _native(member) as f, _native(path) as g:
         assert f.backend == "companion" and f.path == path and f.opened == member
         (im,) = f.images
         assert im.shape == g.images[0].shape == (2, 2, 3, Y, X)
@@ -601,7 +611,7 @@ def _master_set(folder, compressed_members=False):
 
 def test_a_member_pointing_to_an_ome_tiff_opens_that_files_set(tmp_path):
     master, data = _master_set(str(tmp_path))
-    with micro_reader.open(_member(str(tmp_path), 1)) as f:
+    with _native(_member(str(tmp_path), 1)) as f:
         assert os.path.samefile(f.path, master) and f.backend == "tiff"
         assert f.images[0].shape[:3] == (2, 2, 3)
         _check(f.images[0], data)
@@ -612,7 +622,7 @@ def test_a_set_whose_files_are_stored_differently_is_refused_not_misread(tmp_pat
     page is; members stored otherwise (here tiled zlib after an uncompressed
     master) read as wrong pixels before, and are refused now."""
     master, data = _master_set(str(tmp_path), compressed_members=True)
-    with micro_reader.open(master) as f:
+    with _native(master) as f:
         np.testing.assert_array_equal(f.images[0][0, 0, 0], data[(0, 0, 0, 0)])
         with pytest.raises(micro_reader.UnsupportedFormatError, match="stored differently"):
             f.images[0][0, 0, 1]
@@ -635,10 +645,10 @@ def test_a_metadata_file_that_cannot_be_followed_is_an_error(tmp_path, break_it,
             fh.write("<OME")
     companion._cores.clear()
     with pytest.raises(micro_reader.CorruptFileError, match=f"{why}.*multifile=False"):
-        micro_reader.open(_member(str(tmp_path)))
+        _native(_member(str(tmp_path)))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", micro_reader.CompanionWarning)
-        with micro_reader.open(_member(str(tmp_path)), multifile=False) as f:   # the file alone
+        with _native(_member(str(tmp_path)), multifile=False) as f:   # the file alone
             assert f.images[0].axes == "yx"
 
 
@@ -647,7 +657,7 @@ def test_a_missing_member_warns_and_the_rest_reads(tmp_path):
     metadata file that cannot be followed is."""
     path, data = _write(str(tmp_path), skip={(0, 7)})
     with pytest.warns(micro_reader.MissingImagesWarning):
-        f = micro_reader.open(_member(str(tmp_path), 4))
+        f = _native(_member(str(tmp_path), 4))
     with f:
         assert f.path == path
         got = f.images[0][...]
@@ -656,7 +666,7 @@ def test_a_missing_member_warns_and_the_rest_reads(tmp_path):
 
 def test_a_member_without_a_stub_opens_as_it_is(tmp_path):
     path, _data = _write(str(tmp_path), own="listed", points_to=None)
-    with micro_reader.open(_member(str(tmp_path))) as f:
+    with _native(_member(str(tmp_path))) as f:
         assert f.backend == "tiff" and f.path == _member(str(tmp_path))
 
 
@@ -678,7 +688,7 @@ def test_a_sets_positions_are_in_its_one_stage_system(tmp_path, monkeypatch):
                         lambda self: reads.append(self) or real(self))
     path, _data = _write(str(tmp_path), images=2, positions_xy={0: (100.0, 50.0)},
                          positions_z=[10.0, 13.0, 16.0])
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert [s.id for s in f.coordinate_systems] == ["stage"]
         assert f.coordinate_systems[0].axes is None and not f.coordinate_systems[0].estimated
         assert reads == []
@@ -694,7 +704,7 @@ def test_a_sets_positions_are_in_its_one_stage_system(tmp_path, monkeypatch):
 def test_a_set_without_positions_is_unplaced(tmp_path):
     from micro_reader._spatial import check_invariants
     path, _data = _write(str(tmp_path))
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert [s.id for s in f.coordinate_systems] == ["stage"]
         m = f.images[0].metadata
         assert m.position == {} and m.coordinate_system is None
@@ -708,7 +718,7 @@ def test_a_member_opened_alone_is_placed_by_its_own_first_plane(tmp_path):
     path, _data = _write(str(tmp_path), T=3, layout="stacks",
                          positions_xy={0: (100.0, 50.0), 1: (130.0, 50.0)})
     for number, centre in ((1, (130.0, 50.0)), (2, None)):
-        with micro_reader.open(_member(str(tmp_path), number), multifile=False) as f:
+        with _native(_member(str(tmp_path), number), multifile=False) as f:
             assert (f.backend, f.format) == ("tiff", "ome-tiff")
             assert [s.id for s in f.coordinate_systems] == ["stage"]
             m = f.images[0].metadata
@@ -718,9 +728,173 @@ def test_a_member_opened_alone_is_placed_by_its_own_first_plane(tmp_path):
                 assert m.coordinate_system == "stage"
                 assert (m.position["x"].value, m.position["y"].value) == _first_pixel(centre)
             check_invariants(f)
-    with micro_reader.open(_member(str(tmp_path), 1)) as f:      # the whole set
+    with _native(_member(str(tmp_path), 1)) as f:      # the whole set
         assert f.backend == "companion"
         assert f.images[0].metadata.coordinate_system == "stage"
+
+
+# -- plates (plates=True) ----------------------------------------------------------
+
+def _plate(wells, rows=None, columns=None, runs=None):
+    """A Plate element: *wells* {(row, column): [(Index, image number), ...]}
+    in that order; *runs*: one list of WellSample IDs per PlateAcquisition."""
+    size = "".join(f' {k}="{v}"' for k, v in (("Rows", rows), ("Columns", columns)) if v)
+    xml = [f'<Plate ID="Plate:0" Name="screen"{size}>']
+    for (r, c), samples in wells.items():
+        xml.append(f'<Well ID="Well:{r}:{c}" Row="{r}" Column="{c}">')
+        xml += [f'<WellSample ID="WellSample:{r}:{c}:{k}" Index="{index}">'
+                f'<ImageRef ID="Image:{image}"/></WellSample>'
+                for k, (index, image) in enumerate(samples)]
+        xml.append("</Well>")
+    for a, refs in enumerate(runs or []):
+        xml.append(f'<PlateAcquisition ID="PlateAcquisition:{a}" Name="run {a}">'
+                   + "".join(f'<WellSampleRef ID="{ref}"/>' for ref in refs)
+                   + "</PlateAcquisition>")
+    return "".join(xml) + "</Plate>"
+
+
+def _with_plate(path, plate):
+    text = open(path, encoding="utf-8").read()
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace('<Image ID="Image:0"', plate + '<Image ID="Image:0"', 1))
+
+
+def _place(well, field, acquisition=0):
+    return {"plate": 0, "acquisition": acquisition, "well": well, "field": field}
+
+
+def test_a_companion_plate_reads_as_one_with_plates_true(tmp_path):
+    path, data = _write(str(tmp_path), T=1, C=2, Z=1, images=4)
+    # B2 holds two fields, listed out of Index order (Index counts across the
+    # plate: the field is the place in the well); image 3 is in no well
+    _with_plate(path, _plate({(0, 2): [(0, 0)], (1, 1): [(5, 2), (2, 1)]}, rows=8, columns=12))
+    with _native(path, plates=True) as f:
+        (plate,) = f.plates
+        assert plate.name == "screen" and (len(plate.row_names), len(plate.column_names)) == (8, 12)
+        assert [w.name for w in plate.wells] == ["A3", "B2"]
+        b2 = plate.wells[1]
+        assert [field.index for field in b2.fields] == [0, 1]
+        assert [field.image.name for field in b2.fields] == ["series 1", "series 2"]
+        _check(b2.fields[1].image, data, im=2)
+        assert [im.index for im in f.images] == [_place(0, 0), _place(1, 0), _place(1, 1),
+                                                 {"series": 3}]     # in no well: beside
+        assert [im.name for im in f.select(well_name="B2", field=1)] == ["series 2"]
+    with _native(path) as f:                  # without plates=True: as before
+        assert f.plates == [] and [im.index for im in f.images] == [{"series": n}
+                                                                     for n in range(4)]
+
+
+def test_the_layout_holds_every_listed_well_and_missing_files_warn_once(tmp_path):
+    path, _data = _write(str(tmp_path), T=1, C=1, Z=1, images=3, skip=[(1, 0), (2, 0)])
+    _with_plate(path, _plate({(0, 0): [(0, 0)], (2, 3): [(1, 1)], (1, 0): [(2, 2)]}))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with _native(path, plates=True) as f:
+            (plate,) = f.plates
+            # no Rows / Columns: the smallest layout holding C4, not only the wells with files
+            assert (plate.row_names, plate.column_names) == (("A", "B", "C"), ("1", "2", "3", "4"))
+            assert [w.name for w in plate.wells] == ["A1"] and len(f.images) == 1
+    told = [str(w.message) for w in caught
+            if issubclass(w.category, micro_reader.MissingImagesWarning)]
+    assert len(told) == 1, told                         # one for the set, not one per image
+    assert "2 image files are missing" in told[0] and "2 fields have no files" in told[0]
+
+
+def test_plate_acquisitions_number_the_fields_of_each_run(tmp_path):
+    path, _data = _write(str(tmp_path), T=1, C=1, Z=1, images=3)
+    _with_plate(path, _plate({(0, 0): [(0, 0), (1, 1), (2, 2)]},
+                             runs=[["WellSample:0:0:0", "WellSample:0:0:2"], ["WellSample:0:0:1"]]))
+    with _native(path, plates=True) as f:
+        assert [(a.id, a.name) for a in f.plates[0].acquisitions] == [(0, "run 0"), (1, "run 1")]
+        assert [im.index for im in f.images] == [_place(0, 0), _place(0, 1), _place(0, 0, 1)]
+        assert [im.name for im in f.select(acquisition=1)] == ["series 1"]
+
+
+def test_acquisitions_without_images_are_left_out_and_numbered_anew(tmp_path):
+    """CQ1 lists one PlateAcquisition per planned well; with only some wells'
+    files, the plate keeps the acquisitions that hold images, numbered from 0."""
+    path, _data = _write(str(tmp_path), T=1, C=1, Z=1, images=3, skip=[(0, 0)])
+    _with_plate(path, _plate({(0, 0): [(0, 0)], (0, 1): [(1, 1)], (0, 2): [(2, 2)]},
+                             runs=[["WellSample:0:0:0"], ["WellSample:0:1:0"], ["WellSample:0:2:0"]]))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", micro_reader.MissingImagesWarning)
+        with micro_reader.open(path, plates=True) as f:
+            assert [(a.id, a.name) for a in f.plates[0].acquisitions] == [(0, "run 1"), (1, "run 2")]
+            assert [im.index["acquisition"] for im in f.images] == [0, 1]
+
+
+@pytest.mark.parametrize("wells, runs, why", [
+    ({(0, 0): [(0, 0)], (0, 1): [(1, 0)]}, None, "in two WellSamples"),
+    ({(0, 0): [(0, 7)]}, None, "which the companion does not list"),
+    ({(0, 0): [(0, 0), (1, 1)]}, [["WellSample:0:0:0"], []], "in none of the plate's 2"),
+])
+def test_a_plate_that_contradicts_itself_is_refused(tmp_path, wells, runs, why):
+    path, _data = _write(str(tmp_path), T=1, C=1, Z=1, images=2)
+    _with_plate(path, _plate(wells, runs=runs))
+    with pytest.raises(micro_reader.CorruptFileError, match=why):
+        _native(path, plates=True)
+
+
+# -- RGB -------------------------------------------------------------------------
+
+def _rgb_set(folder, T=2, C=2, Z=3):
+    """An RGB companion set: one image of C channels of 3 samples (SizeC 3*C,
+    one Channel each, as OME-TIFF writes it), one member per timepoint holding
+    its C*Z pages in XYZCT order, each with a stub pointing to the companion.
+    -> (companion path, member paths, {(t, c, z): (Y, X, 3) plane})."""
+    this, data, members, tiffdata = "urn:uuid:rgb-set", {}, [], []
+    for t in range(T):
+        name = f"rgb_t{t}.ome.tif"
+        with tifffile.TiffWriter(os.path.join(folder, name)) as w:
+            for k, (c, z) in enumerate((c, z) for c in range(C) for z in range(Z)):
+                a = data[(t, c, z)] = RNG.integers(0, 255, (Y, X, 3)).astype("u1")
+                w.write(a, photometric="rgb", metadata=None,
+                        description=_stub(f"urn:uuid:rgb-{t}", this, "rgb.companion.ome")
+                        if k == 0 else None)
+        members.append(os.path.join(folder, name))
+        tiffdata.append(f'<TiffData FirstT="{t}" FirstC="0" FirstZ="0" IFD="0" '
+                        f'PlaneCount="{C * Z}"><UUID FileName="{name}">urn:uuid:rgb-{t}</UUID>'
+                        f'</TiffData>')
+    chans = "".join(f'<Channel ID="Channel:0:{c}" Name="ch{c}" SamplesPerPixel="3"/>'
+                    for c in range(C))
+    xml = (f'<OME xmlns="{NS}" UUID="{this}"><Image ID="Image:0" Name="rgb"><Pixels ID="Pixels:0" '
+           f'DimensionOrder="XYZCT" Type="uint8" SizeX="{X}" SizeY="{Y}" SizeZ="{Z}" '
+           f'SizeC="{3 * C}" SizeT="{T}" PhysicalSizeX="0.5" PhysicalSizeY="0.5">{chans}'
+           f'{"".join(tiffdata)}</Pixels></Image></OME>')
+    path = os.path.join(folder, "rgb.companion.ome")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    return path, members, data
+
+
+def test_rgb_members_read_with_a_sample_axis(tmp_path):
+    path, members, data = _rgb_set(str(tmp_path))
+    with _native(path) as f:
+        (im,) = f.images
+        assert (im.axes, im.shape, im.dtype) == ("tczyxs", (2, 2, 3, Y, X, 3), np.uint8)
+        assert [c.name for c in im.metadata.channels] == ["ch0", "ch1"]
+        got = im[...]
+        for (t, c, z), plane in data.items():
+            np.testing.assert_array_equal(got[t, c, z], plane)
+        np.testing.assert_array_equal(im[1, 1, 2, 3:9, 4:7, 1:], data[(1, 1, 2)][3:9, 4:7, 1:])
+    with _native(members[1], multifile=False) as f:       # one member: its block
+        (im,) = f.images
+        assert (im.axes, im.shape) == ("czyxs", (2, 3, Y, X, 3))
+        np.testing.assert_array_equal(im[1, 2], data[(1, 1, 2)])
+        assert [c.name for c in im.metadata.channels] == ["ch0", "ch1"]
+
+
+def test_a_member_with_other_samples_than_the_companion_says_is_an_error(tmp_path):
+    path, members, _data = _rgb_set(str(tmp_path))
+    with tifffile.TiffWriter(members[1]) as w:          # grey pages where RGB is listed
+        for k in range(6):
+            w.write(np.zeros((Y, X), "u1"), metadata=None,
+                    description=_stub("urn:uuid:rgb-1", "urn:uuid:rgb-set", "rgb.companion.ome")
+                    if k == 0 else None)
+    with _native(path) as f:
+        f.images[0][0]                                  # the other member reads
+        with pytest.raises(micro_reader.CorruptFileError, match="not one plane of 3 samples"):
+            f.images[0][1]
 
 
 DATA = os.environ.get("MICROSCOPY_DATA", os.path.expanduser("~/Desktop/data/microscopy"))
@@ -742,7 +916,7 @@ def test_the_bruker_prairie_view_t_series_reads_as_one_time_series():
     companion._cores.clear()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with micro_reader.open(companion_path) as f:
+        with _native(companion_path) as f:
             assert f.backend == "companion" and len(f.images) == 1
             (im,) = f.images
             assert (im.axes, im.shape, im.dtype) == ("tczyx", (30000, 1, 1, 112, 128), np.uint16)
@@ -760,16 +934,16 @@ def test_the_bruker_prairie_view_t_series_reads_as_one_time_series():
             assert first.max() > 0 and last.max() > 0
     told = [w for w in caught if issubclass(w.category, micro_reader.CompanionWarning)]
     assert len(told) == 1 and "'cp1252'" in str(told[0].message)
-    with micro_reader.open(first_member) as f:                    # any part opens the whole
+    with _native(first_member) as f:                    # any part opens the whole
         assert f.backend == "companion" and f.images[0].shape == (30000, 1, 1, 112, 128)
-    with micro_reader.open(last_member, multifile=False) as f:
+    with _native(last_member, multifile=False) as f:
         assert f.backend == "tiff" and f.images[0].shape == (1377, 1, 1, 112, 128)
         assert f.images[0].metadata.pixel_sizes["x"].unit == "micrometer"
     for side in (f"{stem}.xml", f"{stem}.env"):
         with open(side, "rb") as fh:
             assert not companion.sniff(fh.read(4096), side)
         with pytest.raises(micro_reader.UnsupportedFormatError):
-            micro_reader.open(side)
+            _native(side)
 
 
 def test_companion_sets_and_ome_tiffs_are_checked_strictly():
@@ -782,3 +956,163 @@ def test_companion_sets_and_ome_tiffs_are_checked_strictly():
     assert conftest.strict_placement(f)
     assert conftest.strict_placement(types.SimpleNamespace(backend="companion",
                                                            format="ome-companion"))
+
+
+PLATES = os.path.join(DATA, "plates", "companion")
+
+
+def test_the_ome_sample_plate_reads_as_a_plate():
+    """OME's sample HCS companion (CC BY 4.0): one plate, wells A2, B1, B3 with
+    a field each and C2 with two; no Rows / Columns (the layout is 3 x 3) and
+    a WellSample Index counting 1 to 5 across the plate.  A member, a
+    BinaryOnly stub, opens the plate too."""
+    folder = os.path.join(PLATES, "ome-plate-companion")
+    path = os.path.join(folder, "hcs.companion.ome")
+    if not os.path.exists(path):
+        pytest.skip(f"sample not found: {path} (set MICROSCOPY_DATA)")
+    with _native(path, plates=True) as f:
+        (plate,) = f.plates
+        assert plate.name == "Sample HCS OME-TIFF"
+        assert (plate.row_names, plate.column_names) == (("A", "B", "C"), ("1", "2", "3"))
+        assert [w.name for w in plate.wells] == ["A2", "B1", "B3", "C2"]
+        assert [len(w.fields) for w in plate.wells] == [1, 1, 1, 2]
+        second = plate.wells[3].fields[1].image
+        assert (second.axes, second.shape) == ("tczyx", (1, 1, 1, 96, 96))
+        with tifffile.TiffFile(os.path.join(folder, "well-C2-2.ome.tiff")) as tif:
+            np.testing.assert_array_equal(second[0, 0, 0], tif.pages[0].asarray())
+    with _native(os.path.join(folder, "well-B1.ome.tiff"), plates=True) as f:
+        assert f.backend == "companion" and [w.name for w in f.plates[0].wells][1] == "B1"
+
+
+def test_idr0092_an_rgb_plate_of_which_one_well_is_here():
+    """IDR idr0092 Plate1 (CC BY 4.0), 24 wells of one RGB image each (SizeC
+    3 as one Channel of 3 samples; t 5 files of 25 z pages); only well A01's
+    five files are downloaded.  The plate keeps its 4 x 6 layout, holds well
+    A1, and one warning says the other 23 images' 115 files are missing."""
+    folder = os.path.join(PLATES, "idr0092")
+    path = os.path.join(folder, "Plate1.companion.ome")
+    if not os.path.exists(path):
+        pytest.skip(f"sample not found: {path} (set MICROSCOPY_DATA)")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with _native(path, plates=True) as f:
+            (plate,) = f.plates
+            assert (len(plate.row_names), len(plate.column_names)) == (4, 6)
+            assert [w.name for w in plate.wells] == ["A1"]
+            im = plate.wells[0].fields[0].image
+            assert (im.axes, im.shape, im.dtype) == ("tczyxs", (5, 1, 25, 1552, 2080, 3),
+                                                     np.uint8)
+            assert len(im.metadata.channels) == 1
+            with tifffile.TiffFile(os.path.join(folder, "Plate1_A01_48h.tiff")) as tif:
+                np.testing.assert_array_equal(im[2, 0, 7], tif.pages[7].asarray())
+    told = [str(w.message) for w in caught
+            if issubclass(w.category, micro_reader.MissingImagesWarning)]
+    assert len(told) == 1 and "115 image files are missing" in told[0]
+    assert "23 fields have no files" in told[0]
+
+
+# -- an OME-TIFF master with a plate (Yokogawa CQ1's MeasurementResult.ome.tif) -----
+
+def _plate_master(folder):
+    """A master OME-TIFF holding a title image (its own IFD 0) and the OME-XML
+    of a plate whose two fields are in member files, each from IFD 0, with
+    BinaryOnly stubs pointing to the master -- as CQ1 writes it.
+    -> (master path, member paths, {field: (2, Y, X) planes})."""
+    master_uuid, data, members, images = "urn:uuid:cq1-master", {}, [], []
+    for f in range(2):
+        name = f"W0102F{f + 1:04d}.tif"
+        planes = data[f] = RNG.integers(0, 60000, (2, Y, X)).astype("u2")
+        stub = (f'<OME xmlns="{NS}" UUID="urn:uuid:member-{f}"><BinaryOnly '
+                f'MetadataFile="result.ome.tif" UUID="{master_uuid}"/></OME>')
+        with tifffile.TiffWriter(os.path.join(folder, name)) as w:
+            for c in range(2):
+                w.write(planes[c], metadata=None, description=stub if c == 0 else None)
+        members.append(os.path.join(folder, name))
+        chans = "".join(f'<Channel ID="Channel:{f + 1}:{c}" Name="ch{c}" SamplesPerPixel="1"/>'
+                        for c in range(2))
+        images.append(
+            f'<Image ID="Image:{f + 1}" Name="W102,F{f + 1}"><Pixels ID="Pixels:{f + 1}" '
+            f'DimensionOrder="XYZCT" Type="uint16" SizeX="{X}" SizeY="{Y}" SizeZ="1" SizeC="2" '
+            f'SizeT="1" PhysicalSizeX="0.32" PhysicalSizeY="0.32">{chans}'
+            f'<TiffData FirstC="0" IFD="0" PlaneCount="2"><UUID FileName="{name}">'
+            f"urn:uuid:member-{f}</UUID></TiffData></Pixels></Image>")
+    title = (f'<Image ID="Image:0" Name="TitleImage"><Pixels ID="Pixels:0" DimensionOrder="XYZCT" '
+             f'Type="uint16" SizeX="{X}" SizeY="{Y}" SizeZ="1" SizeC="1" SizeT="1">'
+             f'<Channel ID="Channel:0:0" SamplesPerPixel="1"/><TiffData IFD="0" PlaneCount="1">'
+             f'<UUID FileName="result.ome.tif">{master_uuid}</UUID></TiffData></Pixels></Image>')
+    plate = ('<Plate ID="Plate:0" Name="Microplate" Rows="16" Columns="24"><Well ID="Well:0" '
+             'Row="4" Column="5">' + "".join(
+                 f'<WellSample ID="WellSample:{f}" Index="{f + 1}"><ImageRef ID="Image:{f + 1}"/>'
+                 f"</WellSample>" for f in range(2)) + "</Well></Plate>")
+    xml = f'<OME xmlns="{NS}" UUID="{master_uuid}">{plate}{title}{"".join(images)}</OME>'
+    master = os.path.join(folder, "result.ome.tif")
+    tifffile.imwrite(master, np.zeros((Y, X), "u2"), description=xml.encode("utf-8"), metadata=None)
+    return master, members, data
+
+
+def test_each_series_of_a_multi_file_ome_tiff_gets_its_own_image_metadata(tmp_path):
+    """A field starting at IFD 0 of its member is not the title image starting
+    at IFD 0 of the master: the OME Image is found by file and IFD (the fields
+    took the title image's metadata: no channel names, no pixel sizes)."""
+    master, _members, data = _plate_master(str(tmp_path))
+    with micro_reader.open(master) as f:
+        names = [im.name for im in f.images]
+        assert names == ["TitleImage", "W102,F1", "W102,F2"]
+        field = f.images[2]
+        assert [c.name for c in field.metadata.channels] == ["ch0", "ch1"]
+        assert field.metadata.pixel_sizes["x"].value == pytest.approx(0.32)
+        assert f.plates == []                                   # no plates=True: as before
+
+
+def test_an_ome_tiff_plate_opens_as_a_plate_from_the_master_or_a_member(tmp_path):
+    master, members, data = _plate_master(str(tmp_path))
+    for path in (master, members[1]):
+        with micro_reader.open(path, plates=True) as f:
+            assert (f.backend, f.format) == ("tiff", "ome-tiff")
+            (plate,) = f.plates
+            assert (len(plate.row_names), len(plate.column_names)) == (16, 24)
+            (well,) = plate.wells
+            assert well.name == "E6" and [x.index for x in well.fields] == [0, 1]
+            np.testing.assert_array_equal(well.fields[1].image[0, :, 0], data[1])
+            assert [im.index for im in f.images][-1] == {"series": 0}   # the title image beside
+
+
+def test_a_single_file_ome_tiff_plate_the_companion_route_cannot_read_opens_as_before(tmp_path):
+    """Planes that name no file: no plate from plates=True, and no error (eubi
+    always asks for plates)."""
+    path = str(tmp_path / "single.ome.tif")
+    xml = (f'<OME xmlns="{NS}"><Plate ID="Plate:0" Rows="8" Columns="12"><Well ID="Well:0" Row="0" '
+           f'Column="0"><WellSample ID="WellSample:0" Index="0"><ImageRef ID="Image:0"/>'
+           f'</WellSample></Well></Plate><Image ID="Image:0"><Pixels ID="Pixels:0" '
+           f'DimensionOrder="XYZCT" Type="uint16" SizeX="{X}" SizeY="{Y}" SizeZ="1" SizeC="1" '
+           f'SizeT="1"><Channel ID="Channel:0:0" SamplesPerPixel="1"/><TiffData IFD="0" '
+           f'PlaneCount="1"/></Pixels></Image></OME>')
+    tifffile.imwrite(path, np.ones((Y, X), "u2"), description=xml.encode("utf-8"), metadata=None)
+    with micro_reader.open(path, plates=True) as f:
+        assert f.backend == "tiff" and f.plates == [] and len(f.images) == 1
+
+
+def test_cq1_measurement_result_is_a_plate():
+    """Zenodo 5727645 (Yokogawa CQ1, CC BY 4.0): MeasurementResult.ome.tif holds
+    a title image and the OME-XML of a 16 x 24 plate; well W102 (E6), fields 1
+    and 2 (2 channels x 9 z, one TIFF per plane) are here, the other 78 images'
+    files are not.  The data TIFFs point to the master."""
+    folder = os.path.join(DATA, "plates", "cq1", "zenodo-5727645", "20211124T154319_test20x")
+    if not os.path.exists(folder):
+        pytest.skip(f"sample not found: {folder} (set MICROSCOPY_DATA)")
+    for path in (os.path.join(folder, "MeasurementResult.ome.tif"),
+                 os.path.join(folder, "MeasurementResult.ome.xml"),
+                 os.path.join(folder, "Image", "W0102F0001T0001Z001C1.tif")):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", micro_reader.MissingImagesWarning)
+            with micro_reader.open(path, plates=True) as f:
+                (plate,) = f.plates
+                assert (plate.name, len(plate.row_names), len(plate.column_names)) == ("Microplate", 16, 24)
+                (well,) = plate.wells
+                assert well.name == "E6" and len(well.fields) == 2
+                im = well.fields[1].image
+                assert im.shape == (1, 2, 9, 2160, 2560)
+                assert [c.name for c in im.metadata.channels] == ["Channel 1", "Channel 2"]
+                with tifffile.TiffFile(os.path.join(folder, "Image",
+                                                    "W0102F0002T0001Z005C2.tif")) as tif:
+                    np.testing.assert_array_equal(im[0, 1, 4], tif.pages[0].asarray())

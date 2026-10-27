@@ -24,15 +24,28 @@ OME-TIFFs: each ``TiffData`` says which file (``UUID FileName``), which pages
   not exist falls back to the same name in the companion's folder, with a
   ``CompanionWarning``.
 - Missing members: as for every file set (``_fileset.keep_fields``).
+- Plates (``plates=True``, as for CZI): a companion with ``Plate`` / ``Well``
+  / ``WellSample`` gives ``File.plates``, and the images in its wells are
+  indexed ``plate`` / ``acquisition`` / ``well`` / ``field`` instead of
+  ``series``.  A well's fields are its WellSamples (of one
+  ``PlateAcquisition``) in ``Index`` order -- ``Index`` counts across the
+  plate, so the field is the place in the well; the layout is the Plate's
+  ``Rows`` x ``Columns``, else the smallest that holds every well it lists.
+  Plates and wells are those that hold images; an image in no well keeps
+  its ``series`` index.  Without ``plates=True`` a plate reads as before:
+  one image per OME ``Image``.
+- RGB (``SamplesPerPixel`` 3, one Channel standing for SizeC 3, as OME-TIFF
+  writes it): axes ``t c z y x s``, c = SizeC / SamplesPerPixel, as an RGB
+  OME-TIFF opens.
 - A companion whose bytes are not in the encoding it declares (Prairie View:
   Windows ``µ`` under UTF-8) is read as cp1252, else latin-1, with a
   ``CompanionWarning``; one that is no XML either way is a ``CorruptFileError``.
 - The parsed companion is cached per process (``CORE_CACHE`` companions, by
   path, modification time and size), apart from the pixel caches.
 
-Not yet: companion plates (``Plate`` / ``Well`` / ``WellSample``), RGB
-(``SamplesPerPixel`` > 1), pixels inside the XML (``BinData``), the members as
-separate images (docs/COMPANION.md, "A").
+Not yet: channels of different SamplesPerPixel in one image, pixels inside
+the XML (``BinData``), the members as separate images (docs/COMPANION.md,
+"A"), WellSample positions (the planes' PositionX / Y place the images).
 """
 from __future__ import annotations
 
@@ -51,14 +64,17 @@ import numpy as np
 
 from .._base import File
 from .._errors import CompanionWarning, CorruptFileError, UnsupportedFormatError
-from .._fileset import Members, PlaneImage, keep_fields
+from .._fileset import Members, PlaneImage, keep_fields, missing_warning
 from .._metadata import Metadata, quantity
+from .._plate import Acquisition, Plate, Well, layout, row_label
 from .._spatial import CoordinateSystem
 from .tiff import PLAIN_PAGES
 from ._tiff_metadata import (OME_DEFAULT_LENGTH, STAGE, _children, _local, ome_annotations,
                              ome_image_metadata, ome_plane_position, tiff_metadata)
 
 NAME = "companion"
+#: takes plates=True: a companion that describes a plate reads as one
+PLATES = True
 #: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
 SET_INDEX = True
 
@@ -91,10 +107,13 @@ def sniff(head: bytes, path: str) -> bool:
 class _Series:
     """One OME ``Image`` of a companion: its sizes, plane order and planes."""
 
-    def __init__(self, number: int, element, name: str, sizes: dict, order: str, dtype):
+    def __init__(self, number: int, element, name: str, sizes: dict, order: str, dtype,
+                 samples: int = 1):
         self.number, self.element, self.name = number, element, name
-        #: {"t", "c", "z", "y", "x"} -> size
+        #: {"t", "c", "z", "y", "x"} -> size; "c" counts planes (SizeC / samples)
         self.sizes = sizes
+        #: samples per pixel (3: RGB pages)
+        self.samples = samples
         #: the plane axes, fastest first (DimensionOrder without X Y), e.g. "zct"
         self.order = order
         self.dtype = dtype
@@ -198,18 +217,27 @@ class Core:
             raise CorruptFileError(f"{where}: a Pixels size is not a whole number") from None
         if min(sizes.values()) < 1:
             raise CorruptFileError(f"{where}: a Pixels size below 1 ({sizes})")
-        samples = max([int(c.get("SamplesPerPixel", 1) or 1) for c in _children(p, "Channel")]
-                      or [1])
-        if samples > 1:
-            raise UnsupportedFormatError(f"{where}: RGB images (SamplesPerPixel {samples}) in "
-                                         "a companion are not read yet")
+        try:
+            counts = {int(c.get("SamplesPerPixel", 1) or 1) for c in _children(p, "Channel")}
+        except ValueError:
+            raise CorruptFileError(f"{where}: a SamplesPerPixel is not a whole number") from None
+        if len(counts) > 1:
+            raise UnsupportedFormatError(f"{where}: channels of {sorted(counts)} samples per "
+                                         "pixel in one image are not read")
+        samples = counts.pop() if counts else 1
+        if samples < 1 or sizes["c"] % samples:
+            raise CorruptFileError(f"{where}: SizeC {sizes['c']} is no multiple of its "
+                                   f"SamplesPerPixel {samples}")
+        # OME counts each sample as a channel (SizeC 3 for one RGB Channel); the
+        # planes, and FirstC, count channels of samples
+        sizes["c"] //= samples
         order = (p.get("DimensionOrder") or "XYZCT").upper()
         if order[:2] != "XY" or sorted(order[2:]) != ["C", "T", "Z"]:
             raise CorruptFileError(f"{where}: DimensionOrder {order!r}")
         kind = (p.get("Type") or "").lower()
         dtype = np.dtype(OME_TYPES[kind]) if kind in OME_TYPES else None
         series = _Series(number, element, element.get("Name") or f"image{number}", sizes,
-                         order[2:].lower(), dtype)
+                         order[2:].lower(), dtype, samples)
         for data in _children(p, "TiffData"):
             self._tiffdata(series, data, where)
         return series
@@ -247,6 +275,67 @@ class Core:
             series.planes[plane] = (member, ifd + k)
             self.member_pages.setdefault(member, []).append((series, plane, ifd + k))
 
+    def plates(self) -> list:
+        """The plates the companion describes, in document order: each a dict
+        with its ``name``, ``rows`` / ``columns`` (the layout, ``layout``'s
+        rule), ``acquisitions`` (names, one per ``PlateAcquisition``) and
+        ``places`` {series number: (row, column, acquisition, field)}."""
+        number = {s.element.get("ID"): s.number for s in self.series if s.element.get("ID")}
+        out, placed = [], {}
+        for p, plate in enumerate(e for e in self.root if _local(e.tag) == "Plate"):
+            where = f"{self.path!r} plate {p}"
+            runs = _children(plate, "PlateAcquisition")
+            run_of = {ref.get("ID"): a for a, run in enumerate(runs)
+                      for ref in _children(run, "WellSampleRef")}
+            fields, wells = {}, set()
+            for well in _children(plate, "Well"):
+                try:
+                    rc = (int(well.get("Row")), int(well.get("Column")))
+                except (TypeError, ValueError):
+                    raise CorruptFileError(f"{where}: a Well without a whole-number Row and "
+                                           "Column") from None
+                if min(rc) < 0 or rc in wells:
+                    raise CorruptFileError(f"{where}: well (row, column) {rc} is "
+                                           f"{'listed twice' if rc in wells else 'below 0'}")
+                wells.add(rc)
+                for k, ws in enumerate(_children(well, "WellSample")):
+                    refs = _children(ws, "ImageRef")
+                    if not refs:
+                        continue                  # a field with no image
+                    image = refs[0].get("ID")
+                    if image not in number:
+                        raise CorruptFileError(f"{where}: a WellSample refers to {image!r}, "
+                                               "which the companion does not list")
+                    if image in placed:
+                        raise CorruptFileError(f"{where}: {image!r} is in two WellSamples")
+                    if len(runs) > 1 and ws.get("ID") not in run_of:
+                        raise CorruptFileError(f"{where}: WellSample {ws.get('ID')!r} is in "
+                                               f"none of the plate's {len(runs)} acquisitions")
+                    try:
+                        order = int(ws.get("Index", k))
+                    except ValueError:
+                        raise CorruptFileError(f"{where}: a WellSample Index is not a whole "
+                                               "number") from None
+                    acquisition = run_of.get(ws.get("ID"), 0)
+                    fields.setdefault((rc, acquisition), []).append((order, k, number[image]))
+                    placed[image] = p
+            places = {}
+            for (rc, acquisition), listed in fields.items():
+                for field, (_order, _k, series) in enumerate(sorted(listed)):
+                    places[series] = (*rc, acquisition, field)
+            size = {}
+            for axis, attr in ((0, "Rows"), (1, "Columns")):
+                try:
+                    size[axis] = int(plate.get(attr) or 0)
+                except ValueError:
+                    raise CorruptFileError(f"{where}: Plate {attr} is not a whole number") from None
+                size[axis] = size[axis] or max([rc[axis] + 1 for rc in wells] + [1])
+            out.append({"name": plate.get("Name") or "", "rows": size[0], "columns": size[1],
+                        "wells": wells,
+                        "acquisitions": [run.get("Name") or "" for run in runs],
+                        "places": places})
+        return out
+
     def _resolve(self, name: str) -> str:
         """A member path: as written, relative to the companion; an absolute
         path that does not exist falls back to its name in this folder."""
@@ -280,14 +369,14 @@ class Core:
                 told.append(f"it points to the companion {points_to}, this one is {self.uuid}")
             raise CorruptFileError(f"{path!r} is not part of the set {self.path!r} "
                                    f"describes: {'; '.join(told)}")
-        from .._fileset import _page
+        from .._fileset import _page, _yx
         for series, _plane, ifd in self.member_pages.get(path, ()):
-            image, _k = _page(member, ifd, path)
+            image, _k = _page(member, ifd, path, series.samples)
             want = (series.sizes["y"], series.sizes["x"])
-            if tuple(image.shape[-2:]) != want or (series.dtype is not None
-                                                   and image.dtype != series.dtype):
+            got = _yx(image, image.shape)
+            if got != want or (series.dtype is not None and image.dtype != series.dtype):
                 raise CorruptFileError(
-                    f"{path!r} page {ifd}: {image.shape[-2]} x {image.shape[-1]} "
+                    f"{path!r} page {ifd}: {got[0]} x {got[1]} "
                     f"{image.dtype}, the companion {self.path!r} expects {want[0]} x {want[1]} "
                     f"{series.dtype}")
 
@@ -519,8 +608,12 @@ class _CompanionFile(File):
     def _declare_coordinate_systems(self):
         return (CoordinateSystem(STAGE),)        # every Plane position (plan 4.6)
 
-    def __init__(self, path: str):
-        core = load(path)
+    def __init__(self, path: str, plates: bool = False, *, companion: str = None,
+                 plan: list = None):
+        """*path* (``File.path``) reads the companion file *companion* (default:
+        *path*); *plan*: the plates as ``Core.plates`` gives them, from a backend
+        that knows them from elsewhere (ScanR: backends/scanr.py)."""
+        core = load(companion or path)
         if core.moved:
             written, used = core.moved[0]
             warnings.warn(CompanionWarning(
@@ -530,29 +623,68 @@ class _CompanionFile(File):
         self._members = Members(limit=OPEN_MEMBERS, pages=True, check=core.check_member)
         images = []
         try:
+            held, tally = [], {}                # (series, its planes) with files
             for s in core.series:
                 wanted = [s.place(i) for i in range(s.n_planes)]
                 try:
-                    kept = keep_fields({s.number: s.planes}, wanted, f"{path} image {s.number}")
+                    kept = keep_fields({s.number: s.planes}, wanted, path, tally)
                 except CorruptFileError:
                     continue                    # none of its files: left out (warned)
-                planes = kept[s.number]
+                held.append((s, kept[s.number]))
+            missing_warning(tally, path)        # one warning for all images
+            if not held:
+                raise CorruptFileError(f"{path!r}: none of its images has any of its files")
+            index, found = (_plate_index(core, [s for s, _ in held], plan) if plates
+                            else ({}, []))
+            held.sort(key=lambda h: (h[0].number not in index,
+                                     tuple(index.get(h[0].number, {}).values()), h[0].number))
+            for s, planes in held:
                 member, ifd = next(iter(planes.values()))
-                dtype, unit, shape_yx = self._members.page_info(member, ifd)
+                dtype, unit, shape_yx = self._members.page_info(member, ifd, s.samples)
                 shape = (s.sizes["t"], s.sizes["c"], s.sizes["z"]) + tuple(shape_yx)
                 images.append(_CompanionImage(
                     self._members, len(images), planes, shape, dtype, s.name, unit,
-                    {"series": s.number}, core=core, series=s))
-            if not images:
-                raise CorruptFileError(f"{path!r}: none of its images has any of its files")
+                    index.get(s.number, {"series": s.number}), core=core, series=s,
+                    samples=s.samples))
         except BaseException:
             self._members.close()
             raise
-        super().__init__(path, images)
+        super().__init__(path, images, plates=found)
 
     def close(self) -> None:
         super().close()
         self._members.close()
+
+
+def _plate_index(core: Core, held, plan: list = None) -> tuple:
+    """({series number: its plate index}, [Plate]) of the series *held* (those
+    with files): plates, wells and acquisitions are those that hold one,
+    numbered anew in order (wells by row, then column; acquisitions in the
+    companion's order -- CQ1 lists one per planned well, most without files);
+    fields keep the companion's numbers.  *plan*: the plates (``Core.plates``' form) when
+    they come from elsewhere than the companion."""
+    plates = core.plates() if plan is None else plan
+    numbers = {s.number for s in held}
+    index, found = {}, []
+    for plate in plates:
+        mine = {n: at for n, at in plate["places"].items() if n in numbers}
+        if not mine:
+            continue
+        wells = sorted({at[:2] for at in mine.values()})
+        well = {rc: w for w, rc in enumerate(wells)}
+        runs = sorted({at[2] for at in mine.values()})
+        run = {a: k for k, a in enumerate(runs)}
+        p = len(found)
+        for n, (r, c, acquisition, field) in mine.items():
+            index[n] = {"plate": p, "acquisition": run[acquisition], "well": well[(r, c)],
+                        "field": field}
+        row_names, column_names = layout(plate["rows"], plate["columns"], plate["wells"],
+                                         f"{core.path} plate {plate['name'] or p}")
+        found.append(Plate(name=plate["name"], row_names=row_names, column_names=column_names,
+                           wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells),
+                           acquisitions=tuple(Acquisition(run[a], plate["acquisitions"][a])
+                                              for a in runs if a < len(plate["acquisitions"]))))
+    return index, found
 
 
 # -- CO-2: one member file, its metadata from its companion ----------------------
@@ -718,7 +850,7 @@ def _misfit(tif, core: Core, key: str):
         if page is None:
             return f"lists its page {ifd}, which it does not have"
         if ((page.imagelength, page.imagewidth) != (s.sizes["y"], s.sizes["x"])
-                or page.samplesperpixel != 1
+                or page.samplesperpixel != s.samples
                 or (s.dtype is not None and np.dtype(page.dtype) != s.dtype)):
             return "describes it with another size or pixel type"
     return None
@@ -778,10 +910,12 @@ def _member_file(path: str, tif, core: Core, key: str, where: str):
             start = (ts[0], cs[0], zs[0])
             planes = {(t - ts[0], c - cs[0], z - zs[0]): (path, ifd)
                       for (t, c, z), ifd in mine.items()}
-            dtype, unit, shape_yx = members.page_info(path, next(iter(planes.values()))[1])
+            dtype, unit, shape_yx = members.page_info(path, next(iter(planes.values()))[1],
+                                                      s.samples)
             image = _MemberImage(members, len(images), planes,
                                  tuple(len(r) for r in spans) + tuple(shape_yx), dtype, s.name,
-                                 unit, {"series": len(images)}, core=core, series=s, start=start)
+                                 unit, {"series": len(images)}, core=core, series=s, start=start,
+                                 samples=s.samples)
             meta = image.metadata
             drop = "".join(a for a, n, explicit in (
                 ("t", len(spans[0]), "t" in meta.pixel_sizes),
@@ -794,7 +928,9 @@ def _member_file(path: str, tif, core: Core, key: str, where: str):
     return _MemberFile(path, images, members, where)
 
 
-def open(path: str, tiles: str = "separate", resolutions: str = "base") -> _CompanionFile:  # noqa: A001 - backend protocol
+def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa: A001 - backend protocol
+         plates: bool = False) -> _CompanionFile:
     """The images of an OME companion file (*tiles* and *resolutions* change
-    nothing: members are plain pages, without tiles or pyramids)."""
-    return _CompanionFile(path)
+    nothing: members are plain pages, without tiles or pyramids); *plates*:
+    a companion that describes a plate reads as one."""
+    return _CompanionFile(path, plates)

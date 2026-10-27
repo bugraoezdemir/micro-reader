@@ -236,6 +236,8 @@ OTHER_INDICES = tuple(n for n in INDEX_NAMES if n not in ("series", "resolution"
 RENAMES = True
 #: this backend can open one file of a multi-file OME-TIFF alone (open(..., multifile=False))
 MULTIFILE = True
+#: takes plates=True: an OME-TIFF whose OME-XML describes a plate reads as one
+PLATES = True
 
 
 #: series kinds whose ``R`` is a stage position (a series, as Bio-Formats lists
@@ -1371,8 +1373,30 @@ def pages_file(tif, path: str) -> _TiffFile:
     return file
 
 
+def _ome_plate(tif, path: str):
+    """``plates=True`` on an OME-TIFF holding its own OME-XML with a ``Plate``
+    (CQ1's ``MeasurementResult.ome.tif``): the file read as the companion it is
+    (backends/companion.py: plates, wells, fields), when that reader can read
+    it -- every plane names its file; else None, and it reads as before, without
+    a plate.  Takes over *tif* (closed) when it returns the file."""
+    if tif.is_micromanager or "<Plate" not in (tif.ome_metadata or ""):
+        return None
+    from . import companion as ome_set
+    try:
+        core = ome_set.load(path)
+    except (CorruptFileError, UnsupportedFormatError):
+        return None                     # planes without file names: no companion route
+    if not any(plate["places"] for plate in core.plates()):
+        return None
+    tif.close()
+    found = ome_set._CompanionFile(path, plates=True)
+    found.backend, found.format = NAME, "ome-tiff"
+    return found
+
+
 def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa: A001 - backend protocol
-         rename: dict = None, companion: bool = True, multifile: bool = True) -> _TiffFile:
+         rename: dict = None, companion: bool = True, multifile: bool = True,
+         plates: bool = False) -> _TiffFile:
     try:
         import tifffile
     except ImportError as exc:
@@ -1380,10 +1404,10 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa:
             "reading TIFF needs tifffile, a dependency of micro-reader: pip install tifffile") from exc
     with _truncation_guard(path) as guard:
         tif = guard.tif = tifffile.TiffFile(path)
-        return _open(tif, path, tiles, resolutions, rename, companion, multifile)
+        return _open(tif, path, tiles, resolutions, rename, companion, multifile, plates)
 
 
-def _open(tif, path, tiles, resolutions, rename, companion, multifile) -> _TiffFile:
+def _open(tif, path, tiles, resolutions, rename, companion, multifile, plates=False) -> _TiffFile:
     """``open`` of an open *tif*; closes it on error."""
     try:
         _check_complete(tif, path)
@@ -1405,6 +1429,9 @@ def _open(tif, path, tiles, resolutions, rename, companion, multifile) -> _TiffF
                 view = companion.single_file_view(path, tif)
             if view is not None:
                 return view
+            plate = _ome_plate(tif, path) if plates and multifile else None
+            if plate is not None:
+                return plate
         first = tif.pages[0]
         if first.description.startswith("[ImarisDataSet]") and first.subfiletype & 1:
             # Imaris 3 (.ims before the HDF5 format): an RGB thumbnail (a reduced image),
@@ -1417,12 +1444,14 @@ def _open(tif, path, tiles, resolutions, rename, companion, multifile) -> _TiffF
         if first.tags.get(65200) is not None and (path.lower().endswith(".flex") or len(tif.pages) > 1):
             # PerkinElmer Opera Flex (the FlexXML tag, several pages): its pages are the fields,
             # time points and channels of a well, which only that XML orders; read as a plain
-            # TIFF they would be loose pages (decided 2026-10-18: refuse until a Flex backend
-            # exists).  Harmony and Columbus planes carry the tag too, one plane per file:
-            # those are plain TIFFs (the members of their plates)
+            # TIFF they would be loose pages.  The flex backend reads files named .flex (it
+            # comes first); one renamed, or opened with backend="tiff", ends here.  Harmony
+            # and Columbus planes carry the tag too, one plane per file: those are plain TIFFs
+            # (the members of their plates)
             raise UnsupportedFormatError(
-                f"{path!r}: PerkinElmer Opera Flex file (a TIFF with a FlexXML tag) is not "
-                "supported yet")
+                f"{path!r}: PerkinElmer Opera Flex file (a TIFF with a FlexXML tag): the flex "
+                "backend reads it as a plate when it is named .flex (micro_reader.open(path, "
+                "backend='flex'))")
         series = list(tif.series)
         if tif.is_lsm:
             # Zeiss LSM stores a small RGB preview of every plane (reduced

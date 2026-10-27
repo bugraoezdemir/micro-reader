@@ -66,7 +66,7 @@ def test_a_zeiss_plate_is_read_as_one_with_plates_true(tmp_path):
     data = _write(path, SCENES, _plate_xml(SCENES))
     with micro_reader.open(path, plates=True) as f:
         (plate,) = f.plates
-        assert plate.rows == tuple("ABCDEFGH") and plate.columns == tuple(str(c) for c in range(1, 13))
+        assert plate.row_names == tuple("ABCDEFGH") and plate.column_names == tuple(str(c) for c in range(1, 13))
         assert plate.wells == (micro_reader.Well(1, 1, "B2"), micro_reader.Well(2, 4, "C5"))
         # wells in row-column order, a well's scenes are its fields in series order
         assert f.indices == [{**ONE, "well": 0, "field": 0}, {**ONE, "well": 0, "field": 1},
@@ -294,6 +294,49 @@ def test_select_by_well_name_row_and_column(tmp_path):
         assert f.select(well="B2", field=range(1, 5)) == [f.images[1]]
 
 
+def test_select_takes_each_place_by_position_and_by_name(tmp_path):
+    # the keywords are ozp's table columns: plate / plate_name, well / well_name, row /
+    # row_name, column / column_name, acquisition / acquisition_name
+    path = str(tmp_path / "plate.czi")
+    _write(path, WELLS, _plate_xml(WELLS))
+    with micro_reader.open(path, plates=True) as f:
+        plate = f.plates[0]
+        assert f.select(well_name="B2") == f.select(well="B2") == f.images[:2]
+        assert f.select(well_name=["B2", "D7"]) == f.select(well=["B2", "D7"])
+        assert f.select(row_name="C") == f.select(row=2) == f.select(well_name="C5")
+        assert f.select(column_name="5", row_name=["B", "C"]) == f.select(well="C5")
+        assert f.select(plate_name=plate.name) == f.select(plate=0) == f.images
+        assert f.select(plate=plate.name) == f.images         # a name on a position keyword
+        assert f.select(plate_name="no such plate") == []
+        c5 = plate.well_index("C5")
+        assert f.select(well=[c5, "B2"]) == f.images[:3]       # any of: a place or a name
+        assert f.select(acquisition_name="run 2") == []        # no acquisitions recorded
+        with pytest.raises(TypeError, match=r"well_name=\.\.\.\): a name, not 3; for a 0-based "
+                                            r"position, well=3"):
+            f.select(well_name=3)
+        with pytest.raises(TypeError, match="not both"):
+            f.select(well_name="B2", row_name="B")
+        with pytest.raises(KeyError, match="row_name"):          # the error lists them
+            f.select(well_nam="B2")
+
+
+def test_select_takes_slices_of_positions(tmp_path):
+    path = str(tmp_path / "plate.czi")
+    _write(path, WELLS, _plate_xml(WELLS))
+    with micro_reader.open(path, plates=True) as f:
+        assert f.select(well=slice(0, 2)) == f.select(well=range(0, 2))
+        assert f.select(row=slice(2, None)) == f.select(row=["C", "D"])   # open-ended
+        assert f.select(column=slice(0, 5, 2)) == f.select(column=[0, 2, 4])
+        assert f.select(field=slice(1, None)) == [f.images[1]]
+        assert f.plates[0].wells[0].fields[0].select(field=slice(0, 1)).images
+        with pytest.raises(ValueError, match="no negative bounds"):
+            f.select(well=slice(-1, None))
+        with pytest.raises(ValueError, match="step is a whole number from 1"):
+            f.select(row=slice(0, 4, 0))
+        with pytest.raises(TypeError, match="a name, not"):
+            f.select(row_name=slice(0, 2))
+
+
 def test_select_refuses_what_is_no_index_value(tmp_path):
     path = str(tmp_path / "plate.czi")
     _write(path, WELLS, _plate_xml(WELLS))
@@ -308,3 +351,66 @@ def test_select_refuses_what_is_no_index_value(tmp_path):
     with micro_reader.open(path) as f:                  # no plates=True: no plates
         with pytest.raises(ValueError, match="plates=True"):
             f.select(row="B")
+
+
+# -- containment: kind, parent, downward accessors, row / column slicers (C-19) -------
+
+def test_each_level_knows_its_kind_and_parent(tmp_path):
+    path = str(tmp_path / "plate.czi")
+    _write(path, WELLS, _plate_xml(WELLS))
+    with micro_reader.open(path, plates=True) as f:
+        plate = f.plates[0]
+        well = plate.wells[0]
+        field = well.fields[0]
+        assert (f.kind, plate.kind, well.kind, field.kind) == ("file", "plate", "well", "field")
+        assert field.parent is well and well.parent is plate and plate.parent is f
+        assert f.parent is None
+
+
+def test_accessors_go_down_only(tmp_path):
+    path = str(tmp_path / "plate.czi")
+    _write(path, WELLS, _plate_xml(WELLS))
+    with micro_reader.open(path, plates=True) as f:
+        plate = f.plates[0]
+        well = plate.wells[0]
+        with pytest.raises(AttributeError, match="a plate holds no plates.*holds .wells"):
+            plate.plates
+        with pytest.raises(AttributeError, match=r"a well holds no wells .*\.parent"):
+            well.wells
+        with pytest.raises(AttributeError, match="a field holds no fields"):
+            well.fields[0].fields
+        with pytest.raises(AttributeError, match=r"f\.plates\[p\]\.wells"):
+            f.wells
+        with pytest.raises(AttributeError, match="no attribute 'nothing'"):
+            plate.nothing
+
+
+def test_rows_and_columns_slice_a_plate_as_select_does(tmp_path):
+    path = str(tmp_path / "plate.czi")
+    _write(path, WELLS, _plate_xml(WELLS))
+    with micro_reader.open(path, plates=True) as f:
+        plate = f.plates[0]
+
+        def images(part):
+            return [i for w in part.wells for fl in w.fields for i in fl.images]
+
+        part = plate.rows[1:3]                                   # rows B and C
+        assert part.kind == "plate" and part.is_part and not plate.is_part
+        assert [w.name for w in part.wells] == ["B2", "C5"]
+        assert images(part) == f.select(row=slice(1, 3))
+        both = plate.rows[1:4].columns[1:5]                      # either order
+        assert [w.name for w in both.wells] == [w.name for w in plate.columns[1:5].rows[1:4].wells]
+        assert images(both) == f.select(row=slice(1, 4), column=slice(1, 5))
+        assert [w.name for w in plate.rows["D"].wells] == ["D7"]
+        assert [w.name for w in plate.rows[["B", 3]].wells] == ["B2", "D7"]
+        assert [w.name for w in plate.columns[-8:].wells] == ["C5", "D7"]   # from the end
+        assert plate.rows[1:3].rows[2].wells[0].name == "C5"   # positions of the whole plate
+        assert part.row_names == plate.row_names                 # the layout stays
+        assert part.well_index("C5") == plate.well_index("C5")  # the index its images carry
+        assert part.parent is f and len(plate.rows) == 8
+        with pytest.raises(TypeError, match="row_names"):
+            list(plate.rows)
+        with pytest.raises(KeyError, match="no row 'Z'"):
+            plate.rows["Z"]
+        with pytest.raises(IndexError):
+            plate.rows[8]

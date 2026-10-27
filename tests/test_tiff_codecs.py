@@ -142,7 +142,7 @@ def test_own_codec_matches_tifffile(files, name, decode_threads):
     _, _, codec, tolerance = CASES[name]
     with tifffile.TiffFile(path) as tf:
         ref = tf.series[0].asarray()
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         assert series._codec == codec                    # decoded by micro-reader, not tifffile
         assert series.shape == ref.shape and series.dtype == ref.dtype
@@ -160,10 +160,10 @@ def test_reference_path_agrees(files, name, monkeypatch):
         pytest.skip("native module not installed")
     path = _path(files, name)
     tolerance = CASES[name][3]
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         native = img.images[0][...]
     monkeypatch.setattr(_codecs, "_native", None)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         _compare(img.images[0][...], native, tolerance, name)
 
 
@@ -208,7 +208,7 @@ def test_jpeg_tables_are_joined(tmp_path, photometric, shape):
     with tifffile.TiffFile(path) as tf:
         assert tf.pages[0].jpegtables == tables        # the case under test
         ref = tf.asarray()
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         assert series._codec == "jpeg"
         _compare(series[...], ref, 3, photometric)
@@ -223,7 +223,7 @@ def test_other_compressions_go_to_tifffile(tmp_path):
         tifffile.imwrite(path, data, compression="lerc", **TILES)
     except Exception as exc:                            # noqa: BLE001
         pytest.skip(f"no LERC encoder: {exc}")
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         assert series._codec is None
         np.testing.assert_array_equal(series[...], tifffile.imread(path))
@@ -238,7 +238,7 @@ def test_missing_imagecodecs_is_explained(tmp_path, monkeypatch):
         tifffile.imwrite(path, data, compression="lerc", **TILES)
     except Exception as exc:                            # noqa: BLE001
         pytest.skip(f"no LERC encoder: {exc}")
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
 
         def fail(*args, **kwargs):
@@ -275,7 +275,7 @@ def test_packed_depths_and_fill_order(tmp_path, bits, dtype, byteorder, compress
     if bits % 8 == 0 and bits == 8 * np.dtype(dtype).itemsize and fillorder == 1:
         pytest.skip("plain whole-byte samples: covered elsewhere")
     path, data = _packed_case(tmp_path, bits, dtype, byteorder, compression, fillorder, 1)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         assert series._codec is not None                  # decoded by micro-reader
         for key in _keys(data.shape):
@@ -293,7 +293,7 @@ def test_packed_depths_and_fill_order(tmp_path, bits, dtype, byteorder, compress
 def test_packed_rgb(tmp_path, bits, dtype):
     """Colour samples are packed together along the row."""
     path, data = _packed_case(tmp_path, bits, dtype, "<", 8, 1, 3)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         np.testing.assert_array_equal(img.images[0][...], data)
     np.testing.assert_array_equal(tifffile.imread(path), data)
 
@@ -303,7 +303,7 @@ def test_packed_reference_path(tmp_path, bits, dtype, monkeypatch):
     """Without the native module, numpy unpacks the same samples."""
     path, data = _packed_case(tmp_path, bits, dtype, ">", 5, 2, 1)
     monkeypatch.setattr(_codecs, "_native", None)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         np.testing.assert_array_equal(img.images[0][...], data)
 
 
@@ -326,6 +326,12 @@ def test_unpack_bits_native_matches_reference():
 
 from _eer import eer_encode, random_events  # noqa: E402
 from _tiff_writer import write_pages  # noqa: E402
+
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
 
 EER_META = b"<metadata><item key='sensorPixelSize.width'>1.0</item></metadata>"
 # name -> (compression, skip, horizontal, vertical bits, extra tags)
@@ -362,7 +368,7 @@ def test_eer_movies(tmp_path, name, bits, decode_threads):
     with tifffile.TiffFile(path) as tf:
         dtype, shape = tf.series[0].dtype, tf.series[0].shape
     ref = truth.astype(dtype)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         assert series._codec == "eer" and series.dtype == dtype and series.shape == shape
         for key in _keys(ref.shape):
@@ -375,14 +381,14 @@ def test_eer_without_imagecodecs(tmp_path, monkeypatch):
         pytest.skip("native module not installed")
     path, truth = _eer_movie(tmp_path, "eer_65001_skip7")
     monkeypatch.setitem(sys.modules, "imagecodecs", None)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         np.testing.assert_array_equal(img.images[0][...].astype(np.uint8), truth)
 
 
 def test_eer_reference_path(tmp_path, monkeypatch):
     path, truth = _eer_movie(tmp_path, "eer_65002_v2_tags", bits=8)
     monkeypatch.setattr(_codecs, "_native", None)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         np.testing.assert_array_equal(img.images[0][...], truth)
 
 
@@ -390,7 +396,7 @@ def test_eer_codes_without_eer_metadata_are_not_claimed(tmp_path):
     """Compression 65000-65002 without Falcon's metadata tag is not EER
     (a private code range): left to tifffile, as tifffile leaves it."""
     path, _ = _eer_movie(tmp_path, "eer_65001_skip7", metadata=False)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert img.images[0]._codec is None
         with pytest.raises(Exception):
             img.images[0][0]
@@ -404,7 +410,7 @@ def test_corrupt_eer_frame_raises(tmp_path):
     with open(path, "r+b") as fh:                   # a huge skip: events beyond the image
         fh.seek(offset)
         fh.write(b"\x7e" * count)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         img.images[0][0]                              # frame 0 intact
         with pytest.raises(CorruptFileError, match="EER"):
             img.images[0][1]

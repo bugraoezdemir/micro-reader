@@ -16,6 +16,12 @@ from micro_reader.backends import nd2 as nd2_backend
 
 from _nd2_writer import write_nd2
 
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
+
 try:
     import nd2 as nd2lib
 except ImportError:                   # the cross-check is optional
@@ -102,7 +108,7 @@ def decode_threads(request):
 @pytest.mark.parametrize("name", list(CASES))
 def test_matches_known_data(tmp_path, name, decode_threads):
     path, expected = _write(tmp_path, name)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert img.backend == "nd2"
         assert len(img.images) == len(expected)
         for series, ref in zip(img.images, expected):
@@ -148,7 +154,7 @@ def test_uncompressed_reads_only_the_rows_asked_for(tmp_path, monkeypatch):
     # the exact path: no skipped columns are read (see test_*_spans for merged rows)
     monkeypatch.setattr(nd2_backend, "SEPARATE_READ_BYTES", 0)
     path, expected = _write(tmp_path, "z_rgb_padded")
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         assert series.read_unit is None
         np.testing.assert_array_equal(series[0, 0, 2, 10:14], expected[0][0, 0, 2, 10:14])
@@ -160,7 +166,7 @@ def test_uncompressed_reads_only_the_rows_asked_for(tmp_path, monkeypatch):
 
 def test_lossless_frames_decoded_once(tmp_path):
     path, expected = _write(tmp_path, "lossless")
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         assert series.read_unit == (1, 2, 1, 37, 53)
         series[0, 0, 1, 0:5, 0:5]
@@ -174,7 +180,7 @@ def test_legacy_nd2_is_refused(tmp_path):
     with open(path, "wb") as fh:
         fh.write(struct.pack("<I", 0x0C000000) + b"\x00" * 200)
     with pytest.raises((UnsupportedFormatError, MicroReaderError)):
-        micro_reader.open(path, backend="nd2")
+        _native(path, backend="nd2")
 
 
 def test_truncated_file_is_refused(tmp_path):
@@ -182,12 +188,12 @@ def test_truncated_file_is_refused(tmp_path):
     with open(path, "r+b") as fh:
         fh.truncate(os.path.getsize(path) - 100)
     with pytest.raises(MicroReaderError):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_close_releases_the_file(tmp_path, decode_threads):
     path, _ = _write(tmp_path, "lossless")
-    img = micro_reader.open(path)
+    img = _native(path)
     img.images[0][...]
     img.close()
     os.remove(path)
@@ -198,7 +204,7 @@ def test_close_releases_the_file(tmp_path, decode_threads):
 def test_concurrent_reads(tmp_path, decode_threads):
     path, expected = _write(tmp_path, "t_p_z")
     errors = []
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         def worker(i):
             try:
                 for p, (series, ref) in enumerate(zip(img.images, expected)):
@@ -220,7 +226,7 @@ def test_uncompressed_narrow_reads_merge_rows(tmp_path):
     """Narrow columns: the few skipped bytes per row cost less than one read per row,
     so whole rows are read (as in LIF); pixels stay exact."""
     path, expected = _write(tmp_path, "z_rgb_padded")
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         np.testing.assert_array_equal(series[0, 0, 2, 10:14, 5:9], expected[0][0, 0, 2, 10:14, 5:9])
         assert series.stats.pixels_read == 4 * 53 * 3                 # 4 whole rows
@@ -248,7 +254,7 @@ def test_positions_are_in_the_stage_system(tmp_path, metadata_reads):
     from micro_reader._spatial import check_invariants
     path = str(tmp_path / "a.nd2")
     write_nd2(path, _frames(3, channels=1), [("P", 3)], picture=CAMERA_TURNED)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert [s.id for s in f.coordinate_systems] == ["stage"]
         assert f.coordinate_systems[0].axes is None and f.coordinate_transformations == ()
         assert metadata_reads[0] == 0                       # declared without metadata
@@ -269,7 +275,7 @@ def test_files_without_a_position_declare_no_system(tmp_path, picture, metadata_
     if picture is not None and "dStgLgCT11" not in picture:
         picture = dict(CAMERA_TURNED, **picture)
     write_nd2(path, _frames(2, channels=1), [("P", 2)], picture=picture)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.coordinate_systems == ()
         assert metadata_reads[0] == 0
         check_invariants(f)
@@ -283,7 +289,7 @@ def test_legacy_nd2_declares_no_system(tmp_path):
     from micro_reader._spatial import check_invariants
     path = str(tmp_path / "old.nd2")
     write_legacy_nd2(path, np.zeros((2, 1, 8, 10), np.uint16), [("P", 2)])
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.backend == "nd2" and f.coordinate_systems == ()
         check_invariants(f)
         assert all(image.metadata.position == {} and image.metadata.coordinate_system is None
@@ -293,3 +299,79 @@ def test_legacy_nd2_declares_no_system(tmp_path):
 def test_nd2_is_checked_strictly_by_the_session():
     import conftest
     assert "nd2" not in conftest.POSITIONS_WITHOUT_A_SYSTEM
+
+
+# -- XY points named after wells: plates=True ---------------------------------------
+
+def _named_points(tmp_path, names, valid=None):
+    path = str(tmp_path / "plate.nd2")
+    n = len(names) if valid is None else sum(valid)
+    frames = np.arange(n * 6 * 8, dtype=np.uint16).reshape(n, 6, 8, 1, 1)
+    write_nd2(path, frames, [("P", n)], point_names=names, valid_positions=valid)
+    return path, frames
+
+
+def test_points_named_after_wells_read_as_a_plate(tmp_path):
+    # NIS-Elements JOBS names: well, then a counter; wells out of order
+    names = ["B03_0000", "B02_0000", "B02_0001", "B03_0001", "C02_0000"]
+    path, frames = _named_points(tmp_path, names)
+    with micro_reader.open(path, plates=True) as f:
+        (plate,) = f.plates
+        assert plate.name == "plate"
+        assert (len(plate.row_names), len(plate.column_names)) == (3, 4)   # the smallest: 12-well
+        assert [(w.name, [x.index for x in w.fields]) for w in plate.wells] == [
+            ("B2", [0, 1]), ("B3", [0, 1]), ("C2", [0])]
+        # fields in acquisition order; images stay in the file's order
+        assert [(im.index["well"], im.index["field"]) for im in f.images] == [
+            (1, 0), (0, 0), (0, 1), (1, 1), (2, 0)]
+        np.testing.assert_array_equal(plate.wells[0].fields[1].image[0, 0, 0], frames[2, ..., 0, 0])
+    with micro_reader.open(path) as f:                         # without plates=True: as before
+        assert f.plates == [] and f.images[0].index == {"series": 0}
+
+
+@pytest.mark.parametrize("names, rows", [(["E8.1", "E8.2", "D5.1"], 6),    # 48-well
+                                          (["A10_0000", "H12_0000"], 8)])  # 96-well
+def test_other_nis_point_names(tmp_path, names, rows):
+    path, _frames = _named_points(tmp_path, names)
+    with micro_reader.open(path, plates=True) as f:
+        assert len(f.plates[0].row_names) == rows
+
+
+@pytest.mark.parametrize("names", [["P1", "P2"], ["A1", "A2"], ["B02_0000", "p1"],
+                                   ["Position 1", "Position 2"]])
+def test_points_that_are_not_all_wells_stay_positions(tmp_path, names):
+    """A bare 'P1' or 'A1' names a position as often as a well: NIS-Elements'
+    well points carry a counter or a zero-padded column; one point that is no
+    well keeps the whole file as positions."""
+    path, _frames = _named_points(tmp_path, names)
+    with micro_reader.open(path, plates=True) as f:
+        assert f.plates == [] and f.images[0].index == {"series": 0}
+
+
+def test_only_the_valid_points_are_wells(tmp_path):
+    path, _frames = _named_points(tmp_path, ["A01_0000", "B01_0000", "C01_0000"],
+                                  valid=[1, 0, 1])
+    with micro_reader.open(path, plates=True) as f:
+        assert [w.name for w in f.plates[0].wells] == ["A1", "C1"]
+
+
+ND2_PLATES = os.path.join(os.environ.get("MICROSCOPY_DATA",
+                                         os.path.expanduser("~/Desktop/data/microscopy")),
+                          "plates", "nd2", "zenodo-21162526")
+
+
+@pytest.mark.parametrize("name, wells, fields", [
+    ("nested_loop", 24, [1] * 24),          # A10_0000 ...: one point per well
+    ("nd2jobs", 3, [4, 4, 4]),              # B02_0000 .. B02_0003: JOBS
+    ("NDacquisition", 2, [2, 3]),           # E8.1 ..: ND acquisition (D5: 2, E8: 3)
+])
+def test_zenodo_21162526_point_names_make_plates(name, wells, fields):
+    """Zenodo 21162526 (CC BY 4.0): NIS-Elements files whose XY points are
+    named after wells in three conventions; the files name no plate format."""
+    path = os.path.join(ND2_PLATES, f"{name}.nd2")
+    if not os.path.exists(path):
+        pytest.skip(f"sample not found: {path} (set MICROSCOPY_DATA)")
+    with micro_reader.open(path, plates=True) as f:
+        (plate,) = f.plates
+        assert len(plate.wells) == wells
+        assert [len(w.fields) for w in plate.wells] == fields

@@ -15,7 +15,13 @@ from micro_reader import (CompositeWarning, CorruptFileError, UnsupportedFormatE
 from micro_reader.backends import vsi  # noqa: E402
 
 from _vsi_writer import (C, LAMBDA, T, Z, channel, image_volume, write_ets,  # noqa: E402
+
                          write_vsi)
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
 
 
 def _levels(shape, n, dtype=np.uint16, seed=0, rgb=False):
@@ -43,7 +49,7 @@ def _simple(tmp_path, levels, **volume):
 def test_a_2d_pyramid(tmp_path):
     levels = _levels((45, 70), 3)
     path = _simple(tmp_path, levels)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.backend == "vsi" and f.format == "vsi"
         assert [im.name for im in f.images] == ["scan", "macro"]
         im = f.images[0]
@@ -70,7 +76,7 @@ def test_z_channels_and_time(tmp_path):
     vol = image_volume(3, (21, 37), name="fl", dims=[(C, None, None), (T, 2.5, "10^-3s^1"),
                                                      (Z, -1.5, "10^-6m^1")], channels=chans)
     path = write_vsi(tmp_path, "a", [vol], {3: {"levels": levels, "tile": (8, 16)}})
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         im = f.images[0]
         assert [i.name for i in f.images] == ["fl"]               # no macro page
         assert im.shape == (2, 3, 4, 21, 37)
@@ -91,7 +97,7 @@ def test_z_channels_and_time(tmp_path):
 def test_a_single_channel_takes_the_stacks_name(tmp_path):
     levels = _levels((20, 30), 1)
     path = _simple(tmp_path, levels, stack_channel="SR488")
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert [c.name for c in f.images[0].metadata.channels] == ["SR488"]
 
 
@@ -99,7 +105,7 @@ def test_rgb_png_tiles(tmp_path):
     levels = _levels((33, 50), 2, dtype=np.uint8, rgb=True)
     path = write_vsi(tmp_path, "a", [image_volume(1, (33, 50), name="bf")],
                      {1: {"levels": levels, "compression": 8, "rgb": True}})
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         im = f.images[0]
         assert im.axes == "tczyxs" and im.shape == (1, 1, 1, 33, 50, 3)
         np.testing.assert_array_equal(im[0, 0, 0], levels[0])
@@ -113,7 +119,7 @@ def test_a_missing_tile_reads_as_zeros(tmp_path):
                      {1: {"levels": levels, "missing": {(0, 1, 1)}}})
     expected = levels[0].copy()
     expected[16:32, 16:32] = 0
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         np.testing.assert_array_equal(f.images[0][0, 0, 0], expected)
 
 
@@ -128,7 +134,7 @@ def test_series_follow_bio_formats(tmp_path):
                image_volume(10002, (40, 60), name="20x_BF_01")]
     path = write_vsi(tmp_path, "a", volumes, {10002: {"levels": scan}, 1: {"levels": lab},
                                                10000: {"levels": ov}}, macro=_macro())
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert [im.name for im in f.images] == ["label", "overview", "20x_BF_01", "macro"]
         assert [len(im.resolutions) for im in f.images] == [1, 2, 3, 1]
         for im, data in zip(f.images, (lab, ov, scan)):
@@ -143,7 +149,7 @@ def test_volumes_pair_by_stack_id_then_by_size(tmp_path):
     # folder 9 names its volume; folder 5 takes the first fitting unclaimed one
     path = write_vsi(tmp_path, "a", volumes, {9: {"levels": b}, 5: {"levels": a},
                                                6: {"levels": c}})
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert [im.name for im in f.images] == ["four", "big", "nine"]
         np.testing.assert_array_equal(f.images[2][0, 0, 0], b[0])
 
@@ -153,7 +159,7 @@ def test_an_ets_matching_no_volume_is_left_out(tmp_path):
     path = write_vsi(tmp_path, "a", [image_volume(1, (20, 30), name="x")],
                      {1: {"levels": levels}, 2: {"levels": _levels((90, 90), 1)}})
     with pytest.warns(CompositeWarning, match="matches no image"):
-        f = micro_reader.open(path)
+        f = _native(path)
     with f:
         assert [im.name for im in f.images] == ["x"]
 
@@ -162,11 +168,11 @@ def test_unsupported_dimensions_are_refused(tmp_path):
     vol = image_volume(1, (20, 30), dims=[(LAMBDA, None, None)])
     path = write_vsi(tmp_path, "a", [vol], {1: {"levels": _levels((2, 20, 30), 1)}})
     with pytest.raises(UnsupportedFormatError, match="lambda dimension of 2"):
-        micro_reader.open(path)
+        _native(path)
     vol = image_volume(1, (20, 30))
     path = write_vsi(tmp_path, "b", [vol], {1: {"levels": _levels((2, 20, 30), 1)}})
     with pytest.raises(UnsupportedFormatError, match="names no dimension"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_fit_slots_follows_slideio():
@@ -187,7 +193,7 @@ def test_any_part_opens_the_vsi(tmp_path):
     folder = os.path.join(str(tmp_path), "_a_")
     ets = os.path.join(folder, "stack7", "frame_t.ets")
     for part in (folder, os.path.join(folder, "stack7"), ets, str(tmp_path)):
-        with micro_reader.open(part) as f:
+        with _native(part) as f:
             assert f.backend == "vsi" and os.path.samefile(f.path, path)
             assert [im.name for im in f.images] == ["scan", "macro"]
             np.testing.assert_array_equal(f.images[0][0, 0, 0], levels[0])
@@ -199,7 +205,7 @@ def test_an_ets_without_its_vsi_is_read_alone(tmp_path):
     os.remove(path)
     ets = os.path.join(str(tmp_path), "_a_", "stack7", "frame_t.ets")
     with pytest.warns(CompositeWarning, match="which is missing"):
-        f = micro_reader.open(ets)
+        f = _native(ets)
     with f:
         assert f.backend == "vsi" and f.format == "ets"
         im = f.images[0]
@@ -207,20 +213,20 @@ def test_an_ets_without_its_vsi_is_read_alone(tmp_path):
         np.testing.assert_array_equal(im[0, 0, 0, :20, :30], levels[0])
         np.testing.assert_array_equal(im.resolutions[1][0, 0, 0, :10, :15], levels[1])
     with pytest.raises(CorruptFileError, match="which is missing"):
-        micro_reader.open(os.path.join(str(tmp_path), "_a_", "stack7"))
+        _native(os.path.join(str(tmp_path), "_a_", "stack7"))
 
 
 def test_an_ets_with_more_dimensions_needs_its_vsi(tmp_path):
     ets = write_ets(os.path.join(str(tmp_path), "frame_t.ets"), _levels((3, 20, 30), 1))
     with pytest.raises(UnsupportedFormatError, match="open the .vsi"):
-        micro_reader.open(ets)
+        _native(ets)
 
 
 def test_a_vsi_without_its_folder_reads_the_macro(tmp_path):
     path = _simple(tmp_path, _levels((20, 30), 1))
     os.rename(os.path.join(str(tmp_path), "_a_"), os.path.join(str(tmp_path), "gone"))
     with pytest.warns(CompositeWarning, match="is missing: only the macro"):
-        f = micro_reader.open(path)
+        f = _native(path)
     with f:
         assert [im.name for im in f.images] == ["macro"]
 
@@ -231,7 +237,7 @@ def test_other_tiffs_are_not_vsi(tmp_path):
     tifffile.imwrite(path, _macro())
     with open(path, "rb") as fh:
         assert not vsi.sniff(fh.read(64), path)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.backend == "tiff"
 
 
@@ -242,4 +248,4 @@ def test_bmp_tiles_are_refused(tmp_path):
         fh.seek(64 + 4 + 16)
         fh.write((9).to_bytes(4, "little"))
     with pytest.raises(UnsupportedFormatError, match="BMP"):
-        micro_reader.open(ets)
+        _native(ets)

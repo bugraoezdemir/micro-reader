@@ -142,7 +142,7 @@ class _InCellFile(File):
                 make, kept[(r, c, f)], focus[(r, c, f)], times, parts,
                 {"plate": 0, "acquisition": 0, "well": number[(r, c)], "field": f}))
         row_names, column_names = layout(rows, columns, wells_rc, path)
-        plate = Plate(name=base, rows=row_names, columns=column_names,
+        plate = Plate(name=base, row_names=row_names, column_names=column_names,
                       wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))
         super().__init__(path, images, plates=[plate])
 

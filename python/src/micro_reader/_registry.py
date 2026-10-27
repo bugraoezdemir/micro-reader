@@ -9,9 +9,9 @@ from typing import Optional
 from ._base import SAMPLED_INDICES, File
 from . import _parts
 from ._errors import CorruptFileError, OpenInstead, UnsupportedFormatError
-from .backends import (bdv, companion, czi, cv7000, dv, harmony, hdf5, ics, ilastik, ims, incell,
-                       lif, metamorph, metaxpress, micromanager, mrc, nd2, ndpis, oif, oir,
-                       omp2info, raster, tiff, vsi)
+from .backends import (bdv, cellomics, columbus, companion, czi, cv7000, dv, flex, harmony, hdf5, ics, ilastik, ims, incell,
+                       jdce, lif, metamorph, metaxpress, micromanager, mrc, nd2, ndpis, oif, oir,
+                       omp2info, raster, scanr, tiff, vsi)
 
 #: Tried in order: VSI before TIFF (a .vsi is a TIFF with a metadata tree);
 #: magic numbers before MRC, which may also match by
@@ -31,7 +31,7 @@ from .backends import (bdv, companion, czi, cv7000, dv, harmony, hdf5, ics, ilas
 #: Micro-Manager image-per-file acquisitions by a ``metadata.txt`` starting with its
 #: ``"Summary"``; their plane TIFFs, other positions' ``metadata.txt`` and folders are
 #: parts (``micromanager.owner``, after ``tiff.owner``: MMStack names never collide).
-BACKENDS = [vsi, tiff, czi, bdv, ilastik, hdf5, ims, nd2, oir, omp2info, oif, lif, harmony,
+BACKENDS = [vsi, flex, tiff, czi, bdv, ilastik, hdf5, ims, nd2, oir, omp2info, oif, lif, harmony, columbus, scanr, cellomics, jdce,
             metaxpress, metamorph, micromanager, incell, cv7000, companion, ndpis, ics, raster, dv, mrc]
 
 #: Bytes read from the start of the file for sniffing.
@@ -52,7 +52,7 @@ RESOLUTION_POLICIES = ("base", "all")
 
 def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noqa: A001
          resolutions: str = "base", rename: Optional[dict] = None, plates: bool = False,
-         multifile: bool = True, axes: Optional[str] = None, samples: str = "keep",
+         multifile: bool = True, axes: Optional[str] = None, samples: str = "channels",
          squeeze: bool = False) -> File:
     """Open *path* with the backend that recognises it (or the one named).
 
@@ -98,7 +98,11 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
 
     *axes* (``"canonical"``, or letters such as ``"tczyx"``), *samples* and
     *squeeze* present every image as ``Image.as_axes`` does.  Each image's
-    ``.source`` is then its native image.
+    ``.source`` is then its native image.  *samples*: ``"channels"`` (the
+    default since 0.3.0) folds RGB samples into the channels -- an RGB image
+    has ``c`` 3, channels "<name> R" / "G" / "B" -- and only images with
+    samples are presented anew; ``"keep"`` keeps them as a trailing ``s``
+    axis (``Image.as_axes``' default).
 
     A part of a multi-file (composite) format -- an OIR continuation, a
     DeltaVision log, NDTiff's index -- opens the whole image; a folder opens
@@ -115,6 +119,9 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
     if resolutions not in RESOLUTION_POLICIES:
         raise ValueError(f"resolutions={resolutions!r}: one of {RESOLUTION_POLICIES}")
     rename = _check_rename(rename)
+    from ._axes import SAMPLE_POLICIES
+    if samples not in SAMPLE_POLICIES:
+        raise ValueError(f"samples={samples!r}: one of {SAMPLE_POLICIES}")
     opened = os.fspath(path)
     main = opened if backend is not None else _parts.main_file(opened, BACKENDS)
     image = _open(main, backend, tiles, resolutions, rename, bool(plates), bool(multifile))
@@ -124,11 +131,13 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
         image.close()
         raise UnsupportedFormatError(
             f"rename: {path!r}: the {image.backend} backend cannot make {left} an axis")
-    if axes is not None or samples != "keep" or squeeze:
+    # an image is presented anew when asked to, or when its samples fold
+    anew = axes is not None or bool(squeeze)
+    if anew or (samples == "channels" and any("s" in s.axes for s in image.images)):
         from ._axes import AxesImage
         try:
             image.images = [AxesImage(s, axes, samples=samples, squeeze=squeeze)
-                            for s in image.images]
+                            if anew or "s" in s.axes else s for s in image.images]
             image._bind_plates()            # plate navigation reaches the new images
         except BaseException:
             image.close()
@@ -170,8 +179,10 @@ def _open(path: str, backend: Optional[str], tiles: str, resolutions: str,
                     f"{instead_of!r} points to {path!r} for its metadata, which points on to "
                     f"{instead.path!r}: a chain of metadata files is not supported. "
                     f"multifile=False opens {instead_of!r} alone.") from None
-            return _open(instead.path, None, tiles, resolutions, rename, plates, multifile,
-                         instead_of=path)
+            # the metadata file may itself be a part of a composite (scanR's
+            # data/metadata.ome.xml is its plate descriptor's): that opens
+            return _open(_parts.main_file(instead.path, BACKENDS), None, tiles, resolutions,
+                         rename, plates, multifile, instead_of=path)
 
     if backend is not None:
         for module in BACKENDS:

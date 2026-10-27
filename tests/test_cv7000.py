@@ -104,9 +104,9 @@ def test_wells_outside_the_described_layout_grow_it(tmp_path):
         f = micro_reader.open(str(tmp_path / "MeasurementData.mlf"))
     with f:
         plate = f.plates[0]
-        assert (plate.rows, plate.columns) == (("A", "B", "C"), ("1", "2", "3", "4", "5"))
+        assert (plate.row_names, plate.column_names) == (("A", "B", "C"), ("1", "2", "3", "4", "5"))
         well = plate.wells[0]
-        assert (well.name, plate.rows[well.row], plate.columns[well.column]) == ("C5", "C", "5")
+        assert (well.name, plate.row_names[well.row], plate.column_names[well.column]) == ("C5", "C", "5")
 
 
 def test_metadata_channels_pixel_sizes_and_position(tmp_path):
