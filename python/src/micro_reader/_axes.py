@@ -12,7 +12,11 @@ guessing:
 - axes the file lacks are inserted with size 1;
 - RGB samples ``s`` stay a trailing ``s`` when asked for, or are folded into
   the channels with ``samples="channels"`` (channel ``k`` = sample ``k % S``
-  of channel ``k // S``, as eubi-bridge stores them);
+  of channel ``k // S``, as eubi-bridge stores them; ``open``'s default).
+  The metadata then lists the folded channels: "<name> R" / "G" / "B" ("A"),
+  tinted red / green / blue (white for A); a single unnamed channel gives
+  unnamed, tinted channels; other sample counts are numbered, untinted -- the
+  names eubi-bridge gives (``sample_channels.sample_channel_labels``);
 - ``squeeze=True`` drops every size-1 axis except ``y`` and ``x``;
   ``squeeze="tz"`` drops just those (each must have size 1);
 - an axis the requested ones cannot hold is an error that names it.
@@ -29,11 +33,42 @@ import numpy as np
 from ._base import Image
 
 SAMPLE_POLICIES = ("keep", "channels")
+#: labels and colours of the channels that samples become (as eubi-bridge's)
+SAMPLE_LABELS = {3: ("R", "G", "B"), 4: ("R", "G", "B", "A")}
+SAMPLE_COLORS = {3: ("#FF0000", "#00FF00", "#0000FF"),
+                 4: ("#FF0000", "#00FF00", "#0000FF", "#FFFFFF")}
 #: the array axes, outermost first; ``s`` (RGB samples) after them
 STANDARD = "tczyx"
 CANONICAL = STANDARD + "s"
 #: never dropped by ``squeeze=True``: a plane stays a plane
 KEPT_BY_SQUEEZE = "yx"
+
+
+def folded_channels(channels, n: int, samples: int) -> tuple:
+    """The channels of *n* channels of *samples* samples each, folded into
+    ``n * samples`` channels, channel-major.  A file that lists them already
+    (Bio-Formats-style: one channel per sample) is kept; otherwise each
+    channel becomes "<name> R" / "G" / "B" ("A"), tinted from ``SAMPLE_COLORS``,
+    keeping its wavelengths; an unnamed one among several is "Channel {c} R";
+    a single unnamed channel gives unnamed, tinted channels; sample counts
+    without labels are numbered ("<name> 0") and untinted."""
+    from ._metadata import Channel
+    channels = tuple(channels)
+    if len(channels) == n * samples:
+        return channels
+    if len(channels) != n:
+        channels = (Channel(),) * n
+    labels = SAMPLE_LABELS.get(samples, tuple(str(i) for i in range(samples)))
+    colors = SAMPLE_COLORS.get(samples) or (None,) * samples
+    single_unnamed = n == 1 and not channels[0].name
+    out = []
+    for c, ch in enumerate(channels):
+        for i in range(samples):
+            name = None if single_unnamed else f"{ch.name or f'Channel {c}'} {labels[i]}"
+            out.append(Channel(name=name, color=colors[i],
+                               emission_wavelength=ch.emission_wavelength,
+                               excitation_wavelength=ch.excitation_wavelength))
+    return tuple(out)
 
 
 class AxesImage(Image):
@@ -165,8 +200,14 @@ class AxesImage(Image):
 
     @property
     def metadata(self):
-        """The native image's metadata (channels follow its own c axis)."""
-        return self.source.metadata
+        """The native image's metadata; with samples folded into the channels,
+        one channel per folded channel (``folded_channels``)."""
+        meta = self.source.metadata
+        if not self._fold:
+            return meta
+        from dataclasses import replace
+        n = self.source.shape[self._names.index("c")] if "c" in self._names else 1
+        return replace(meta, channels=folded_channels(meta.channels, n, self._samples))
 
     @property
     def resolutions(self) -> list:
@@ -191,6 +232,15 @@ class AxesImage(Image):
 
     def close(self) -> None:
         self.source.close()
+
+    def __getattr__(self, name):
+        """The native image's own public attributes (a CZI series' ``origin``, ...):
+        an RGB image folded by ``open``'s default stays the backend's image to read
+        them from.  Private ones are not passed on."""
+        source = self.__dict__.get("source")
+        if source is None or name.startswith("_"):
+            raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+        return getattr(source, name)
 
     def __repr__(self) -> str:
         return super().__repr__()[:-1] + f" of {self.source.axes!r}>"

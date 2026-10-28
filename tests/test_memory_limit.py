@@ -20,6 +20,12 @@ import pytest
 import micro_reader
 from micro_reader import MemoryLimitError, _memory, _stream
 
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
+
 tifffile = pytest.importorskip("tifffile")
 RNG = np.random.default_rng(12)
 
@@ -83,10 +89,10 @@ def test_one_strip_planes_are_streamed(tmp_path, small_budget, compression, pred
     _imwrite(path, data, compression=compression, rowsperstrip=data.shape[0], **kwargs)
     assert data.nbytes > small_budget
     if not _stream.streamable(compression):
-        with micro_reader.open(path) as f, pytest.raises(MemoryLimitError, match="decoded whole"):
+        with _native(path) as f, pytest.raises(MemoryLimitError, match="decoded whole"):
             f.images[0][500:600, 700:800]
         return
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         np.testing.assert_array_equal(image[500:600, 700:800], data[500:600, 700:800])
         np.testing.assert_array_equal(image[1100:1200, :], data[1100:1200])
@@ -98,7 +104,7 @@ def test_float_predictor_is_streamed(tmp_path, small_budget):
     path = str(tmp_path / "float.tif")
     _imwrite(path, data, compression="zlib", predictor="floatingpoint",
              rowsperstrip=data.shape[0])
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         np.testing.assert_array_equal(f.images[0][300:310, 50:950], data[300:310, 50:950])
 
 
@@ -108,7 +114,7 @@ def test_a_region_costs_a_piece_not_the_block(tmp_path, small_budget):
     data = _plane(1500, 3000)
     path = str(tmp_path / "strip.tif")
     tifffile.imwrite(path, data, compression="zlib", rowsperstrip=data.shape[0])
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         tracemalloc.start()
         block = image[700:800, 1400:1500]
@@ -123,7 +129,7 @@ def test_regions_read_top_to_bottom_continue_the_stream(tmp_path, small_budget):
     data = _plane()
     path = str(tmp_path / "strip.tif")
     tifffile.imwrite(path, data, compression="zlib", rowsperstrip=data.shape[0])
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         for y in range(0, 1200, 200):
             np.testing.assert_array_equal(image[y:y + 200, :], data[y:y + 200])
@@ -144,7 +150,7 @@ def test_blocks_within_the_budget_are_decoded_whole(tmp_path, monkeypatch):
         raise AssertionError("a small block was streamed")
 
     monkeypatch.setattr(_stream, "read", no_stream)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         np.testing.assert_array_equal(f.images[0][...], data)
 
 
@@ -154,7 +160,7 @@ def test_nd2_lossless_frames_are_streamed(tmp_path, small_budget):
     path = str(tmp_path / "big.nd2")
     write_nd2(path, frames, [("T", 2)], compression="lossless")
     expected = frames[..., 0].transpose(0, 3, 1, 2)[:, :, None]            # t c z y x
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         np.testing.assert_array_equal(image[1, :, 0, 500:600, 700:800],
                                       expected[1, :, 0, 500:600, 700:800])
@@ -168,11 +174,11 @@ def test_blocks_that_cannot_stream_are_refused_clearly(tmp_path, small_budget):
     data = RNG.integers(0, 255, (1500, 3000)).astype("u1")
     path = str(tmp_path / "jpeg.tif")
     tifffile.imwrite(path, data, compression="jpeg", rowsperstrip=data.shape[0])
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         with pytest.raises(MemoryLimitError, match="set_memory_limit"):
             f.images[0][0:10, 0:10]
     micro_reader.set_memory_limit("64MB")
-    with micro_reader.open(path) as f:                  # a larger budget reads it
+    with _native(path) as f:                  # a larger budget reads it
         assert f.images[0][0:10, 0:10].shape == (10, 10)
 
 
@@ -180,7 +186,7 @@ def test_big_pictures_are_refused_clearly(tmp_path, small_budget):
     PIL = pytest.importorskip("PIL.Image")
     path = str(tmp_path / "big.png")
     PIL.fromarray(RNG.integers(0, 255, (1500, 3000)).astype("u1")).save(path)
-    with micro_reader.open(path) as f, pytest.raises(MemoryLimitError, match="PNG picture"):
+    with _native(path) as f, pytest.raises(MemoryLimitError, match="PNG picture"):
         f.images[0][0:10, 0:10]
 
 
@@ -203,7 +209,7 @@ def test_blocks_in_flight_never_exceed_the_limit(tmp_path, monkeypatch):
         errors = []
 
         def work(path, data):
-            with micro_reader.open(path) as f:
+            with _native(path) as f:
                 if not np.array_equal(f.images[0][100:200, 300:400], data[100:200, 300:400]):
                     errors.append(path)
 
@@ -226,7 +232,7 @@ def test_jumps_back_resume_from_checkpoints(tmp_path, small_budget, monkeypatch)
     path = str(tmp_path / "strip.tif")
     tifffile.imwrite(path, data, compression="zlib", rowsperstrip=data.shape[0])
     rng = np.random.default_rng(7)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         image[2300:2400, :]                                  # one pass: checkpoints laid
         for _ in range(12):
@@ -258,7 +264,7 @@ def test_large_czi_subblocks_are_streamed(tmp_path, small_budget, kind):
                           dtype="u2", compression=5 if kind == "zstd0" else 6, payload=payload)])
     if kind == "zstd1_hilo":
         micro_reader.set_memory_limit("64MB")            # decoded whole: needs the room
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         np.testing.assert_array_equal(image[0, 0, 0, 500:600, 700:800], data[500:600, 700:800])
         np.testing.assert_array_equal(image[0, 0, 0], data)
@@ -291,10 +297,10 @@ def test_large_pngs_are_streamed_by_rows(tmp_path, monkeypatch, mode):
         PIL.fromarray(RNG.integers(0, 2, (h, w)).astype(bool)).save(path)
     else:
         PIL.fromarray(RNG.integers(0, 255, (h, w)).astype("u1")).save(path)
-    with micro_reader.open(path) as f:                    # whole decode: the reference
+    with _native(path) as f:                    # whole decode: the reference
         whole = f.images[0][...]
     monkeypatch.setattr(raster, "CACHE_BYTES", 1 << 16)   # now too large to keep: streamed
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         np.testing.assert_array_equal(image[300:420, 100:900], whole[300:420, 100:900])
         np.testing.assert_array_equal(image[...], whole)
@@ -316,7 +322,7 @@ def test_large_jpeg2000_segments_decode_only_the_region(tmp_path, small_budget, 
                         lambda *a, **k: whole.append(1) or real(*a, **k))
     from micro_reader.backends import tiff
     monkeypatch.setitem(tiff._IMAGE_DECODERS, "jpeg2k", _codecs.jpeg2k_decode_into)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         np.testing.assert_array_equal(image[500:600, 700:800], data[500:600, 700:800])
         np.testing.assert_array_equal(image[1100:1200, :], data[1100:1200])
@@ -332,7 +338,7 @@ def test_large_legacy_nd2_frames_decode_only_the_region(tmp_path, small_budget):
     frames = (RNG.integers(0, 40, (1, 2, 1200, 2400)) + np.arange(2400)).astype("u2")
     path = str(tmp_path / "big.nd2")
     write_legacy_nd2(path, frames, [])
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         np.testing.assert_array_equal(image[0, :, 0, 500:600, 700:800],
                                       frames[0, :, 500:600, 700:800])
@@ -378,7 +384,7 @@ def test_large_jpeg_segments_are_cut_at_restart_markers(tmp_path, small_budget, 
     tifffile.imwrite(path, iter([data]), shape=pixels.shape, dtype="u1",
                      photometric="minisblack" if pixels.ndim == 2 else "rgb",
                      compression="jpeg", rowsperstrip=pixels.shape[0])
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         np.testing.assert_array_equal(image[500:600, 700:800], whole[500:600, 700:800])
         np.testing.assert_array_equal(image[1100:1200, :], whole[1100:1200])
@@ -395,7 +401,7 @@ def test_large_jpegs_without_restart_markers_are_refused_clearly(tmp_path, small
     tifffile.imwrite(path, iter([_jpeg(pixels, progressive=True)]), shape=pixels.shape,
                      dtype="u1", photometric="rgb", compression="jpeg",
                      rowsperstrip=pixels.shape[0])
-    with micro_reader.open(path) as f, pytest.raises(MemoryLimitError, match="restart markers"):
+    with _native(path) as f, pytest.raises(MemoryLimitError, match="restart markers"):
         f.images[0][0:10, 0:10]
 
 
@@ -412,12 +418,12 @@ def test_large_jpeg_pictures_are_cut_at_restart_markers(tmp_path, monkeypatch):
         fh.write(_jpeg(pixels, subsampling=2))
     whole = _jpeg_pixels(data, pixels.shape)
     monkeypatch.setattr(raster, "CACHE_BYTES", 1 << 16)   # too large to keep: cut
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         np.testing.assert_array_equal(image[300:420, 100:900], whole[300:420, 100:900])
         np.testing.assert_array_equal(image[...], whole)
         assert image._cached is None and image._streams()
-    with micro_reader.open(plain) as f:
+    with _native(plain) as f:
         assert not f.images[0]._streams()
         assert f.images[0][...].shape == pixels.shape
 
@@ -444,7 +450,7 @@ def test_large_czi_image_codec_subblocks_decode_only_the_piece(tmp_path, small_b
     h, w = pixels.shape
     write_czi(path, [dict(series=0, plane={"C": 0}, x=0, y=0, width=w, height=h,
                           dtype=dtype, compression=code, payload=payload)])
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         np.testing.assert_array_equal(image[0, 0, 0, 500:600, 700:800], expected[500:600, 700:800])
         np.testing.assert_array_equal(image[0, 0, 0], expected)
@@ -463,7 +469,7 @@ def test_large_jpegxl_segments_decode_only_the_region(tmp_path, small_budget, mo
                      rowsperstrip=data.shape[0])
     monkeypatch.setitem(tiff._IMAGE_DECODERS, "jxl",
                         lambda *a, **k: pytest.fail("the segment was decoded whole"))
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         image = f.images[0]
         assert image._codec == "jxl"
         np.testing.assert_array_equal(image[500:600, 700:800], data[500:600, 700:800])
@@ -479,5 +485,5 @@ def test_jpegs_whose_intervals_seldom_meet_a_row_are_decoded_whole(tmp_path, sma
     tifffile.imwrite(path, iter([_jpeg(pixels, restart_marker_blocks=50, subsampling=2)]),
                      shape=pixels.shape, dtype="u1", photometric="rgb", compression="jpeg",
                      rowsperstrip=pixels.shape[0])
-    with micro_reader.open(path) as f, pytest.raises(MemoryLimitError, match="restart markers"):
+    with _native(path) as f, pytest.raises(MemoryLimitError, match="restart markers"):
         f.images[0][0:10, 0:10]

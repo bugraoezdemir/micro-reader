@@ -14,9 +14,15 @@ from micro_reader.backends import ndpis
 from _ndpis_writer import write_set
 
 
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
+
+
 def test_one_image_with_a_channel_per_member(tmp_path):
     path, bases, _ = write_set(str(tmp_path))
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert (f.backend, f.format) == ("ndpis", "ndpis")
         image = f.images[0]
         assert (image.axes, image.shape, image.dtype) == ("cyx", (3, 96, 128), np.uint8)
@@ -36,7 +42,7 @@ def test_one_image_with_a_channel_per_member(tmp_path):
 
 def test_all_levels_as_images(tmp_path):
     path, _, _ = write_set(str(tmp_path))
-    with micro_reader.open(path, resolutions="all") as f:
+    with _native(path, resolutions="all") as f:
         assert [im.index for im in f.images[:2]] == [{"series": 0, "resolution": 0},
                                                       {"series": 0, "resolution": 1}]
 
@@ -44,7 +50,7 @@ def test_all_levels_as_images(tmp_path):
 def test_members_open_alone(tmp_path):
     """A pointed set, index only: a member is an ordinary slide."""
     _, bases, paths = write_set(str(tmp_path))
-    with micro_reader.open(paths[1]) as f:
+    with _native(paths[1]) as f:
         assert f.backend == "tiff" and f.images[0].axes == "yxs"
         np.testing.assert_array_equal(f.images[0][...], bases[1])
 
@@ -52,7 +58,7 @@ def test_members_open_alone(tmp_path):
 def test_a_missing_member_reads_as_zeros(tmp_path):
     path, bases, _ = write_set(str(tmp_path), skip=(1,))
     with pytest.warns(MissingImagesWarning, match="1 of its 3 NDPI files"):
-        f = micro_reader.open(path)
+        f = _native(path)
     with f:
         image = f.images[0]
         assert not image[1].any()
@@ -63,20 +69,20 @@ def test_a_missing_member_reads_as_zeros(tmp_path):
 def test_every_member_missing(tmp_path):
     path, _, _ = write_set(str(tmp_path), skip=(0, 1, 2))
     with pytest.raises(CorruptFileError, match="none of its NDPI files"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_a_colour_member_is_refused(tmp_path):
     path, _, _ = write_set(str(tmp_path), channels=(("DAPI", 455.0, 2), ("brightfield", 0.0, 0)))
     with pytest.raises(UnsupportedFormatError, match="names no colour band"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_members_of_different_sizes_are_refused(tmp_path):
     path, _, _ = write_set(str(tmp_path), channels=(("a", 455.0, 2), ("b", 519.0, 1)),
                            shapes=[(96, 128), (96, 120)])
     with pytest.raises(CorruptFileError, match="at level 0"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_set_file_errors(tmp_path):

@@ -18,6 +18,12 @@ from micro_reader.backends import nd2 as nd2_backend  # noqa: E402
 
 from _nd2_legacy_writer import write_legacy_nd2  # noqa: E402
 
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
+
 RNG = np.random.default_rng(3)
 
 # name -> (loops outermost first, frames (n, c, y, x[, s]), extra stored frames)
@@ -82,7 +88,7 @@ def decode_threads(request):
 def test_matches_written_frames(tmp_path, name, decode_threads):
     path, loops, frames = _write(tmp_path, name)
     expected = _expected(loops, frames)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert (img.backend, img.format) == ("nd2", "nd2-legacy")
         assert len(img.images) == len(expected)
         for series, ref in zip(img.images, expected):
@@ -104,7 +110,7 @@ def test_agrees_with_nd2(tmp_path, name):
         if axis not in dims:
             ref, dims = ref[..., None], dims + [axis]
     ref = ref.transpose([dims.index(a) for a in "TPCZYXS"])
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         assert len(img.images) == ref.shape[1]
         for p, series in enumerate(img.images):
             got = series[...]
@@ -115,7 +121,7 @@ def test_reference_decoder_path(tmp_path, monkeypatch):
     """Without the native module, imagecodecs decodes the same frames."""
     path, loops, frames = _write(tmp_path, "time_positions_channels")
     monkeypatch.setattr(_codecs, "_native", None)
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         for series, ref in zip(img.images, _expected(loops, frames)):
             np.testing.assert_array_equal(series[...], ref)
 
@@ -135,12 +141,12 @@ def test_truncated_file_is_reported(tmp_path):
     with open(path, "r+b") as fh:
         fh.truncate(os.path.getsize(path) - 30)
     with pytest.raises(CorruptFileError, match="box map"):
-        micro_reader.open(path)
+        _native(path)
 
 
 def test_frames_are_decoded_once(tmp_path):
     path, _, _ = _write(tmp_path, "rgb_time")
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         series = img.images[0]
         series[1, 0, 0, 0:4, 0:4]
         first = series.stats.pixels_read
@@ -152,7 +158,7 @@ def test_concurrent_reads(tmp_path, decode_threads):
     path, loops, frames = _write(tmp_path, "time_positions_channels")
     expected = _expected(loops, frames)
     errors = []
-    with micro_reader.open(path) as img:
+    with _native(path) as img:
         def work(seed):
             for series, ref in zip(img.images, expected):
                 for key in _keys(ref.shape, n=5, seed=seed):

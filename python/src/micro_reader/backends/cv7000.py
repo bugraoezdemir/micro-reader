@@ -344,7 +344,7 @@ class _CVFile(File):
         wells_rc = sorted({(r, c) for r, c, _f in kept})
         number = {rc: n for n, rc in enumerate(wells_rc)}
         row_names, column_names = layout(rows, columns, wells_rc, path)
-        plates = [Plate(name=plate_name, rows=row_names, columns=column_names,
+        plates = [Plate(name=plate_name, row_names=row_names, column_names=column_names,
                         wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))]
         images = []
         for r, c, f in sorted(kept, key=lambda k: (number[k[:2]], k[2])):

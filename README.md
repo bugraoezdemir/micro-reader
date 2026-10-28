@@ -2,7 +2,7 @@
 
 **Memory-bounded pixel reader for microscopy images.**
 
-`micro-reader` reads regions of large microscopy files without loading the entire image into memory. It provides a common interface across TIFF, CZI, ND2, Leica, OIR, OIB / OIF, Olympus VSI, Imaris, DeltaVision, MRC, common raster formats, OME companion file sets, and high-content screening plates (Harmony, MetaXpress, IN Cell, CellVoyager).
+`micro-reader` reads regions of large microscopy files without loading the entire image into memory. It provides a common interface across TIFF, CZI, ND2, Leica, OIR, OIB / OIF, Olympus VSI, Imaris, DeltaVision, MRC, common raster formats, OME companion file sets, and high-content screening plates (Harmony, Columbus, MetaXpress, ImageXpress HCS.ai, IN Cell, CellVoyager, CQ1, Opera Flex, scanR, Cellomics).
 
 > **Status: pre-alpha (0.0.x)**
 >
@@ -179,7 +179,7 @@ f.path     # the main file: "cells_R3D.dv"
 f.opened   # what was opened: "cells_R3D.dv.log"
 ```
 
-You can also open the folder. A folder opens the image it belongs to (an NDTiff dataset folder, a Harmony or CellVoyager measurement folder), or the one image it holds. A folder with several images raises an error that lists them.
+You can also open the folder. A folder opens the image it belongs to (an NDTiff dataset folder, a Harmony or CellVoyager measurement folder, a folder of Opera `.flex` files), or the one image it holds. An Opera Flex plate has no index file: any of its `.flex` files opens the whole folder as the plate (`multifile=False` reads only that file). A folder with several images raises an error that lists them.
 
 To sort many files at once, for example everything under a folder you want to convert, `group_files` says which files make one image:
 
@@ -270,18 +270,18 @@ Only axes with size 1 can be removed. `y` and `x` are never removed.
 
 ### RGB samples
 
-By default, RGB samples are represented by the `s` axis.
+`micro_reader.open` turns RGB samples into channels: an RGB image has 3 channels, named "<name> R", "G" and "B" and coloured red, green and blue (a file without a channel name gives three unnamed channels in those colours). An image that has channels already gets c × s of them: "<name> R" ... for each.
 
-You can instead represent RGB as channels:
+To keep RGB samples as their own `s` axis, the way the file stores them:
 
 ```python
 f = micro_reader.open(
     "image.tif",
-    samples="channels",
+    samples="keep",
 )
 ```
 
-If there are existing channels already, RGB samples will fold with them, leading to a total of c × s channels.
+`image.source` is then not needed: with the default, it is the image as stored, with its `s` axis. `image.as_axes(...)` keeps `s` unless asked for `samples="channels"`.
 
 
 ## Ambiguous dimensions
@@ -421,17 +421,31 @@ The plate layout is available through:
 plate = f.plates[0]
 plate.wells[0].name
 # "B2"
+plate.row_names, plate.column_names     # ('A', 'B', ...), ('1', '2', ...)
+part = plate.rows[2:5].columns[3:7]     # a part of the plate: still a plate
 ```
+
+Every level knows what it is and what holds it: `.kind` is `"file"`, `"plate"`, `"well"`
+or `"field"`, and `.parent` is the level above. Accessors go down only: a file holds
+`.plates`, a plate `.wells`, a well `.fields`, a field `.images`. `plate.rows` and
+`plate.columns` slice a plate by position, name or a list of them, as `f.select(row=...,
+column=...)` does; rows and columns are a well's address, not a level.
 
 Images can be reached through the wells, or selected by well:
 
 ```python
 image = plate.wells[0].fields[0].image
 f.select(well=plate.well_index("B2"))       # by its place in plate.wells
-f.select(well="B2")                         # by name
-f.select(row="B", column=range(1, 4))       # rows and columns: names, or 0-based numbers
+f.select(well_name="B2")                    # by name
+f.select(row_name="B", column=range(1, 4))  # rows and columns: names, or 0-based numbers
 f.select(well=["B2", "C5"], field=[0, 1])   # a list, tuple, range or set: any of them
+f.select(row=slice(2, None))                # a slice of positions: row C onward
 ```
+
+A plate's places have a position and a name, a keyword each: `plate` / `plate_name`,
+`acquisition` / `acquisition_name`, `well` / `well_name`, `row` / `row_name`, `column` /
+`column_name` (the columns of ome-zarr-pyramid's table). A name given to a position keyword
+is its name (`well="B2"` is `well_name="B2"`).
 
 `f.outline()` shows the plates, wells and fields of a file.
 
@@ -530,7 +544,7 @@ The position is omitted when it cannot be determined reliably.
 | **Micro-Manager 1.4**| image-per-file acquisitions (`metadata.txt` + one TIFF per plane) |
 | **DeltaVision**      | `.dv`, `.r3d` (softWoRx, OMX, Priism)                 |
 | **MRC**              | Common MRC modes and extended headers                 |
-| **Plates (HCS)**     | Harmony, MetaXpress, IN Cell and CellVoyager plates   |
+| **Plates (HCS)**     | Harmony, Columbus exports, MetaXpress, ImageXpress HCS.ai (`.jdce`), IN Cell, CellVoyager, Opera Flex, scanR and Cellomics (`.C01`) plates; with `plates=True`, CZI plates, OME companion and OME-TIFF plates (Yokogawa CQ1) and ND2 files whose XY points are named after wells |
 | **JPEG / PNG / BMP** | Common raster image formats                           |
 
 All formats use the same `File`, `Image`, axes, indexing, metadata, and reading interface wherever possible.
@@ -593,6 +607,8 @@ f = micro_reader.open("data_t001.ome.tif", multifile=False)
 ```
 
 If the companion is missing or does not list the file, opening the whole set raises an error that names `multifile=False`. With `multifile=False` the file is then read without pixel sizes, with a `CompanionWarning`. A TIFF whose metadata lives in another OME-TIFF (instead of a `.companion.ome`) works the same way, with that OME-TIFF in the companion's place.
+
+A companion that describes a plate (`Plate` / `Well` / `WellSample`) reads as one with `plates=True`, as a CZI plate does: `f.plates` lists its plates and wells, and its images are indexed by plate, acquisition, well and field. RGB images in a companion have a sample axis (`t c z y x s`), as RGB OME-TIFFs do.
 
 Some OME-TIFF sets keep the full OME-XML in their TIFF files instead of a companion. Opening one of those files also reads the whole set, and `multifile=False` reads only the planes stored in that file, with the set's metadata.
 

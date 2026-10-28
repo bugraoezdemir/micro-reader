@@ -19,6 +19,12 @@ from micro_reader._metadata import Quantity  # noqa: E402
 
 from _ndtiff_writer import write_ndtiff  # noqa: E402
 
+
+def _native(*args, **kwargs):
+    """``micro_reader.open`` with RGB samples kept as an ``s`` axis: these tests
+    check the backend's own layout (open's default folds them into channels)."""
+    return micro_reader.open(*args, **{"samples": "keep", **kwargs})
+
 RNG = np.random.default_rng(7)
 
 
@@ -47,7 +53,7 @@ def _svs(path):
 def test_svs_drops_thumbnail_names_associated(tmp_path):
     path = str(tmp_path / "slide.svs")
     base, label, macro = _svs(path)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.format == "svs"
         assert [im.name for im in f.images] == ["Baseline", "label", "macro"]
         for im, ref in zip(f.images, (base, label, macro)):
@@ -57,7 +63,7 @@ def test_svs_drops_thumbnail_names_associated(tmp_path):
 def test_svs_metadata(tmp_path):
     path = str(tmp_path / "slide.svs")
     _svs(path)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         meta = f.images[0].metadata
         assert meta.pixel_sizes == {"x": Quantity(0.499, "micrometer"),
                                     "y": Quantity(0.499, "micrometer")}
@@ -99,7 +105,7 @@ def _qptiff(path):
 def test_qptiff_channels_and_thumbnail_kept(tmp_path):
     path = str(tmp_path / "scan.qptiff")
     channels, thumb = _qptiff(path)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.format == "qptiff"
         assert [im.name for im in f.images] == ["Baseline", "thumbnail"]   # Bio-Formats keeps it
         np.testing.assert_array_equal(f.images[0][...], channels)
@@ -151,7 +157,7 @@ def test_scn_series_metadata(tmp_path):
             tw.write(plane, metadata=None, tile=(16, 16))
         for plane in small:
             tw.write(plane, metadata=None, tile=(16, 16))
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.format == "scn"
         # the image whose view spans the whole slide is the macro (its SCN name says nothing)
         assert [im.name for im in f.images] == ["macro", "tissue"]
@@ -196,7 +202,7 @@ def test_philips_levels_macro_metadata(tmp_path):
                  description="level=1 mag=20 quality=80")
         tw.write(macro, metadata=None, photometric="rgb", software="Philips DP v1.0",
                  description="Macro -offset=(0,0)-pixelsize=(0.0315,0.0315)")
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.format == "philips"
         assert [im.name for im in f.images] == ["Baseline", "macro"]
         np.testing.assert_array_equal(f.images[0][...], base)
@@ -237,7 +243,7 @@ def test_svs_slide_is_placed_on_the_slide_label_and_macro_are_not(tmp_path, read
     from micro_reader._spatial import check_invariants
     path = str(tmp_path / "slide.svs")
     _svs(path)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         _declares_slide(f, reads)
         base, label, macro = f.images
         assert base.metadata.coordinate_system == "slide" and set(base.metadata.position) == {"x", "y"}
@@ -252,7 +258,7 @@ def test_svs_without_left_top_is_unplaced(tmp_path):
     with tifffile.TiffWriter(path) as tw:
         tw.write(_rgb((80, 96)), metadata=None, tile=(32, 32), photometric="rgb",
                  description="Aperio Image Library v12.0.0\r\n96x80 [0,0 96x80] (32x32) RAW|MPP = 0.5")
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert [s.id for s in f.coordinate_systems] == ["slide"]
         meta = f.images[0].metadata
         assert _um(meta.pixel_sizes["x"]) == pytest.approx(0.5)
@@ -269,7 +275,7 @@ def test_scn_images_and_macro_are_on_the_slide(tmp_path, reads):
         tw.write(_rgb((120, 40)), metadata=None, photometric="rgb", tile=(16, 16), description=SCN_XML)
         for shape in ((48, 64), (48, 64), (12, 16), (12, 16)):
             tw.write(np.zeros(shape, np.uint8), metadata=None, tile=(16, 16))
-    with micro_reader.open(path, resolutions="all") as f:
+    with _native(path, resolutions="all") as f:
         _declares_slide(f, reads)
         assert [(im.name, im.index["resolution"]) for im in f.images] == [
             ("macro", 0), ("tissue", 0), ("tissue", 1)]
@@ -317,7 +323,7 @@ def test_qptiff_scan_thumbnail_overview_and_label_on_the_slide(tmp_path, reads):
     from micro_reader._spatial import check_invariants
     path = str(tmp_path / "scan.qptiff")
     _qptiff_slide(path)
-    with micro_reader.open(path, resolutions="all") as f:
+    with _native(path, resolutions="all") as f:
         _declares_slide(f, reads)
         assert [(im.name, im.index["resolution"]) for im in f.images] == [
             ("Baseline", 0), ("Resolution", 1), ("thumbnail", 0), ("macro", 0), ("label", 0)]
@@ -342,7 +348,7 @@ def test_qptiff_overview_of_unknown_type_is_unplaced(tmp_path, image_type):
     from micro_reader._spatial import check_invariants
     path = str(tmp_path / "scan.qptiff")
     _qptiff_slide(path, overview_type=image_type, label_type=image_type)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         by_name = {im.name: im.metadata for im in f.images}
         assert by_name["Baseline"].coordinate_system == "slide"
         for name in ("macro", "label"):
@@ -360,7 +366,7 @@ def test_qptiff_without_image_type_keeps_the_scan_corner(tmp_path):
                  resolution=(20000, 20000), resolutionunit="CENTIMETER",
                  extratags=[(286, 5, 1, (1, 2), True), (287, 5, 1, (17, 4), True)],
                  description='<?xml version="1.0"?><PerkinElmer-QPI-ImageDescription/>')
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         meta = f.images[0].metadata
         assert meta.coordinate_system == "slide"
         assert _um(meta.position["x"]) == pytest.approx(5000 + 0.25)
@@ -460,7 +466,7 @@ def test_bif_tiles_placed_by_their_joints(tmp_path):
     path = str(tmp_path / "slide.bif")
     grid, overview = _bif(path)
     expected = _compose(grid)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.format == "bif"
         assert [im.name for im in f.images] == ["Baseline", "macro", "probability"]
         im = f.images[0]
@@ -477,7 +483,7 @@ def test_bif_lower_level_drops_the_same_strips(tmp_path):
     drops the overlap strips scaled, and so is level 0 downsampled."""
     path = str(tmp_path / "slide.bif")
     grid, _ = _bif(path)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         level1 = f.images[0].resolutions[1]
         assert level1.shape == (ROWS * TILE // 2, (COLS * TILE - 6) // 2, 3)
         np.testing.assert_array_equal(level1[...], _compose(grid)[::2, ::2])
@@ -486,7 +492,7 @@ def test_bif_lower_level_drops_the_same_strips(tmp_path):
 def test_bif_unscanned_tile_is_white_point(tmp_path):
     path = str(tmp_path / "slide.bif")
     grid, _ = _bif(path, empty_tile=(1, 0))
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         block = f.images[0][TILE:2 * TILE, 0:TILE - 1]
         assert (block == 235).all()
 
@@ -500,7 +506,7 @@ def test_bif_outside_the_paper_refused(tmp_path, xml, message):
     path = str(tmp_path / "slide.bif")
     _bif(path, **xml)
     with pytest.raises(UnsupportedFormatError, match=message):
-        micro_reader.open(path)
+        _native(path)
 
 
 # -- iScan BIF (Coreo / HT): areas of interest on a canvas, as OpenSlide places them ----
@@ -626,7 +632,7 @@ def _iscan_bif(path, **xml):
 def test_iscan_bif_areas_placed_as_openslide_does(tmp_path):
     path = str(tmp_path / "iscan.bif")
     levels, macro, thumb = _iscan_bif(path)
-    with micro_reader.open(path) as f:
+    with _native(path) as f:
         assert f.format == "bif"
         assert [im.name for im in f.images] == ["Baseline", "macro", "thumbnail"]
         im = f.images[0]
@@ -691,7 +697,7 @@ def test_iscan_bif_unchecked_files_refused(tmp_path, xml, message):
     path = str(tmp_path / "iscan.bif")
     _iscan_bif(path, **xml)
     with pytest.raises(UnsupportedFormatError, match=message):
-        micro_reader.open(path)
+        _native(path)
 
 
 # -- Micro-Manager NDTiff ---------------------------------------------------------------
@@ -712,7 +718,7 @@ def _ndtiff(directory, per_file=None):
 def test_ndtiff_positions_are_scenes(tmp_path, per_file):
     paths = _ndtiff(str(tmp_path / "acq"), per_file)
     assert len(paths) == (1 if per_file is None else 5)
-    with micro_reader.open(paths[0]) as f:
+    with _native(paths[0]) as f:
         assert f.format == "ndtiff"
         assert [im.index["series"] for im in f.images] == [0, 1]
         for im in f.images:
@@ -734,7 +740,7 @@ def test_ndtiff_channel_names_and_pixel_size(tmp_path):
     frames = [({"time": t, "channel": name, "z": 0}, _plane(0, t, c, 0))
               for t in range(2) for c, name in enumerate(("Cy5", "DAPI", "GFP"))]
     paths = write_ndtiff(str(tmp_path / "acq"), frames, frame_metadata={"PixelSizeUm": 0.65})
-    with micro_reader.open(paths[0]) as f:
+    with _native(paths[0]) as f:
         im = f.images[0]
         md = im.metadata
         assert [c.name for c in md.channels] == ["Cy5", "DAPI", "GFP"]
@@ -742,7 +748,7 @@ def test_ndtiff_channel_names_and_pixel_size(tmp_path):
         assert md.pixel_sizes["x"].unit == "micrometer"
         np.testing.assert_array_equal(im.as_axes("tczyx")[1, 2, 0], _plane(0, 1, 2, 0))
     plain = write_ndtiff(str(tmp_path / "plain"), [({"time": 0}, _plane(0, 0, 0, 0))])
-    with micro_reader.open(plain[0]) as f:                      # nothing recorded: unknown
+    with _native(plain[0]) as f:                      # nothing recorded: unknown
         assert not f.images[0].metadata.pixel_sizes
         assert [c.name for c in f.images[0].metadata.channels] == [None]
 
@@ -752,7 +758,7 @@ def test_ndtiff_missing_plane_is_zeros_with_a_warning(tmp_path):
               for t in range(2) for z in range(3) if (t, z) != (1, 2)]
     paths = write_ndtiff(str(tmp_path / "acq"), frames)
     with pytest.warns(micro_reader.MissingImagesWarning, match="1 missing plane"):
-        f = micro_reader.open(paths[0])
+        f = _native(paths[0])
     with f:
         a = f.images[0].as_axes("tczyx")
         assert not a[1, 0, 2].any()

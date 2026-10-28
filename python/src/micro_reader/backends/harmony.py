@@ -6,7 +6,8 @@ A plate is a folder of TIFFs, one per plane, listed by an index file
 the index file: micro-reader reads the plate it describes.
 
 - Each ``<Image>`` is one plane: its file (``URL``, relative to the index
-  file), its well (1-based ``Row`` / ``Col``), ``FieldID``, ``PlaneID``,
+  file; with a ``BufferNo``, the page of a multi-page TIFF -- Columbus
+  exports, backends/columbus.py), its well (1-based ``Row`` / ``Col``), ``FieldID``, ``PlaneID``,
   ``TimepointID`` and ``ChannelID``.
 - One micro-reader image per field, with axes ``t c z y x``: the timepoints,
   channels and planes of the plate, in the order of their IDs (IDs start at
@@ -269,16 +270,24 @@ class _HarmonyFile(File):
     backend = NAME
     format = "harmony"
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, columbus: bool = False):
         self.path = path
-        self._members = Members()
         try:
             root = ET.parse(path).getroot()
         except ET.ParseError as exc:
             raise CorruptFileError(f"{path!r}: not readable XML ({exc})") from None
         _fill_from_maps(root)
-        version = root.tag.split("}", 1)[0].rsplit("/", 1)[-1]           # HarmonyV4 .. V7
-        self.format = "harmony-" + version.replace("Harmony", "").lower()  # harmony-v4
+        if columbus:
+            # a Columbus export (backends/columbus.py): Harmony's index, in the
+            # Columbus namespace; a URL's BufferNo names the page of a multi-page TIFF
+            self.backend, self.format = "columbus", "columbus"
+        else:
+            version = root.tag.split("}", 1)[0].rsplit("/", 1)[-1]       # HarmonyV4 .. V7
+            self.format = "harmony-" + version.replace("Harmony", "").lower()  # harmony-v4
+        # members as pages when the index names them (URL BufferNo): Columbus
+        # writes a well's planes into one TIFF
+        pages = root.find("{*}Images/{*}Image/{*}URL[@BufferNo]") is not None
+        self._members = Members(pages=pages)
         plates = root.findall("{*}Plates/{*}Plate")
         if len(plates) != 1:
             raise UnsupportedFormatError(
@@ -306,7 +315,14 @@ class _HarmonyFile(File):
 
         def url(e):
             u = _text(e, "URL")
-            return os.path.join(folder, u) if u else None
+            if not u:
+                return None
+            if not pages:
+                return os.path.join(folder, u)
+            try:
+                return os.path.join(folder, u), int(e.find("{*}URL").get("BufferNo") or 0)
+            except ValueError:
+                raise CorruptFileError(f"{path!r}: a URL BufferNo is not a whole number") from None
 
         kept = keep_fields({key: {plane: url(e) for plane, e in field.items()}
                             for key, field in listed.items()}, wanted, path)
@@ -316,7 +332,14 @@ class _HarmonyFile(File):
         first_key = next(iter(kept))
         first_e = listed[first_key][next(iter(kept[first_key]))]
         shape_yx = (_int(first_e, "ImageSizeY"), _int(first_e, "ImageSizeX"))
-        dtype, unit, _ = self._members.plane_info(next(iter(kept[first_key].values())), shape_yx)
+        first = next(iter(kept[first_key].values()))
+        if pages:
+            dtype, unit, got = self._members.page_info(*first)
+            if tuple(got) != shape_yx:
+                raise CorruptFileError(f"{first[0]!r} page {first[1]}: {got[0]} x {got[1]}, the "
+                                       f"index {path!r} says {shape_yx[0]} x {shape_yx[1]}")
+        else:
+            dtype, unit, _ = self._members.plane_info(first, shape_yx)
         shape = (len(tps), len(chs), len(pls)) + shape_yx
         position = {(tp, ch, pl): (tps.index(tp), chs.index(ch), pls.index(pl))
                     for tp, ch, pl in wanted}
@@ -324,7 +347,7 @@ class _HarmonyFile(File):
                       or _measurement_name(folder) or "")
         base = plate_name or os.path.basename(path)
         row_names, column_names = layout(rows, columns, wells_rc, path)
-        plates = [Plate(name=plate_name, rows=row_names, columns=column_names,
+        plates = [Plate(name=plate_name, row_names=row_names, column_names=column_names,
                         wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells_rc))]
         images = []
         for (r, c, f) in sorted(kept, key=lambda k: (number[k[:2]], k[2])):

@@ -61,7 +61,8 @@ def _chunk(name: bytes, data: bytes, name_bytes: int | None = None) -> bytes:
     return struct.pack("<IIQ", MAGIC, len(name), len(data)) + name + data
 
 
-def _loop(kind: str, count: int, inner: dict | None, valid=None, ne_periods=None) -> dict:
+def _loop(kind: str, count: int, inner: dict | None, valid=None, ne_periods=None,
+          names=None) -> dict:
     if kind == "T":
         exp = {"eType": 1, "uLoopPars": {"uiCount": count, "dStart": 0.0, "dPeriod": 100.0,
                                          "dDuration": 0.0}}
@@ -75,7 +76,8 @@ def _loop(kind: str, count: int, inner: dict | None, valid=None, ne_periods=None
         }}
     elif kind == "P":
         points = {f"i{i:010}": {"dPosX": float(i), "dPosY": 0.0, "dPosZ": 0.0,
-                                "dPFSOffset": -1.0, "dPosName": f"p{i}"}
+                                "dPFSOffset": -1.0,
+                                "dPosName": names[i] if names else f"p{i}"}
                   for i in range(count)}
         exp = {"eType": 2, "uLoopPars": {"bUseZ": False, "bRelativeXY": False,
                                          "Points": points}}
@@ -92,13 +94,15 @@ def _loop(kind: str, count: int, inner: dict | None, valid=None, ne_periods=None
 
 def write_nd2(path, frames: np.ndarray, loops: list, *, compression: str | None = None,
               pad_bytes: int = 0, missing=(), valid_positions=None, ne_periods=None,
-              picture: dict | None = None, plane_fields: dict | None = None) -> None:
+              picture: dict | None = None, plane_fields: dict | None = None,
+              point_names=None) -> None:
     """*frames*: (n_frames, height, width, channels, samples) in frame order.
     *loops*: [(kind, count)] outermost first, kind in T / NE / P / Z; the
     product of counts must be n_frames.  *missing*: frame numbers left out.
     *valid_positions*: flags for the P loop (count = all points, frames only
     for the valid ones).  *picture*: more SLxPictureMetadata fields;
-    *plane_fields*: {channel: fields} for that channel's picture plane."""
+    *plane_fields*: {channel: fields} for that channel's picture plane.
+    *point_names*: the XY points' names (``dPosName``; default ``p0``, ``p1``, ...)."""
     n, height, width, channels, samples = frames.shape
     dtype = frames.dtype
     bpc = dtype.itemsize * 8
@@ -108,9 +112,11 @@ def write_nd2(path, frames: np.ndarray, loops: list, *, compression: str | None 
     exp = None
     for kind, count in reversed(loops):
         if kind == "P" and valid_positions is not None:
-            exp = _loop(kind, len(valid_positions), exp, valid=valid_positions)
+            exp = _loop(kind, len(valid_positions), exp, valid=valid_positions,
+                        names=point_names)
         else:
-            exp = _loop(kind, count, exp, ne_periods=ne_periods if kind == "NE" else None)
+            exp = _loop(kind, count, exp, ne_periods=ne_periods if kind == "NE" else None,
+                        names=point_names if kind == "P" else None)
     attrs = {"uiWidth": width, "uiWidthBytes": width_bytes, "uiHeight": height,
              "uiComp": channels * samples, "uiBpcInMemory": bpc, "uiBpcSignificant": bpc,
              "uiSequenceCount": n, "uiTileWidth": width, "uiTileHeight": height,

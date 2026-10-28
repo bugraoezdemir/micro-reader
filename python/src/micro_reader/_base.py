@@ -4,6 +4,8 @@ Each image is one spatial frame of the file; its index says which (series,
 tile, rotation, view: see docs/AXES.md)."""
 from __future__ import annotations
 
+import os
+
 import threading
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
@@ -367,6 +369,19 @@ class File:
     backend's own class is an implementation detail."""
 
     backend: str = "base"
+    #: what the object is in the containment tree (decision C-19): a file holds
+    #: plates (``plates``), a plate wells, a well fields, a field images
+    kind = "file"
+    #: what holds it: nothing, for a file (a plate's ``parent`` is its file)
+    parent = None
+
+    def __getattr__(self, name):
+        # an accessor of a lower level (f.wells): name the way down
+        if name in ("wells", "fields", "rows", "columns"):
+            raise AttributeError(f"a file holds plates: f.plates[p].{name}"
+                                 if name != "fields" else
+                                 "a file holds plates: f.plates[p].wells[w].fields")
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
     #: (coordinate_systems, coordinate_transformations) once declared and checked
     _graph: Optional[tuple] = None
     #: (the images it was built from, collection) once built (``collection``)
@@ -393,6 +408,8 @@ class File:
         if self.plates:
             from ._plate import navigate
             self.plates = navigate(self.plates, self.images)
+            for plate in self.plates:
+                object.__setattr__(plate, "parent", self)
 
     def _index_resolutions(self) -> None:
         """``resolution`` is in every index when the file stores a pyramid of
@@ -445,32 +462,42 @@ class File:
 
         - A value may be a list, tuple, range or set: any of them
           (``select(illumination=[2, 3])``).
-        - ``well`` is a well's place in ``plates[p].wells`` or its name
-          (``well="C3"``, in each plate).
-        - ``row`` and ``column`` select a plate's wells by row and column:
-          0-based numbers (as ``Well.row`` / ``Well.column``: ``column=2`` is
-          the column named "3") or names (``row="C"``, ``column="3"``), one or
-          several (``row=["B", "C"]``, ``column=range(2, 5)``).  They are
+        - A plate's places have a position and a name, a keyword each (the
+          columns of ozp's table): ``plate`` / ``plate_name``, ``acquisition``
+          / ``acquisition_name``, ``well`` / ``well_name``, ``row`` /
+          ``row_name``, ``column`` / ``column_name``.  Positions count from 0
+          (``well`` is a place in ``plates[p].wells``, ``column=2`` the column
+          named "3"); a name given to a position keyword is its name
+          (``well="C3"`` is ``well_name="C3"``).  ``row`` and ``column`` are
           another address of the well, so they do not go with ``well``.
         - A ``Plate``, ``Well``, ``Field`` or ``Acquisition`` object is no
           value (TypeError).
 
         An unknown index name raises ``KeyError``; a known one no image has
         selects nothing."""
-        from ._plate import WELL_ADDRESS, index_values, wells_selected
-        unknown = set(index) - set(INDEX_NAMES) - set(WELL_ADDRESS)
+        from ._plate import (PLACE_NAMES, WELL_ADDRESS, index_values, place_conditions,
+                             place_matches, places_of)
+        unknown = set(index) - set(INDEX_NAMES) - set(WELL_ADDRESS) - set(PLACE_NAMES)
         if unknown:
             if _OLD_SERIES in unknown:
                 raise KeyError(_RENAMED)
-            raise KeyError(f"unknown indices {sorted(unknown)}; the indices are {INDEX_NAMES}")
+            raise KeyError(f"unknown indices {sorted(unknown)}; the indices are {INDEX_NAMES}, "
+                           f"and a plate's {', '.join(WELL_ADDRESS + PLACE_NAMES)}")
         wanted = {name: index_values(name, value) for name, value in index.items()}
-        wells = wells_selected(self.plates, wanted)   # (plate, well) pairs, or None
+        conditions = place_conditions(wanted)
+        plates = self.plates if conditions else ()
+        if conditions and not plates:
+            raise ValueError("select: plate names, well names, rows and columns are a "
+                             "plate's places; the file has no plates (open it with "
+                             "plates=True)")
         get, out = dict.get, []
         items = tuple(wanted.items())
         for image in self.images:              # dict.get: not ImageIndex's checks
             key = image.index
-            if wells is not None and (get(key, "plate", 0), get(key, "well")) not in wells:
-                continue
+            if conditions:
+                place = places_of(plates, key)
+                if place is None or not place_matches(conditions, *place):
+                    continue
             for name, allowed in items:
                 if get(key, name) not in allowed:
                     break
@@ -557,8 +584,10 @@ class File:
                 paths = getattr(each, "_member_paths", None)
                 if paths is not None:
                     out.update(paths())
-        out.discard(self.path)
-        return out
+        # the file itself (a .flex or .C01 file opens its folder's set, itself
+        # among them), however its path was spelled (relative, other case)
+        own = os.path.normcase(os.path.abspath(self.path))
+        return {p for p in out if os.path.normcase(os.path.abspath(p)) != own}
 
     def _side_files(self) -> set:
         """Files that belong to this file set without being read as its images

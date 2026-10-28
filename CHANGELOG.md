@@ -6,8 +6,10 @@ A minor release: `select` takes new arguments, and refuses a plate, well, field 
 acquisition object it used to match nothing with. Ships together with ome_zarr_pyramid
 0.5.0, whose `PyramidCollection.select` takes the same arguments and gives the same
 images. eubi-bridge 0.3.2 and earlier bound micro-reader below 0.3 and keep 0.2.x;
-eubi-bridge calls `select` with single index values only, so widening its bound to
-`<0.4` needs no other change.
+eubi-bridge calls `select` with single index values only. Two changes break: `Plate.rows` /
+`Plate.columns` (the names) are `Plate.row_names` / `Plate.column_names` now, and `open`
+turns RGB samples into channels by default (see Changed); eubi-bridge 0.3.3 adapts to the
+second before widening its bound to `<0.4`.
 
 ### New
 
@@ -20,13 +22,118 @@ eubi-bridge calls `select` with single index values only, so widening its bound 
 - Any index value may be a list, tuple, range or set, meaning any of them:
   `select(illumination=[2, 3])`, `select(row=["B", "C"], column=range(2, 5))`;
   `Field.select` too.
+- `File.select` takes each place of a plate by position and by name, a keyword each:
+  `plate` / `plate_name`, `acquisition` / `acquisition_name`, `well` / `well_name`, `row` /
+  `row_name`, `column` / `column_name` (the columns of ome-zarr-pyramid's table). A name
+  given to a position keyword is its name (`well="C3"`, `plate="Plate 1"`); a number given
+  to a name keyword raises `TypeError` naming the position keyword.
+- `select` and `Field.select` take slices of positions, as ranges: `well=slice(0, 12)`,
+  `row=slice(2, None)` (open-ended: row C onward), `column=slice(0, None, 2)`. A slice
+  selected nothing, silently; a negative bound or a step below 1 raises `ValueError`, a
+  slice on a name keyword `TypeError`.
+
+### New (CQ1, Cellomics, ImageXpress HCS.ai)
+
+- An OME-TIFF whose OME-XML describes a plate and whose planes name their files (Yokogawa
+  CQ1's `MeasurementResult.ome.tif`, and its member TIFFs) reads as a plate with
+  `plates=True`, through the companion reader.
+- Thermo Fisher Cellomics `.C01` plates (backends/cellomics.py): any `.C01` file, the
+  folder, the database or a log opens the plate; the layout is guessed (the format is only
+  in the Access database), at least 96 wells.
+- Molecular Devices ImageXpress HCS.ai exports (`.jdce` + `image_metadata_*.csv`,
+  backends/jdce.py): projections, z-stacks and stitched montages, each image set a plate;
+  field positions relative to the well's centre.
+
+### Fixed
+
+- A multi-file OME-TIFF whose image starts at IFD 0 of a member file took the metadata of
+  the image at IFD 0 of the opened file (CQ1: every field the title image's -- no channel
+  names, no pixel sizes): images are matched by file and IFD.
+- `group_files` counted a set's opened file among its own members when its path was spelled
+  differently (relative): the set then had no group of its own.
+
+### New (scanR, ND2 plates)
+
+- Olympus / Evident scanR plates (`experiment_descriptor.xml` with `data/metadata.ome.xml`),
+  which opened as an OME companion without a plate: wells and fields from the data files'
+  names, the layout from the descriptor. The descriptor, the folders, the `.dat` files,
+  the companion and (with `multifile=True`) any data TIFF open the plate.
+- ND2 with `plates=True`: a file whose XY points are named after wells as NIS-Elements
+  names them (`A10_0000`, `B02_0003`, `E8.1`) reads as a plate (layout: the smallest
+  standard plate holding the wells; fields in acquisition order). Other point names
+  (`P1`, `A1`) keep the positions as they are.
+- A member that points to a metadata file which is itself a part of a composite (scanR's
+  companion) opens the composite.
+
+### New (Columbus)
+
+- PerkinElmer Columbus exports, which were not recognised: `ImageIndex.ColumbusIDX.xml`
+  is read as a Harmony index (`File.backend` / `format` `"columbus"`), including planes
+  stored as pages of multi-page TIFFs (`URL BufferNo`). `MeasurementIndex.ColumbusIDX.xml`,
+  the CSV index and the export's folders open the same plate.
+
+### New (Opera Flex)
+
+- PerkinElmer Opera Flex plates (`.flex`), which were refused: any `.flex` file, or its
+  folder, opens the folder's `.flex` files as plates (one per barcode; `multifile=False`:
+  the one file). Wells from `WellCoordinate`, fields from `Sublayout`, axes `t c z y x`
+  from `Timepoint`, exposure and camera, and `Stack`; pixel sizes, z step, channel names
+  and positions relative to the well's centre. A field whose planes do not fill its grid,
+  and scaled intensities (`ImageFactor`), are refused. `group_files` gives a Flex folder
+  as one group (an index file's members are no longer opened again).
+
+### New (OME companion files)
+
+- OME companion plates: `open(path, plates=True)` reads a companion with `Plate` /
+  `Well` / `WellSample` as a plate. `File.plates` describes it and the images in its
+  wells are indexed `plate` / `acquisition` / `well` / `field` instead of `series`. A
+  well's fields are its WellSamples in `Index` order (per `PlateAcquisition`). The layout
+  is the Plate's `Rows` x `Columns`, else the smallest that holds every well listed. Plates
+  and wells are those that hold images, and an image in no well keeps `series`. Without
+  `plates=True` nothing changes.
+- RGB images in a companion (`SamplesPerPixel` 3: one Channel standing for SizeC 3, as
+  OME-TIFF writes it) read as `t c z y x s`, c = SizeC / SamplesPerPixel, as an RGB
+  OME-TIFF opens; they were refused. A member opened alone (`multifile=False`) too.
+  Channels of different SamplesPerPixel in one image stay refused
+  (`UnsupportedFormatError`); a member whose pages hold other samples than listed is a
+  `CorruptFileError`.
+- A companion whose images miss member files gives one `MissingImagesWarning` for the
+  set (was one per image), counting files, not planes.
 
 ### Changed
+
+- **`open` turns RGB samples into channels by default** (`samples="channels"`, was
+  `"keep"`): an RGB image has `c` 3 instead of an `s` axis, and its metadata lists one
+  channel per sample, "<name> R" / "G" / "B" ("A"), coloured red / green / blue (white for
+  A), wavelengths kept -- the names eubi-bridge gives; a single unnamed channel gives three
+  unnamed, coloured ones; other sample counts are numbered and uncoloured. A file listing
+  one channel per sample already keeps its own. Only images with samples are wrapped (their
+  `.source` is the stored image); others are unchanged. `samples="keep"` gives the old
+  behaviour; `Image.as_axes` still keeps `s` by default. eubi-bridge 0.3.3 must read the
+  channel names of the stored image (`image.source.metadata`) where it folds samples
+  itself, before widening its bound to `<0.4`.
 
 - A `Plate`, `Well`, `Field` or `Acquisition` object given as an index value raises
   `TypeError` (it selected nothing): `select(well=plate.wells[2])` names
   `well=plate.well_index(...)` and `well="C3"`. Row, column and well names on a file
   opened without `plates=True` raise `ValueError` naming it.
+- **Breaking:** `Plate.rows` and `Plate.columns` slice the plate (below); the row and
+  column names they held are `Plate.row_names` and `Plate.column_names`. Update
+  `plate.rows[well.row]` to `plate.row_names[well.row]`; `len(plate.rows)` still works.
+  The `Plate(...)` fields are named `row_names` / `column_names` too.
+
+### New (containment, decision C-19)
+
+- Every level knows what it is and what holds it: `.kind` (`"file"`, `"plate"`,
+  `"well"`, `"field"`) and `.parent` (a field's well, a well's plate, a plate's file).
+- Accessors go down only, by level: a file holds `.plates`, a plate `.wells`, a well
+  `.fields`, a field `.images`; another level's accessor (`well.plates`, `f.wells`) raises
+  `AttributeError` naming what the object holds and `.parent`.
+- `plate.rows[...]` / `plate.columns[...]` give a part of the plate, still a plate: an
+  index, a slice (negative bounds from the layout's end), a name or a list of them, in
+  either order (`plate.rows[2:5].columns[3:7]`), as `select(row=..., column=...)`.
+  Positions are the whole layout's; `well_index` answers with the index the images carry;
+  `is_part` says whether a plate is a part.
 
 ## 0.2.1 (2026-10-23): plates and composites from more real files
 

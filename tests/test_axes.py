@@ -208,6 +208,62 @@ def test_policies_without_axes_keep_the_order(tmp_path):
         _check(img.images[0], data.transpose(2, 0, 1))
 
 
+def test_open_folds_rgb_samples_into_channels_by_default(tmp_path):
+    tifffile = pytest.importorskip("tifffile")
+    data = RNG.integers(0, 255, (20, 30, 3)).astype("u1")
+    rgb, grey = str(tmp_path / "rgb.tif"), str(tmp_path / "grey.tif")
+    tifffile.imwrite(rgb, data, photometric="rgb")
+    tifffile.imwrite(grey, data[..., 0])
+    with micro_reader.open(rgb) as f:
+        (im,) = f.images
+        assert (im.axes, im.shape) == ("cyx", (3, 20, 30))
+        _check(im, data.transpose(2, 0, 1))
+        # one unnamed channel: unnamed folded channels, tinted red / green / blue
+        assert [(c.name, c.color) for c in im.metadata.channels] == [
+            (None, "#FF0000"), (None, "#00FF00"), (None, "#0000FF")]
+        assert im.source.axes == "yxs"
+    with micro_reader.open(rgb, samples="keep") as f:
+        assert f.images[0].axes == "yxs" and len(f.images[0].metadata.channels) == 1
+    with micro_reader.open(grey) as f:                  # no samples: the native image
+        assert not hasattr(f.images[0], "source") and f.images[0].axes == "yx"
+    with pytest.raises(ValueError, match="samples='rgb'"):
+        micro_reader.open(rgb, samples="rgb")
+
+
+def test_a_folded_image_keeps_its_backend_attributes(tmp_path):
+    """A backend's own public attributes (a CZI series' ``origin``) stay readable
+    on an RGB image that open's default folds; private ones are not passed on."""
+    tifffile = pytest.importorskip("tifffile")
+    rgb = str(tmp_path / "rgb.tif")
+    tifffile.imwrite(rgb, RNG.integers(0, 255, (20, 30, 3)).astype("u1"), photometric="rgb")
+    with micro_reader.open(rgb) as f:
+        im = f.images[0]
+        im.source.vendor_origin = (5, 7)
+        assert im.vendor_origin == (5, 7)
+        with pytest.raises(AttributeError):
+            im._not_passed_on
+
+
+def test_folded_channels_are_named_as_eubi_bridge_names_them():
+    from micro_reader._axes import folded_channels
+    from micro_reader._metadata import Channel
+    nm = micro_reader.Quantity(520, "nanometer")
+    named = folded_channels((Channel(name="Bright", emission_wavelength=nm),), 1, 3)
+    assert [(c.name, c.color) for c in named] == [("Bright R", "#FF0000"),
+                                                  ("Bright G", "#00FF00"),
+                                                  ("Bright B", "#0000FF")]
+    assert {c.emission_wavelength for c in named} == {nm}
+    two = folded_channels((Channel(name="a"), Channel()), 2, 3)
+    assert [c.name for c in two] == ["a R", "a G", "a B",
+                                     "Channel 1 R", "Channel 1 G", "Channel 1 B"]
+    listed = tuple(Channel(name=n) for n in "RGB")     # one channel per sample already
+    assert folded_channels(listed, 1, 3) == listed
+    rgba = folded_channels((Channel(name="x"),), 1, 4)
+    assert [c.name for c in rgba][-1] == "x A" and rgba[-1].color == "#FFFFFF"
+    pair = folded_channels((Channel(name="x"),), 1, 2)
+    assert [(c.name, c.color) for c in pair] == [("x 0", None), ("x 1", None)]
+
+
 # -- canonical order and squeeze ------------------------------------------------------
 
 def test_canonical_order():
