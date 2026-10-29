@@ -406,7 +406,8 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base") -> _VsiF
                 raise UnsupportedFormatError(f"{where} stack {stack}: RGB tiles along a channel "
                                              "dimension")
             name = TYPE_NAMES.get(volume.type) or volume.name or f"stack{stack}"
-            images.append(_pyramid(len(images), name, ets, volume.size, slots, extents, volume, 0))
+            images.append(_pyramid(len(images), name, ets, volume.size, slots, extents, volume,
+                                   ets.fill))
         macro = _macro(path, len(images))
         if macro is not None:
             owned.append(macro._file)
@@ -450,7 +451,7 @@ def _open_bare_ets(path: str) -> _VsiFile:
                 "its .vsi says which is z, t or channel; open the .vsi")
         size = ets.size_from_tiles()
         image = _pyramid(0, os.path.splitext(os.path.basename(path))[0], ets, size, {},
-                         {"t": 1, "c": 1, "z": 1}, None, 0)
+                         {"t": 1, "c": 1, "z": 1}, None, ets.fill)
     except BaseException:
         ets.close()
         raise

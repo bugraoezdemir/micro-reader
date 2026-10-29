@@ -14,8 +14,12 @@ does not list the images; it gives:
 - ``ZSteps``: more than one -> folders ``ZStep_<z>`` (in the time point's
   folder when there are several), ``ZStep_1`` .. ``ZStep_<ZSteps>`` the
   planes; ``ZStep_0`` holds the projection when ``ZProjection`` is TRUE and
-  is left out.  Each such folder carries a copy of the ``.HTD``: a part of
-  the plate's (the one in the folder the ``ZStep_`` folders sit in).
+  is left out (not read; its TIFFs are parts of the plate, so they do not
+  turn up as images of their own).  Each ``TimePoint_`` and ``ZStep_``
+  folder carries a copy of the ``.HTD``: a part of the plate's, the outermost
+  one (a single-timepoint export may still have a ``TimePoint_1`` folder and
+  copies at three levels; a time series' copies list fields whose files are
+  in the plate's other timepoint folders).
 
 The files are named ``<plate>_<well>[_s<site>][_w<wave>]<anything>.TIF``
 (``_s`` / ``_w`` only when the plate has sites / waves; some versions add a
@@ -57,26 +61,35 @@ TIMEPOINT_FOLDER = re.compile(r"^TimePoint_\d+$", re.IGNORECASE)
 ZSTEP_FOLDER = re.compile(r"^ZStep_\d+$", re.IGNORECASE)
 
 
+def _projection_folder(name: str) -> bool:
+    """Whether a folder named *name* is ``ZStep_0``, a z series' projection."""
+    return ZSTEP_FOLDER.match(name) is not None and int(name.split("_", 1)[1]) == 0
+
+
 def may_own(folder: str, name: str, folders) -> bool:
     """``group_files``' cheap test (reads nothing): a ``_thumb`` TIFF may be
-    a plate's preview; an ``.HTD`` in a ``ZStep_`` folder a copy of the plate's."""
+    a plate's preview, a TIFF in ``ZStep_0`` its projection; an ``.HTD`` in a
+    ``ZStep_`` / ``TimePoint_`` folder a copy of the plate's."""
     lower = name.lower()
+    base = folders.base(folder)
     if lower.endswith(".htd"):
-        return ZSTEP_FOLDER.match(folders.base(folder)) is not None
-    return "thumb" in lower and lower.endswith((".tif", ".tiff"))
+        return ZSTEP_FOLDER.match(base) is not None or TIMEPOINT_FOLDER.match(base) is not None
+    return lower.endswith((".tif", ".tiff")) and ("thumb" in lower or _projection_folder(base))
 
 
 def _plate_htd(folder: str, base: str):
-    """The plate's ``.HTD`` named *base* for a file in *folder*: in *folder*, or
-    above a ``ZStep_`` / ``TimePoint_`` folder (exact names: no listing); None
-    when none exists."""
+    """The plate's ``.HTD`` named *base* for a file in *folder*: the outermost
+    of *folder*, the folder above a ``ZStep_`` folder and the one above a
+    ``TimePoint_`` folder that holds one (exact names: no listing) -- MetaXpress
+    copies the plate's ``.HTD`` into its ``TimePoint_`` and ``ZStep_`` folders,
+    and the plate is the one around them; None when none exists."""
     places = [folder]
     if ZSTEP_FOLDER.match(os.path.basename(folder)):
         folder = os.path.dirname(folder)
         places.append(folder)
     if TIMEPOINT_FOLDER.match(os.path.basename(folder)):
         places.append(os.path.dirname(folder))
-    for place in places:
+    for place in reversed(places):
         for ext in (".HTD", ".htd"):
             htd = os.path.join(place, base + ext)
             if os.path.isfile(htd):
@@ -85,19 +98,25 @@ def _plate_htd(folder: str, base: str):
 
 
 def owner(path: str, head):
-    """A plate's ``_thumb`` previews, and the copies of its ``.HTD`` in its
-    ``ZStep_`` folders, are parts of its ``.HTD`` -- only when that file exists
-    (exact names: no folder listing), so a lone file named like one is not taken
-    for a part."""
+    """A plate's ``_thumb`` previews, the projection TIFFs in ``ZStep_0`` (not
+    read: not planes of the z series) and the copies of its ``.HTD`` in its
+    ``TimePoint_`` / ``ZStep_`` folders are parts of the plate's ``.HTD`` --
+    only when that file exists (exact names: no folder listing), so a lone
+    file named like one is not taken for a part."""
     if os.path.isdir(path):
         return None
     name = os.path.basename(path)
     folder = os.path.dirname(os.path.abspath(path))
-    if name.lower().endswith(".htd") and ZSTEP_FOLDER.match(os.path.basename(folder)):
-        htd = _plate_htd(os.path.dirname(folder), os.path.splitext(name)[0])
-        return _parts.Part(htd, htd, standalone=True) if htd else None
+    if name.lower().endswith(".htd"):
+        if not (ZSTEP_FOLDER.match(os.path.basename(folder))
+                or TIMEPOINT_FOLDER.match(os.path.basename(folder))):
+            return None
+        htd = _plate_htd(folder, os.path.splitext(name)[0])
+        same = htd is not None and os.path.normcase(htd) == os.path.normcase(os.path.abspath(path))
+        return _parts.Part(htd, htd, standalone=True) if htd and not same else None
     match = NAME_RE.match(name)
-    if match is None or "thumb" not in match["rest"].lower():
+    if match is None or not ("thumb" in match["rest"].lower()
+                             or _projection_folder(os.path.basename(folder))):
         return None
     htd = _plate_htd(folder, match["base"])
     return _parts.Part(htd, htd, standalone=True) if htd else None

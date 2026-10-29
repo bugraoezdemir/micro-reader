@@ -58,6 +58,12 @@ class SkewedGridWarning(UserWarning):
     the skew."""
 
 
+class StoredValuesWarning(UserWarning):
+    """The file stores its pixels in a form that is not the measured values, and
+    micro-reader reads the measured ones; the warning says what was changed
+    (e.g. an older scanR plate's 12-bit values stored with the top bit set)."""
+
+
 class PlateLayoutWarning(UserWarning):
     """A plate's wells lie outside the layout its file describes (e.g. a slide
     holder whose records address the wells of the slide in it); the layout

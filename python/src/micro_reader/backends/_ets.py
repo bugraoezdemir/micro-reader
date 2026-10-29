@@ -11,7 +11,8 @@ Layout as slideio reads it (Stanislav Melnikov, BSD-3: ``etsfile.cpp``,
   value type: 2 uint8, 4 uint16, ...), component count, colour space (1
   grey, 3 RGB, 4 BGR), compression (0 raw, 2 JPEG, 3 JPEG 2000, 5 lossless
   JPEG, 8 PNG, 9 BMP), quality, tile x / y / z size, 17 pixel-info hints, 10
-  background values, component order, "use pyramid";
+  background values (40 bytes: a missing tile's value per component, packed as
+  Bio-Formats reads them), component order, "use pyramid";
 - one record per tile: 4 bytes, the tile's coordinates (one int32 per
   dimension: tile column, tile row, then the image's other dimensions in an
   order the VSI's metadata gives, the pyramid level last when the file has a
@@ -72,6 +73,12 @@ class EtsFile:
                     f"{path!r}: ETS compression {COMPRESSIONS.get(self.compression, self.compression)}"
                     " is not supported")
             self.dtype = np.dtype(COMPONENT_TYPES[component_type])
+            #: what a tile the table lacks reads as: the background block's first values,
+            #: one per component, as Bio-Formats fills such tiles (CellSensReader.decodeTile;
+            #: an RGB VS200 slide stores 0xDCDCDC there: light grey around the tissue)
+            n = min(self.components, 40 // self.dtype.itemsize)
+            self.fill = np.frombuffer(struct.pack("<10I", *self.background),
+                                      self.dtype.newbyteorder("<"), count=n).copy()
             self.tile = (tile_y, tile_x)
             fh.seek(chunks_at)
             record = 4 + 4 * self.ndim + 8 + 4 + 4

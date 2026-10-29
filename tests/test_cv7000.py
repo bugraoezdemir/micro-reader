@@ -201,6 +201,11 @@ def test_a_three_d_action_next_to_a_two_d_one_is_ragged(tmp_path):
         assert flat.shape == (1, 1, 1, Y, X) and stack.shape == (1, 1, 4, Y, X)
         assert stack.metadata.pixel_sizes["z"] == micro_reader.Quantity(2.0, "micrometer")
         assert stack.metadata.position["z"].value == 0.0
+        # the whole starts at its grid's slice 0 (the deepest channel's first
+        # plane), not at the first channel's plane (JUMP's 2-D fluorescence
+        # listed before its 3-D brightfield); the flat part at its own plane
+        assert whole.metadata.position["z"].value == 0.0
+        assert flat.metadata.position["z"].value == 3.0
         # the whole and each part are in their well's system
         assert {i.metadata.coordinate_system for i in (whole, flat, stack)} == {"well-B2"}
         # BFP at z = 3.0: nearest slice of 0, 2, 4, 6 is 1 (a tie with 2 goes to the first)
@@ -354,3 +359,58 @@ def test_a_plane_listed_twice_reads_the_first_record_with_a_file(tmp_path):
     g = micro_reader.group_files(str(tmp_path))
     assert len(g.groups) == 1 and len(g.groups[0].members) == 2
     assert [os.path.basename(s) for s in g.singles] == [other]
+
+
+CV_PLATES = os.path.join(os.environ.get("MICROSCOPY_DATA",
+                                        os.path.expanduser("~/Desktop/data/microscopy")),
+                         "plates", "cv7000")
+
+
+def _real(folder):
+    path = os.path.join(CV_PLATES, folder)
+    if not os.path.exists(path):
+        pytest.skip(f"sample not found: {path} (set MICROSCOPY_DATA)")
+    return path
+
+
+def test_a_real_cv8000_plate_with_a_three_d_brightfield_is_ragged():
+    """JUMP cpg0016 source_2 plate 1053601756 (CV8000 AZ01, R2.03.02): five
+    2-D fluorescence channels and a 3-plane brightfield (BF3D, z -17 / -9 / -1)
+    whose records come after them; the 2-D planes (z -9) sit on slice 1."""
+    path = _real("cpg0016-jump-source2-1053601756-cv8000")
+    with micro_reader.open(os.path.join(path, "1053601756.wpi")) as f:
+        (plate,) = f.plates
+        assert (len(plate.row_names), len(plate.column_names), len(plate.wells)) == (16, 24, 384)
+        assert len(f.images) == 2304
+        whole = f.images[0]
+        assert whole.shape == (1, 6, 3, 996, 996) and whole.is_ragged
+        flat, stack = whole.parts
+        assert flat.shape == (1, 5, 1, 996, 996) and stack.shape == (1, 1, 3, 996, 996)
+        md = whole.metadata
+        assert [c.name for c in md.channels] == ["Hoechst", "Concanavalin", "SYTO",
+                                                 "WGA_Phalloidin", "MitoTracker", "TL"]
+        assert md.pixel_sizes["z"] == micro_reader.Quantity(8.0, "micrometer")
+        assert md.position["z"].value == -17.0 and flat.metadata.position["z"].value == -9.0
+        name = os.path.join(path, "1053601756_A01_T0001F001L01A{a:02d}Z{z:02d}C{a:02d}.tif")
+        np.testing.assert_array_equal(whole[0, 0, 1], tifffile.imread(name.format(a=1, z=1)))
+        assert not whole[0, 0, 0].any() and not whole[0, 0, 2].any()
+        for z in range(3):
+            np.testing.assert_array_equal(whole[0, 5, z], tifffile.imread(name.format(a=6, z=z + 1)))
+
+
+def test_a_real_cv7000_plate_of_three_d_fields():
+    """BIA S-BIAD3934 Hit_Validation/CN_1K (CV7000 DT01, R2.03.04): 60 wells of
+    a 96-well plate, 16 fields, three 3-D actions of 5 planes."""
+    path = _real("bia-S-BIAD3934-cv7000-hitvalidation-cn1k")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        f = micro_reader.open(os.path.join(path, "MeasurementData.mlf"))
+    with f:
+        (plate,) = f.plates
+        assert (len(plate.row_names), len(plate.column_names), len(plate.wells)) == (8, 12, 60)
+        image = plate.wells[-1].fields[-1].image
+        assert image.shape == (1, 3, 5, 984, 992) and not image.is_ragged
+        assert image.metadata.position["z"].value == 4.5
+        stem = "20260527_Corticalneurons_MOI_1k_Linus_AAV_Validation_G11_T0001F016L01"
+        np.testing.assert_array_equal(image[0, 2, 4],
+                                      tifffile.imread(os.path.join(path, stem + "A03Z05C03.tif")))

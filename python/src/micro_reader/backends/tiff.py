@@ -1432,6 +1432,13 @@ def _open(tif, path, tiles, resolutions, rename, companion, multifile, plates=Fa
             plate = _ome_plate(tif, path) if plates and multifile else None
             if plate is not None:
                 return plate
+        elif companion and multifile:
+            # a data file of an older scanR plate (no OME companion): its descriptor
+            # opens the plate; multifile=False this one plane (backends/scanr.py)
+            from . import scanr
+            target = scanr.old_plate_of(path)
+            if target is not None:
+                raise OpenInstead(target)
         first = tif.pages[0]
         if first.description.startswith("[ImarisDataSet]") and first.subfiletype & 1:
             # Imaris 3 (.ims before the HDF5 format): an RGB thumbnail (a reduced image),

@@ -375,3 +375,158 @@ def test_zenodo_21162526_point_names_make_plates(name, wells, fields):
         (plate,) = f.plates
         assert len(plate.wells) == wells
         assert [len(w.fields) for w in plate.wells] == fields
+
+
+def test_the_job_s_well_plate_is_the_layout(tmp_path):
+    """A file NIS-Elements acquired with a job holds the job's well plate
+    (JobDefinitionV1_0): that is the layout, not the smallest standard plate."""
+    path = str(tmp_path / "plate.nd2")
+    frames = np.arange(2 * 6 * 8, dtype=np.uint16).reshape(2, 6, 8, 1, 1)
+    write_nd2(path, frames, [("P", 2)], point_names=["B02_0000", "B03_0000"],
+              wellplate=(16, 24, "384 well 1.5H Cellvis"))
+    with micro_reader.open(path, plates=True) as f:
+        assert (len(f.plates[0].row_names), len(f.plates[0].column_names)) == (16, 24)
+
+
+def test_points_without_a_job_guess_the_layout_and_say_so(tmp_path):
+    path, _frames = _named_points(tmp_path, ["B02_0000", "B03_0000"])
+    with pytest.warns(micro_reader.PlateLayoutWarning, match="smallest standard plate"):
+        micro_reader.open(path, plates=True).close()
+
+
+# -- NIS-Elements well-plate runs: a folder of ND2 files ------------------------------
+
+def _run(folder, files, *, wellplate=(8, 12, "Cellvis P96-1.5H-N"), positions=1, t=1):
+    """A run folder: *files* {name: value}; each file one position (or
+    *positions*) of t x 6 x 8 uint16 filled with value + frame number."""
+    os.makedirs(folder, exist_ok=True)
+    out = {}
+    for name, value in files.items():
+        n = t * positions
+        frames = (np.arange(n * 6 * 8, dtype=np.uint16).reshape(n, 6, 8, 1, 1) % 97 + value)
+        loops = [("T", t)] if positions == 1 else [("T", t), ("P", positions)]
+        write_nd2(os.path.join(folder, name), frames, loops, wellplate=wellplate)
+        out[name] = frames
+    return out
+
+
+def test_a_run_of_files_one_per_well_is_a_plate(tmp_path):
+    folder = str(tmp_path / "20220701_140147")
+    data = _run(folder, {"WellB02_ChannelDIC_Seq0000.nd2": 100, "WellB03_ChannelDIC_Seq0001.nd2": 200,
+                         "WellF04_ChannelDIC_Seq0014.nd2": 300}, wellplate=(16, 24, "384 well"), t=3)
+    first = os.path.join(folder, "WellB02_ChannelDIC_Seq0000.nd2")
+    with micro_reader.open(os.path.join(folder, "WellF04_ChannelDIC_Seq0014.nd2"), plates=True) as f:
+        assert f.format == "nd2-run"
+        (plate,) = f.plates
+        assert plate.name == "20220701_140147"
+        assert (len(plate.row_names), len(plate.column_names)) == (16, 24)
+        assert [(w.name, [x.index for x in w.fields]) for w in plate.wells] == [
+            ("B2", [0]), ("B3", [0]), ("F4", [0])]
+        im = plate.wells[2].fields[0].image
+        assert im.index == {"plate": 0, "acquisition": 0, "well": 2, "field": 0}
+        assert (im.axes, im.shape) == ("tczyx", (3, 1, 1, 6, 8))
+        np.testing.assert_array_equal(im[:, 0, 0], data["WellF04_ChannelDIC_Seq0014.nd2"][..., 0, 0])
+        assert [c.name for c in im.metadata.channels] == ["DIC"] or im.metadata.channels[0].name
+    for kwargs in ({}, {"plates": True, "multifile": False}):         # the one file
+        with micro_reader.open(first, **kwargs) as f:
+            assert len(f.images) == 1 and f.plates == []
+    g = micro_reader.group_files(folder, plates=True)
+    (group,) = g.groups
+    assert not g.singles and len(group.members) == 2            # the run's other files
+    assert os.path.basename(group.main) in data
+    assert len(micro_reader.group_files(folder).singles) == 3       # without plates: files
+
+
+def test_a_run_of_files_one_per_point_has_the_points_as_fields(tmp_path):
+    folder = str(tmp_path / "run")
+    data = _run(folder, {"WellA01_PointA01_0001_ChannelFITC BP_Seq0001.nd2": 10,
+                         "WellA01_PointA01_0000_ChannelFITC BP_Seq0000.nd2": 20,
+                         "WellB01_PointB01_0000_ChannelFITC BP_Seq0002.nd2": 30})
+    with micro_reader.open(os.path.join(folder, "WellB01_PointB01_0000_ChannelFITC BP_Seq0002.nd2"),
+                           plates=True) as f:
+        (plate,) = f.plates
+        assert [(w.name, [x.index for x in w.fields]) for w in plate.wells] == [
+            ("A1", [0, 1]), ("B1", [0])]
+        im = plate.wells[0].fields[1].image                         # point counter 1
+        np.testing.assert_array_equal(im[0, 0, 0], data[
+            "WellA01_PointA01_0001_ChannelFITC BP_Seq0001.nd2"][0, ..., 0, 0])
+
+
+def test_channels_in_files_of_their_own_are_stacked(tmp_path):
+    folder = str(tmp_path / "run")
+    data = _run(folder, {"WellC03_ChannelDAPI_Seq0000.nd2": 1000, "WellC03_ChannelGFP_Seq0001.nd2": 2000})
+    with micro_reader.open(os.path.join(folder, "WellC03_ChannelGFP_Seq0001.nd2"), plates=True) as f:
+        (im,) = f.images
+        assert im.shape == (1, 2, 1, 6, 8)
+        # its channel files are not ragged parts: one sampling, one part
+        assert not im.is_ragged and im.parts == [im]
+        np.testing.assert_array_equal(im[0, 1, 0], data["WellC03_ChannelGFP_Seq0001.nd2"][0, ..., 0, 0])
+        np.testing.assert_array_equal(im[0, :, 0, 2:4, 1:5][0],
+                                      data["WellC03_ChannelDAPI_Seq0000.nd2"][0, 2:4, 1:5, 0, 0])
+
+
+def test_a_run_micro_reader_cannot_place_is_refused(tmp_path):
+    folder = str(tmp_path / "twice")
+    _run(folder, {"WellA01_ChannelDIC_Seq0000.nd2": 1, "WellA01_ChannelDIC_Seq0001.nd2": 2})
+    with pytest.raises(UnsupportedFormatError, match="several files of one channel.*multifile=False"):
+        micro_reader.open(os.path.join(folder, "WellA01_ChannelDIC_Seq0000.nd2"), plates=True)
+    folder = str(tmp_path / "positions")
+    _run(folder, {"WellA01_ChannelDIC_Seq0000.nd2": 1}, positions=2)
+    with pytest.raises(UnsupportedFormatError, match="holds 2 XY positions"):
+        micro_reader.open(os.path.join(folder, "WellA01_ChannelDIC_Seq0000.nd2"), plates=True)
+
+
+def test_a_run_of_more_files_than_stay_open_reads_every_file(tmp_path, monkeypatch):
+    """The run keeps OPEN_FILES (32) members open; a closed one opens again on its next
+    read. It did not: every field of a 96-well run past the 32nd failed with 'I/O
+    operation on closed file'."""
+    from micro_reader.backends import _nd2_run
+    monkeypatch.setattr(_nd2_run, "OPEN_FILES", 2)
+    folder = str(tmp_path / "run")
+    names = {f"Well{r}{c:02d}_ChannelDIC_Seq{i:04d}.nd2": 100 * (i + 1)
+             for i, (r, c) in enumerate([("A", 1), ("A", 2), ("B", 1), ("B", 2), ("C", 1)])}
+    data = _run(folder, names)
+    with micro_reader.open(os.path.join(folder, next(iter(names))), plates=True) as f:
+        assert len(f.images) == 5
+        for _ in range(2):                                      # every member closed once
+            for im, name in zip(f.images, names):
+                np.testing.assert_array_equal(im[0, 0, 0], data[name][0, ..., 0, 0])
+
+
+def test_a_run_of_rgb_files_is_refused_by_name(tmp_path):
+    folder = str(tmp_path / "rgb")
+    os.makedirs(folder)
+    frames = np.arange(6 * 8 * 3, dtype=np.uint8).reshape(1, 6, 8, 1, 3)
+    for name in ("WellA01_ChannelBF_Seq0000.nd2", "WellA02_ChannelBF_Seq0001.nd2"):
+        write_nd2(os.path.join(folder, name), frames, [("T", 1)], wellplate=(8, 12, "96 well"))
+    with pytest.raises(UnsupportedFormatError, match="RGB samples.*multifile=False"):
+        micro_reader.open(os.path.join(folder, "WellA01_ChannelBF_Seq0000.nd2"), plates=True)
+
+
+ND2_RUNS = os.path.join(os.environ.get("MICROSCOPY_DATA",
+                                       os.path.expanduser("~/Desktop/data/microscopy")),
+                        "plates", "nd2")
+
+
+@pytest.mark.parametrize("folder, layout, wells, fields, shape", [
+    ("bia-S-BIAD3591/4x_overview_20250306_171942_094", (8, 12), 24, 24, (1, 1, 6, 576, 576)),
+    ("zenodo-18927821-96well/20260116_094944_372", (8, 12), 40, 360, (1, 1, 1, 1024, 1024)),
+    ("zenodo-10139789-384well/microchamber/384well_220701/20220701_140147", (16, 24), 4, 4,
+     (33, 1, 1, 2304, 2304)),
+])
+def test_real_nis_runs_read_as_plates(folder, layout, wells, fields, shape):
+    """BIA S-BIAD3591 (one file per well), Zenodo 18927821 (one per point, 9 per
+    well), Zenodo 10139789 (one per well, 4 of a 384-well plate, t 33): the
+    layout from each file's job (phenoplate-96, Cellvis P96, 384 well Cellvis)."""
+    path = os.path.join(ND2_RUNS, *folder.split("/"))
+    if not os.path.exists(path):
+        pytest.skip(f"sample not found: {path} (set MICROSCOPY_DATA)")
+    first = sorted(e.path for e in os.scandir(path) if e.name.endswith(".nd2"))[0]
+    with micro_reader.open(first, plates=True) as f:
+        (plate,) = f.plates
+        assert (len(plate.row_names), len(plate.column_names)) == layout
+        assert len(plate.wells) == wells and sum(len(w.fields) for w in plate.wells) == fields
+        im = plate.wells[0].fields[0].image
+        assert im.shape == shape and im.metadata.coordinate_system == "stage"
+        with micro_reader.open(first) as alone:
+            np.testing.assert_array_equal(im[0, 0, 0, :64, :64], alone.images[0][0, 0, 0, :64, :64])
