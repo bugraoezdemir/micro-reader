@@ -192,6 +192,45 @@ def test_a_z_series(tmp_path):
     grouping = micro_reader.group_files(str(tmp_path))
     assert [g.kind for g in grouping.groups] == ["index"] and not [
         s for s in grouping.singles if s.lower().endswith(".htd")]
+    # ZStep_0's projection TIFFs are parts of the plate (not read), not images of their own
+    assert not grouping.singles
+    projection = os.path.join(str(tmp_path), "ZStep_0", f"{STEM}_A01_s1_w1.TIF")
+    with micro_reader.open(projection) as f:                         # it opens the plate
+        assert os.path.normcase(f.path) == os.path.normcase(htd)
+
+
+def test_a_time_series_with_a_copy_of_the_htd_in_each_timepoint_folder(tmp_path):
+    """ImageXpress HT.ai exports (zenodo 12724928, plate 3435): every TimePoint_
+    folder holds a copy of the plate's HTD; the copies are parts of the plate (each
+    was a plate of its own that found none of its files)."""
+    import shutil
+    htd, data = _write(str(tmp_path), wells=[(0, 0)], sites=[[True]], waves=("DAPI",), timepoints=3)
+    for t in (1, 2, 3):
+        shutil.copy(htd, os.path.join(str(tmp_path), f"TimePoint_{t}", os.path.basename(htd)))
+    grouping = micro_reader.group_files(str(tmp_path))
+    assert [os.path.normcase(g.main) for g in grouping.groups] == [os.path.normcase(htd)]
+    assert not grouping.singles
+    copy = os.path.join(str(tmp_path), "TimePoint_2", os.path.basename(htd))
+    with micro_reader.open(copy) as f:
+        assert os.path.normcase(f.path) == os.path.normcase(htd)
+        np.testing.assert_array_equal(f.images[0][2, 0, 0], data[(0, 0, 1, 1, 3)])
+
+
+def test_a_single_timepoint_z_series_with_copies_at_three_levels(tmp_path):
+    """zenodo 12724928, plate 3433: one timepoint, still in a TimePoint_1 folder,
+    with the HTD in the plate folder, in TimePoint_1 and in every ZStep_ folder:
+    one plate, opened from the outermost HTD (TimePoint_1's was a second plate)."""
+    import shutil
+    inner, data = _z_series(str(tmp_path / "TimePoint_1"), 2, wells=[(0, 0)], sites=[[True]])
+    htd = str(tmp_path / os.path.basename(inner))
+    shutil.copy(inner, htd)
+    grouping = micro_reader.group_files(str(tmp_path))
+    assert [os.path.normcase(g.main) for g in grouping.groups] == [os.path.normcase(htd)]
+    assert not grouping.singles
+    for entry in (htd, inner, str(tmp_path / "TimePoint_1" / "ZStep_1" / os.path.basename(htd))):
+        with micro_reader.open(entry) as f:
+            assert os.path.normcase(f.path) == os.path.normcase(htd)
+            np.testing.assert_array_equal(f.images[0][0, 1, 1], data[(0, 0, 1, 2, 1, 2)])
 
 
 def test_refused(tmp_path):

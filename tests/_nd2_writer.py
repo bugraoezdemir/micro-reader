@@ -95,14 +95,16 @@ def _loop(kind: str, count: int, inner: dict | None, valid=None, ne_periods=None
 def write_nd2(path, frames: np.ndarray, loops: list, *, compression: str | None = None,
               pad_bytes: int = 0, missing=(), valid_positions=None, ne_periods=None,
               picture: dict | None = None, plane_fields: dict | None = None,
-              point_names=None) -> None:
+              point_names=None, wellplate=None) -> None:
     """*frames*: (n_frames, height, width, channels, samples) in frame order.
     *loops*: [(kind, count)] outermost first, kind in T / NE / P / Z; the
     product of counts must be n_frames.  *missing*: frame numbers left out.
     *valid_positions*: flags for the P loop (count = all points, frames only
     for the valid ones).  *picture*: more SLxPictureMetadata fields;
     *plane_fields*: {channel: fields} for that channel's picture plane.
-    *point_names*: the XY points' names (``dPosName``; default ``p0``, ``p1``, ...)."""
+    *point_names*: the XY points' names (``dPosName``; default ``p0``, ``p1``, ...).
+    *wellplate*: (rows, columns, model name) of the well plate of a NIS-Elements job
+    (a ``CustomData|JobDefinitionV1_0!`` chunk: "LV0Z", the length, zlib of the job)."""
     n, height, width, channels, samples = frames.shape
     dtype = frames.dtype
     bpc = dtype.itemsize * 8
@@ -151,6 +153,13 @@ def write_nd2(path, frames: np.ndarray, loops: list, *, compression: str | None 
     add(b"ImageMetadataSeqLV|0!", clx_doc("SLxPictureMetadata", meta))
     if exp is not None:
         add(b"ImageMetadataLV!", clx_doc("SLxExperiment", exp))
+    if wellplate is not None:
+        rows, columns, model = wellplate
+        job = clx_doc("Job", {"CustomDefinitions": {"CustomWellplate": {"CLxWellplate": {
+            "wsModelName": model, "uiXCount": columns, "uiYCount": rows,
+            "dXDistance": 4500.0, "dYDistance": 4500.0}}}, "Property": {"Name": "job"}})
+        add(b"CustomData|JobDefinitionV1_0!",
+            b"LV0Z" + struct.pack("<Q", len(job)) + zlib.compress(job))
     # frame acquisition times (ms), which bioio-nd2 reads for its metadata
     add(b"CustomData|AcqTimesCache!", (np.arange(n, dtype="<f8") * 100.0).tobytes())
     for i, frame in enumerate(frames):

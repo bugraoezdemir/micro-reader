@@ -112,15 +112,33 @@ def test_rgb_png_tiles(tmp_path):
         np.testing.assert_array_equal(im.resolutions[1][0, 0, 0, :, :, 1:], levels[1][..., 1:])
 
 
-def test_a_missing_tile_reads_as_zeros(tmp_path):
+@pytest.mark.parametrize("background", [(), (4095,)])
+def test_a_missing_tile_reads_as_the_background(tmp_path, background):
+    """As Bio-Formats: the ETS header's background value (zeros when it stores none)."""
     levels = _levels((40, 40), 1)
     rows, cols = 40, 40
     path = write_vsi(tmp_path, "a", [image_volume(1, (rows, cols))],
-                     {1: {"levels": levels, "missing": {(0, 1, 1)}}})
+                     {1: {"levels": levels, "missing": {(0, 1, 1)}, "background": background}})
     expected = levels[0].copy()
-    expected[16:32, 16:32] = 0
+    expected[16:32, 16:32] = background[0] if background else 0
     with _native(path) as f:
         np.testing.assert_array_equal(f.images[0][0, 0, 0], expected)
+
+
+def test_a_missing_rgb_tile_reads_as_the_background_colour(tmp_path):
+    """A VS200 slide stores 0xDCDCDC: Bio-Formats fills the tiles outside the scanned
+    area with its bytes in file order, one per component (here three different ones)."""
+    levels = _levels((40, 40), 2, dtype=np.uint8, rgb=True)
+    path = write_vsi(tmp_path, "a", [image_volume(1, (40, 40), name="bf")],
+                     {1: {"levels": levels, "rgb": True, "background": (220, 230, 240),
+                          "missing": {(0, 0, 1), (1, 0, 0)}}})
+    expected0, expected1 = levels[0].copy(), levels[1].copy()
+    expected0[16:32, 0:16] = (220, 230, 240)
+    expected1[0:16, 0:16] = (220, 230, 240)
+    with _native(path) as f:
+        im = f.images[0]
+        np.testing.assert_array_equal(im[0, 0, 0], expected0)
+        np.testing.assert_array_equal(im.resolutions[1][0, 0, 0], expected1)
 
 
 def test_series_follow_bio_formats(tmp_path):

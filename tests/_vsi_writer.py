@@ -172,11 +172,12 @@ def _png(tile: np.ndarray) -> bytes:
 
 
 def write_ets(path, levels, tile=(16, 16), pyramid=True, compression=0, missing=(),
-              color_space=None, rgb=False) -> str:
+              color_space=None, rgb=False, background=()) -> str:
     """An ETS file of the pyramid *levels*: arrays shaped ``extra + (rows, cols)``
     (+ ``(3,)`` with *rgb*), ``extra`` the tile coordinates after the tile row.
     *compression* 0 (raw) or 8 (PNG); *missing*: tile keys ``(level, tx, ty,
-    *extra)`` left out of the table."""
+    *extra)`` left out of the table; *background*: the header's background
+    values, one per component (zeros when empty)."""
     extra_ndim = levels[0].ndim - 2 - (1 if rgb else 0)
     components = 3 if rgb else 1
     dtype = levels[0].dtype
@@ -206,7 +207,9 @@ def write_ets(path, levels, tile=(16, 16), pyramid=True, compression=0, missing=
         color_space = 4 if rgb else 1
     ets = b"ETS\x00" + struct.pack("<9I", 0x30001, COMPONENT_TYPES[dtype.name], components,
                                    color_space, compression, 90, tw, th, 1)
-    ets += b"\x00" * (17 * 4) + b"\x00" * (10 * 4) + struct.pack("<II", 0, int(pyramid))
+    block = np.asarray(background, dtype.newbyteorder("<")).tobytes()
+    ets += b"\x00" * (17 * 4) + block + b"\x00" * (10 * 4 - len(block))
+    ets += struct.pack("<II", 0, int(pyramid))
     ets += b"\x00" * (228 - len(ets))
     sis = struct.pack("<4sIIIQII QII QII", b"SIS\x00", 64, 2, ndim, 64, 228, 0, pos, len(table),
                       0, 0, 0, 0)

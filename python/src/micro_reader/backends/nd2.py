@@ -18,8 +18,12 @@ named after a well as NIS-Elements names them (``A10_0000``, ``B02_0003``,
 or a zero-padded column, ``NIS_WELL_POINT``, so that ``P1``, ``S2`` stay
 positions) reads as a plate: images indexed ``plate`` / ``acquisition`` / ``well`` / ``field``, a
 field being the point's place among its well's points, in acquisition order.
-The file names no plate format: the layout is the smallest standard plate
-holding the wells (``_plate.standard_layout``), the plate's name the file's.  Legacy JPEG 2000 ND2 (versions 1 / 2): ``_nd2_legacy``.
+The layout is the well plate of the NIS-Elements job that acquired the file
+(its ``JobDefinitionV1_0`` chunk), else the smallest standard plate holding
+the wells (``_plate.standard_layout``), with a PlateLayoutWarning; the plate's
+name the file's.  A folder of files of one well-plate run, one per well or per
+point (``WellB05_ChannelDIA_Seq0000.nd2``), reads as one plate with
+``plates=True``: ``_nd2_run``.  Legacy JPEG 2000 ND2 (versions 1 / 2): ``_nd2_legacy``.
 Not supported:
 lossy compression, tiled frames, custom loops.
 """
@@ -47,8 +51,13 @@ NAME = "nd2"
 #: ``E8.1``) or the column is zero-padded (``B02``)
 NIS_WELL_POINT = re.compile(r"^(?:well[\s_-]*)?[A-Za-z]{1,2}(?:\d{1,2}[\s_.#-]+\d+|0\d)$",
                             re.IGNORECASE)
-#: takes plates=True: a file whose XY points are named after wells reads as a plate
+#: takes plates=True: a file whose XY points are named after wells reads as a plate,
+#: and a file of a NIS-Elements well-plate run (backends/_nd2_run.py) its run
 PLATES = True
+#: takes multifile=False: with plates=True, a run file is read alone
+MULTIFILE = True
+#: group_files opens a run file as an index only when asked for plates
+INDEX_NEEDS_PLATES = True
 DECODE_CACHE_BYTES = 64 << 20
 RAW_TASK_BYTES = 8 << 20          # uncompressed frames are read in row pieces of this size
 SEPARATE_READ_BYTES = 32 << 10    # bytes worth skipping rather than issuing one more read
@@ -294,12 +303,11 @@ def _point_plate(nd2: Nd2Parser):
     if not all(NIS_WELL_POINT.match(n or "") for n in names):
         return None
     at = [well_of(n) for n in names]
-    if None in at:
-        return None
-    size = standard_layout(at)
-    if size is None:
+    if None in at or standard_layout(at) is None:
         return None
     wells = sorted(set(at))
+    from ._nd2_run import plate_size
+    size = plate_size(nd2.path, wells, nd2.path)        # the job's well plate, else a guess
     number = {rc: w for w, rc in enumerate(wells)}
     seen: dict = {}
     index = []
@@ -312,11 +320,23 @@ def _point_plate(nd2: Nd2Parser):
                          wells=tuple(Well(r, c, f"{row_label(r)}{c + 1}") for r, c in wells))]
 
 
+def may_index(name: str) -> bool:
+    """``group_files``' cheap test (reads nothing): a file of a NIS-Elements
+    well-plate run (``Well<well>..._Seq<n>.nd2``) opens its run as a plate."""
+    from ._nd2_run import RUN_FILE
+    return bool(RUN_FILE.match(name))
+
+
 def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa: A001 - backend protocol name
-         plates: bool = False):
+         plates: bool = False, multifile: bool = True):
     with builtins.open(path, "rb") as fh:
         if legacy.is_legacy(fh.read(12)):
             return legacy._LegacyNd2File(path)
+    if plates and multifile:
+        # a file of a NIS-Elements well-plate run: its folder's run (backends/_nd2_run.py)
+        from ._nd2_run import RUN_FILE, _Nd2RunFile
+        if RUN_FILE.match(os.path.basename(path)):
+            return _Nd2RunFile(path)
     nd2 = Nd2Parser(path)
     plate = _point_plate(nd2) if plates else None
     index, found = plate if plate is not None else ([None] * nd2.size("P"), [])

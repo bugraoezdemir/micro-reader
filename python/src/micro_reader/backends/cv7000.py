@@ -26,8 +26,8 @@ micro-reader reads the measurement in that folder.
   FieldIndex - 1.
 - Position: as for Harmony (``harmony._HarmonyImage._field_position``),
   the first pixel's centre relative to the well centre, image coordinates:
-  x0 = X - (W - 1) / 2 * px, y0 = -Y - (H - 1) / 2 * py, z = the first
-  plane's Z.  The CV7000's own Harmony-format export (``Index.idx.xml``)
+  x0 = X - (W - 1) / 2 * px, y0 = -Y - (H - 1) / 2 * py, z = the Z of
+  slice 0 (a ragged whole: its deepest channel's first plane).  The CV7000's own Harmony-format export (``Index.idx.xml``)
   stores the same X / Y / Z, so both routes give the same positions, up to
   the ``.mlf`` truncating X / Y to 0.1 um (checked on idr0088: < 0.1 um).
   Coordinate systems: one per well, as for Harmony (``well-B2``; plan 4.9).
@@ -226,8 +226,17 @@ class _CVImage(PlaneImage):
                 if value is not None and px is not None:
                     position[axis] = quantity(sign * value - (n - 1) / 2 * px.to("micrometer").value,
                                               "micrometer", positive=False)
-            if first[2] is not None:
-                position["z"] = quantity(first[2], "micrometer", positive=False)
+            # z: slice 0, the first plane of the channel with the most planes
+            # (a ragged whole's grid is its deepest part's; JUMP's 3-D brightfield
+            # next to 2-D fluorescence)
+            planes = {}
+            for tt, kk, _zz in self._records:
+                if tt == self._times[0]:
+                    planes[kk] = planes.get(kk, 0) + 1
+            deepest = max(self._channels, key=lambda k: planes.get(k, 0))
+            origin = self._record(self._times[0], deepest)
+            if origin and origin[2] is not None:
+                position["z"] = quantity(origin[2], "micrometer", positive=False)
         names = self._info["channels"]
         position = {a: q for a, q in position.items() if q is not None}
         return Metadata(pixel_sizes={a: q for a, q in sizes.items() if q}, position=position,

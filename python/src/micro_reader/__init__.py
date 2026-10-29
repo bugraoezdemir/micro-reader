@@ -13,7 +13,7 @@ from ._plate import Acquisition, Field, Plate, Well
 from ._spatial import Axis, Collection, CoordinateSystem, Transformation
 from ._errors import (CompanionWarning, CompositeWarning, CorruptFileError, InvariantError,
                       MicroReaderError, MissingImagesWarning, PlateLayoutWarning,
-                      SkewedGridWarning, UnsupportedFormatError)
+                      SkewedGridWarning, StoredValuesWarning, UnsupportedFormatError)
 from ._memory import MemoryLimitError, memory_limit, set_memory_limit
 from ._io import cache_limit, cached_bytes, set_cache_limit
 from ._pool import decode_threads, set_decode_threads
@@ -30,5 +30,5 @@ __all__ = [
     "MicroReaderError", "UnsupportedFormatError", "CorruptFileError", "InvariantError",
     "MemoryLimitError", "DamagedFileWarning",
     "MissingImagesWarning", "CompanionWarning", "CompositeWarning", "PlateLayoutWarning",
-    "SkewedGridWarning", "__version__",
+    "SkewedGridWarning", "StoredValuesWarning", "__version__",
 ]

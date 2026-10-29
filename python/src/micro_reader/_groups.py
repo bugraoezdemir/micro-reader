@@ -122,16 +122,19 @@ def _expand(paths) -> dict:
     return out
 
 
-def group_files(paths: Union[str, os.PathLike, Iterable]) -> Grouping:
+def group_files(paths: Union[str, os.PathLike, Iterable], plates: bool = False) -> Grouping:
     """Group *paths* (files, or folders, walked down with all their files)
-    into the images they make: see the module docstring."""
+    into the images they make: see the module docstring.  *plates*: as
+    ``open(plates=True)`` reads them, so that a set that is a plate only then
+    (a NIS-Elements well-plate run: a folder of ND2 files) is one group."""
     from ._registry import BACKENDS, open as open_file
     files = _expand(paths)
     rank = {m.NAME: k for k, m in enumerate(BACKENDS)}
 
     # 1. index files, recognised by name, then by content, then opened -- unless
     #    a composite rule makes one a part (a CellVoyager folder's Harmony export)
-    indexers = [m for m in BACKENDS if hasattr(m, "may_index")]
+    indexers = [m for m in BACKENDS if hasattr(m, "may_index")
+                and (plates or not getattr(m, "INDEX_NEEDS_PLATES", False))]
     owners = [m for m in BACKENDS if hasattr(m, "may_own")]
     folders = _Folders()
     found = []                                   # (rank, path, key, module, member keys, members, notes)
@@ -156,7 +159,7 @@ def group_files(paths: Union[str, os.PathLike, Iterable]) -> Grouping:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             try:
-                with open_file(path, backend=module.NAME) as f:
+                with open_file(path, backend=module.NAME, plates=plates) as f:
                     members = frozenset(f._member_files())
                     sides = frozenset(f._side_files())
             except Exception as exc:             # noqa: BLE001 - reported on the group

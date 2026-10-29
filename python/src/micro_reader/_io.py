@@ -12,7 +12,9 @@ from ._errors import CorruptFileError
 
 class ThreadHandles:
     """One read-only file handle per thread for one file (seek + read on a
-    shared handle is not thread-safe), kept open until :meth:`close`."""
+    shared handle is not thread-safe), kept open until :meth:`close`; a read after
+    :meth:`close` opens the file again (a well-plate run closes the handles of the
+    member files it read least recently)."""
 
     def __init__(self, path: str):
         self.path = path
@@ -22,7 +24,7 @@ class ThreadHandles:
 
     def get(self):
         fh = getattr(self._local, "fh", None)
-        if fh is None:
+        if fh is None or fh.closed:
             fh = self._local.fh = builtins.open(self.path, "rb", buffering=0)
             with self._lock:
                 self._all.append(fh)

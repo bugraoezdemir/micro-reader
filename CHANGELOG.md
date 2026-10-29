@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased): select by well name, row and column
+## 0.3.0 (2026-10-28): select by well name, row and column
 
 A minor release: `select` takes new arguments, and refuses a plate, well, field or
 acquisition object it used to match nothing with. Ships together with ome_zarr_pyramid
@@ -51,6 +51,31 @@ second before widening its bound to `<0.4`.
   names, no pixel sizes): images are matched by file and IFD.
 - `group_files` counted a set's opened file among its own members when its path was spelled
   differently (relative): the set then had no group of its own.
+- VSI: a tile an ETS file does not store (outside a slide's scanned area) read as 0, black
+  around the tissue of a VS200 H&E slide. It reads as the ETS header's background value
+  now, one per component, as Bio-Formats fills it (`0xDCDCDC`: light grey). Checked on the
+  9 VSI samples held: every image and pyramid level gives Bio-Formats' pixels, except lossy
+  JPEG 2000 tiles, where Bio-Formats' decoder rounds up to 1 apart from OpenJPEG's
+  (micro-reader decodes as OpenJPEG).
+- CellVoyager: a ragged field (a 3-D action next to 2-D ones) took its z position from the
+  first channel's plane, not from its slice 0. On JUMP's CV8000 Cell Painting plates (five
+  2-D fluorescence channels at z -9 um, then a 3-plane brightfield at -17 / -9 / -1 um) the
+  whole field sat one z step (8 um) too high. z is now the first plane of the channel with
+  the most planes, and each part keeps its own. Checked on JUMP plate 1053601756 (CV8000,
+  2304 fields) and BIA S-BIAD3934 (CV7000, 960 fields): every plane of 40 random fields
+  equals its TIFF, and every position equals its record.
+- NIS-Elements runs: a field whose channels come from files of their own said it was ragged
+  (`is_ragged` True, `parts` the per-file images), because it kept its files where ragged
+  images keep their parts. Its parts are now just the field.
+- Older scanR plates: opening one listed the plate folder and the data folder twice each.
+  Each is listed once now (real-data matrix, G4).
+- MetaXpress / ImageXpress exports: the copies of a plate's `.HTD` in its `TimePoint_` folders
+  were plates of their own for `group_files`, and opening one failed (a time series: none of
+  its fields' files are beside it); a single-timepoint export with a `TimePoint_1` folder gave
+  the plate twice. Every copy is now a part of the outermost `.HTD`, which it opens. The
+  projection TIFFs in `ZStep_0` (not read) are parts of the plate too, so they are no longer
+  images of their own (a folder conversion converted each one). Checked on zenodo 12724928
+  (21 plates in 3 exports) and 23468516.
 
 ### New (scanR, ND2 plates)
 
@@ -58,10 +83,32 @@ second before widening its bound to `<0.4`.
   which opened as an OME companion without a plate: wells and fields from the data files'
   names, the layout from the descriptor. The descriptor, the folders, the `.dat` files,
   the companion and (with `multifile=True`) any data TIFF open the plate.
+- Older scanR plates (2007 to about 2015, no `data/metadata.ome.xml`), which were refused:
+  the plate from the descriptor and the data files' names (`--W00002--P00001--...` without
+  a well name in scanR 2007), the layout from the plate format or the custom format,
+  channel names from the descriptor, the pixel size, and stage positions from
+  `AcquisitionLog.dat` when it has them. The layout is checked against the well table's
+  names (refused when they disagree) and the format's description (a
+  `PlateLayoutWarning`); a guessed layout warns too. 12-bit values stored with the top
+  bit set are read without it, with the new `StoredValuesWarning` (Bio-Formats keeps the
+  low 12 bits of every scanR pixel, which would cut 16-bit data); other plates as stored.
+  A descriptor with Latin-1 bytes and no encoding named (`[µm]`) failed as not readable
+  XML; it is read as Latin-1.
 - ND2 with `plates=True`: a file whose XY points are named after wells as NIS-Elements
-  names them (`A10_0000`, `B02_0003`, `E8.1`) reads as a plate (layout: the smallest
-  standard plate holding the wells; fields in acquisition order). Other point names
-  (`P1`, `A1`) keep the positions as they are.
+  names them (`A10_0000`, `B02_0003`, `E8.1`) reads as a plate (fields in acquisition
+  order). Other point names (`P1`, `A1`) keep the positions as they are. The layout is the
+  well plate of the NIS-Elements job that acquired the file (its job definition chunk),
+  else the smallest standard plate holding the wells, with a `PlateLayoutWarning`.
+- NIS-Elements well-plate runs with `plates=True`: a folder of ND2 files, one per well
+  (`WellB05_ChannelDIA_Seq0000.nd2`) or per point
+  (`WellA01_PointA01_0003_ChannelFITC BP_Seq0003.nd2`), reads as one plate from any of its
+  files; each well's points are its fields, channels in files of their own are stacked.
+  `multifile=False` or `plates=False` read the one file, as before. A run micro-reader
+  cannot place (two files of one channel in a field, a file of several XY positions, RGB
+  files) is refused, naming `multifile=False`. At most 32 of its files stay open; the
+  others open again when read.
+- `group_files(paths, plates=False)`: with `plates=True`, sets that are plates only then (a
+  NIS-Elements run folder) are one group.
 - A member that points to a metadata file which is itself a part of a composite (scanR's
   companion) opens the composite.
 

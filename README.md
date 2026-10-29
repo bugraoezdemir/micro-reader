@@ -192,7 +192,7 @@ for group in g.groups:
 g.singles           # every other file, as given
 ```
 
-A file that a plate or companion index names is listed only in that index's group. When the main file of a multi-file image is missing, its group has `main=None`.
+A file that a plate or companion index names is listed only in that index's group. When the main file of a multi-file image is missing, its group has `main=None`. Pass `plates=True` to group as `open(..., plates=True)` reads: a folder of ND2 files from one NIS-Elements well-plate run is then one group.
 
 ## Axes
 
@@ -544,7 +544,7 @@ The position is omitted when it cannot be determined reliably.
 | **Micro-Manager 1.4**| image-per-file acquisitions (`metadata.txt` + one TIFF per plane) |
 | **DeltaVision**      | `.dv`, `.r3d` (softWoRx, OMX, Priism)                 |
 | **MRC**              | Common MRC modes and extended headers                 |
-| **Plates (HCS)**     | Harmony, Columbus exports, MetaXpress, ImageXpress HCS.ai (`.jdce`), IN Cell, CellVoyager, Opera Flex, scanR and Cellomics (`.C01`) plates; with `plates=True`, CZI plates, OME companion and OME-TIFF plates (Yokogawa CQ1) and ND2 files whose XY points are named after wells |
+| **Plates (HCS)**     | Harmony, Columbus exports, MetaXpress, ImageXpress HCS.ai (`.jdce`), IN Cell, CellVoyager, Opera Flex, scanR and Cellomics (`.C01`) plates; with `plates=True`, CZI plates, OME companion and OME-TIFF plates (Yokogawa CQ1), ND2 files whose XY points are named after wells, and folders of ND2 files from one NIS-Elements well-plate run |
 | **JPEG / PNG / BMP** | Common raster image formats                           |
 
 All formats use the same `File`, `Image`, axes, indexing, metadata, and reading interface wherever possible.
