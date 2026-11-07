@@ -62,14 +62,31 @@ jobs:
       contents: read                        # a permissions block drops the defaults: keep read
       id-token: write
     steps:
+      - uses: actions/checkout@v4
+      # skip-existing alone is not enough: it compares file names, and a newer maturin
+      # orders a wheel's platform tags differently (manylinux2014_x.manylinux_2_17_x),
+      # so a rebuilt unchanged version looks new and PyPI refuses files for a release
+      # older than 14 days (v0.4.0, 2026-11-07)
+      - name: is this codecs version already on PyPI?
+        id: pypi
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('codecs/Cargo.toml', 'rb'))['package']['version'])")
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/micro-reader-codecs/$version/json")
+          case "$status" in
+            200) echo "micro-reader-codecs $version is on PyPI: not published again"; echo "exists=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "micro-reader-codecs $version is new: publishing"; echo "exists=false" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "::error::PyPI answered $status for micro-reader-codecs $version"; exit 1 ;;
+          esac
       - uses: actions/download-artifact@v4
+        if: steps.pypi.outputs.exists == 'false'
         with:
           pattern: codecs-*                 # every wheel and the sdist
           merge-multiple: true
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+        if: steps.pypi.outputs.exists == 'false'
         with:
-          skip-existing: true               # unchanged codecs: already on PyPI
+          skip-existing: true
 
   publish-python:
     name: publish micro-reader
