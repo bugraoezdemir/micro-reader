@@ -190,6 +190,12 @@ def _scan(path: str, file_index: int):
         if len(head) < 48 or head[:16] != MAGIC:
             raise CorruptFileError(f"{path!r} is not an OIR file")
         file_size, index_pos = struct.unpack("<QQ", head[32:48])
+        actual = os.fstat(fh.fileno()).st_size
+        if actual < file_size:
+            # as every other backend: a damaged file is a CorruptFileError (gap hunt
+            # A-13: a truncated OIR read as "OIR file without image data")
+            raise CorruptFileError(f"{path!r} is truncated: its header gives {file_size} bytes, "
+                                   f"the file has {actual}")
         fh.seek(index_pos)
         index = fh.read(file_size - index_pos)
         offsets = []
@@ -266,6 +272,18 @@ class _OirImage(Image):
         for elem in frame.iter():
             if elem.text and _local(elem.tag) in ("width", "height", "depth", "colorType"):
                 found.setdefault(_local(elem.tag), elem.text.strip())
+        #: each laser's transmissivity in the acquisition (the frame's lsmframe:laser
+        #: laserDataId=...): a channel listing several lasers (a lambda scan lists every
+        #: laser of its phase) was lit by the one let through (_read_metadata)
+        self._lit = {}
+        for elem in frame.iter():
+            if _local(elem.tag) == "laser" and elem.get("laserDataId"):
+                for c in elem:
+                    if _local(c.tag) == "transmissivity" and c.text:
+                        try:
+                            self._lit[elem.get("laserDataId")] = float(c.text)
+                        except ValueError:
+                            pass
         width, height = int(found.get("width", 0)), int(found.get("height", 0))
         depth = int(found.get("depth", 0))
         if not (width and height and depth in (1, 2, 4)):
@@ -342,6 +360,7 @@ class _OirImage(Image):
             if _local(elem.tag) == "channel" and elem.get("id") and elem.get("id") not in by_id:
                 if any(_local(c.tag) == "length" for c in elem):
                     by_id[elem.get("id")] = elem
+        lit = getattr(self, "_lit", {})            # read with the frame (__init__)
         sizes, channels = {}, []
         for guid in self._channel_ids:
             elem = by_id.get(guid)
@@ -359,8 +378,15 @@ class _OirImage(Image):
                             sizes[axis] = q
             band = [float(w.text) for w in elem.iter()
                     if _local(w.tag) in ("startWavelength", "endWavelength") and w.text]
-            laser = parts.get("laserDataId")
-            match = re.match(r"\D*(\d{3,4})", laser.text or "") if laser is not None else None
+            # the channel's laser: the one it lists, or of several (a lambda scan lists every
+            # laser of the phase) the one with light let through; unknown otherwise (review
+            # cycle 2, R2-14: the last listed, 640 nm, for bands lit at 405 nm)
+            listed = [(c.text or "").strip() for c in elem if _local(c.tag) == "laserDataId"]
+            listed = [i for i in listed if i]
+            if len(listed) > 1:
+                on = [i for i in listed if lit.get(i, 0.0) > 0]
+                listed = on if len(on) == 1 else []
+            match = re.match(r"\D*(\d{3,4})", listed[0]) if listed else None
             name = parts.get("name")
             rgb = self._luts.get(guid)
             channels.append(Channel(

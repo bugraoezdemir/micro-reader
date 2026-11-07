@@ -82,6 +82,9 @@ def owner(path: str, head):
         index = _index_in(folder)
     elif name.endswith(".statistics.json"):
         index = _index_in(os.path.dirname(folder))
+    elif name.endswith((".tif", ".tiff")) and os.path.basename(folder).lower().startswith("timepoint"):
+        index = _parts.only_file(os.path.dirname(folder), SUFFIX)   # a plane
+        return _parts.Part(index, index, member=True) if index is not None else None
     else:
         return None
     return _parts.Part(index, index) if index is not None else None

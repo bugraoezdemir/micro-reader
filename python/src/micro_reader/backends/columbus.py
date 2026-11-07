@@ -22,6 +22,7 @@ measurement as a folder of TIFFs with two index files:
 from __future__ import annotations
 
 import os
+import re
 import xml.etree.ElementTree as ET
 
 from .. import _parts
@@ -34,6 +35,8 @@ SET_INDEX = True
 IMAGE_INDEX = "imageindex.columbusidx.xml"
 MEASUREMENT_INDEX = "measurementindex.columbusidx.xml"
 SUFFIXES = (".columbusidx.xml", ".columbusidx.csv")
+#: a plane's file name: 12345-678.tif, 12345-678-9.tif
+PLANE_NAME = re.compile(r"\d+-\d+(?:-\d+)?\.tiff?")
 NAMESPACE = b"http://www.perkinelmer.com/Columbus"
 
 
@@ -99,6 +102,9 @@ def owner(path: str, head):
     if name.endswith(".columbusidx.csv"):
         index = _named(os.path.dirname(os.path.abspath(path)), IMAGE_INDEX)
         return _parts.Part(index, index or path[:-4] + ".xml")
+    if PLANE_NAME.fullmatch(name):                  # exact index name: no folder listing
+        index = os.path.join(os.path.dirname(os.path.abspath(path)), "ImageIndex.ColumbusIDX.xml")
+        return _parts.Part(index, index, member=True) if os.path.isfile(index) else None
     return None
 
 

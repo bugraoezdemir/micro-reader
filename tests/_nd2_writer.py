@@ -95,8 +95,9 @@ def _loop(kind: str, count: int, inner: dict | None, valid=None, ne_periods=None
 def write_nd2(path, frames: np.ndarray, loops: list, *, compression: str | None = None,
               pad_bytes: int = 0, missing=(), valid_positions=None, ne_periods=None,
               picture: dict | None = None, plane_fields: dict | None = None,
-              point_names=None, wellplate=None) -> None:
+              point_names=None, wellplate=None, stamps=None) -> None:
     """*frames*: (n_frames, height, width, channels, samples) in frame order.
+    *stamps*: each frame's timestamp (ms); default 100 ms per step of the time loop.
     *loops*: [(kind, count)] outermost first, kind in T / NE / P / Z; the
     product of counts must be n_frames.  *missing*: frame numbers left out.
     *valid_positions*: flags for the P loop (count = all points, frames only
@@ -162,6 +163,11 @@ def write_nd2(path, frames: np.ndarray, loops: list, *, compression: str | None 
             b"LV0Z" + struct.pack("<Q", len(job)) + zlib.compress(job))
     # frame acquisition times (ms), which bioio-nd2 reads for its metadata
     add(b"CustomData|AcqTimesCache!", (np.arange(n, dtype="<f8") * 100.0).tobytes())
+    if stamps is None:
+        counts = [count for _, count in loops] or [1]
+        steps = [k in ("T", "NE") for k, _ in loops] or [False]
+        stamps = [100.0 * sum(at for at, step in zip(np.unravel_index(i, counts), steps) if step)
+                  for i in range(n)]
     for i, frame in enumerate(frames):
         if i in missing:
             continue
@@ -170,7 +176,7 @@ def write_nd2(path, frames: np.ndarray, loops: list, *, compression: str | None 
         payload = raw.tobytes()
         if compression == "lossless":
             payload = zlib.compress(payload)
-        add(f"ImageDataSeq|{i}!".encode(), struct.pack("<d", float(i)) + payload,
+        add(f"ImageDataSeq|{i}!".encode(), struct.pack("<d", float(stamps[i])) + payload,
             IMAGE_NAME_BYTES)
     table = b"".join(name + struct.pack("<QQ", off, size) for name, (off, size) in where.items())
     table += CHUNKMAP_SIGNATURE + struct.pack("<QQ", 0, 0)

@@ -34,8 +34,10 @@ Ported, reduced, from nd2 (https://github.com/tlambert03/nd2), modules
 """
 from __future__ import annotations
 
+import base64
 import io
 import struct
+import xml.etree.ElementTree as ET
 import zlib
 from dataclasses import dataclass
 
@@ -127,10 +129,54 @@ def _string(stream: io.BytesIO) -> str:
         return value.decode("utf8", "replace")
 
 
+_XML_NUMBERS = {"lx_uint32": int, "lx_int32": int, "lx_uint64": int, "lx_int64": int,
+                "double": float, "float": float}
+
+
+def _xml_node(element):
+    if len(element):
+        out, k = {}, 0
+        for child in element:
+            key = child.tag
+            if key == "no_name":                # a list: named as the binary form names it
+                key, k = f"i{k:010d}", k + 1
+            out[key] = _xml_node(child)
+        return out
+    kind, value = element.get("runtype", ""), element.get("value", "")
+    if kind in _XML_NUMBERS:
+        try:
+            return _XML_NUMBERS[kind](value)
+        except ValueError:
+            return 0
+    if kind == "bool":
+        return value == "true"
+    if kind == "CLxByteArray":
+        return base64.b64decode(value)
+    return value
+
+
+def decode_xml(data: bytes) -> dict:
+    """The metadata of a version 2 chunked file: the same fields as ``decode_clx_lite``
+    gives for version 3, written as XML, in chunks without the ``LV`` in their names."""
+    try:
+        root = ET.fromstring(data.rstrip(b"\x00"))
+    except ET.ParseError as exc:
+        raise CorruptFileError(f"ND2 metadata is not XML ({exc})") from None
+    return _xml_node(root[0]) if len(root) else {}
+
+
 def decode_clx_lite(data: bytes | io.BytesIO, count: int = 1) -> dict:
     """CLX-lite bytes -> nested dicts.  Keys keep their type prefix
     (``uiCount``); lists (items with empty names) become ``{"i0000000000":
-    ...}`` dicts, as in Nikon's own JSON export and in nd2."""
+    ...}`` dicts, as in Nikon's own JSON export and in nd2. Damaged bytes raise
+    CorruptFileError, not the decoder's own error (a UnicodeDecodeError)."""
+    try:
+        return _decode_clx_lite(data, count)
+    except (UnicodeDecodeError, struct.error, zlib.error) as exc:
+        raise CorruptFileError(f"damaged ND2 metadata ({type(exc).__name__}: {exc})") from None
+
+
+def _decode_clx_lite(data: bytes | io.BytesIO, count: int = 1) -> dict:
     stream = data if isinstance(data, io.BytesIO) else io.BytesIO(data)
     out: dict = {}
     for _ in range(count):

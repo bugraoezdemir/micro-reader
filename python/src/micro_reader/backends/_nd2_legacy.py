@@ -223,6 +223,8 @@ class LegacyNd2Parser:
                 levels.append(level)
                 level = level.get("NextLevelEx")
         loops = []
+        #: z step and time interval the experiment records (``_nd2_metadata.legacy_metadata``)
+        self.steps = {}
         for level in levels:
             kind = level.get("Type")
             if kind == 6 or kind is None:                    # channels: in the frame
@@ -232,14 +234,21 @@ class LegacyNd2Parser:
             params = level.get("LoopPars", {})
             axis = LOOP_AXES[kind]
             if axis == "T":
-                periods = list((params.get("Period") or {}).values())
+                periods = list((params.get("Period") or {}).values()) \
+                    if isinstance(params.get("Period"), dict) else []
                 count = described.get("T")
                 if count is None or not any(p.get("Count") == count for p in periods):
                     count = periods[0]["Count"] if periods else params.get("Count", 1)
+                period = next((p.get("Period") for p in periods if p.get("Count") == count),
+                              params.get("Period") if not periods else periods[0].get("Period"))
+                if isinstance(period, (int, float)) and period > 0:
+                    self.steps["t"] = float(period)                      # milliseconds
             elif axis == "P":
                 count = described.get("P") or params.get("Count", 1)
             else:
                 count = params.get("Count", 1)
+                if isinstance(params.get("ZStep"), (int, float)):
+                    self.steps["z"] = abs(float(params["ZStep"]))       # micrometres
             if int(count) > 1:
                 loops.append((axis, int(count)))
         axes = [a for a, _ in loops]
@@ -300,7 +309,7 @@ class _LegacyNd2Image(Image):
     def _read_metadata(self):
         from ._nd2_metadata import legacy_metadata
         frame = self._f._xml(b"VIMD", self._f.frame_number(0, self._p, 0)) or             self._f._xml(b"VIMD", 0)
-        return legacy_metadata(frame, dict(zip(self.axes, self.shape)))
+        return legacy_metadata(frame, dict(zip(self.axes, self.shape)), self._f.steps)
 
     def _plane_into(self, number, stream, component, ys, xs, ss, dst) -> int:
         f = self._f

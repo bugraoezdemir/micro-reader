@@ -19,6 +19,26 @@ def strict_placement(f) -> bool:
 
 
 @pytest.fixture(autouse=True, scope="session")
+def backends_in_their_own_axes():
+    """The backends' tests check each backend's own axes, shapes and internals
+    (its contract): ``micro_reader.open`` defaults to ``axes="native"`` in this
+    session.  ``open``'s real default since 0.4.0 is ``"canonical"`` (decision
+    MR-4), tested in test_axes.py through ``micro_reader._registry.open``."""
+    import micro_reader
+    real_open = micro_reader.open
+
+    def native_open(*args, **kwargs):
+        kwargs.setdefault("axes", "native")
+        return real_open(*args, **kwargs)
+
+    micro_reader.open = native_open
+    try:
+        yield
+    finally:
+        micro_reader.open = real_open
+
+
+@pytest.fixture(autouse=True, scope="session")
 def every_index_is_an_image_index():
     """Every image ``micro_reader.open`` gives out in the whole session -- its
     images, their resolution levels and parts, also with ``axes=``,

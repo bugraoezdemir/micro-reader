@@ -21,10 +21,29 @@ class Quantity(NamedTuple):
     unit: str
 
     def to(self, unit: str) -> "Quantity":
-        """This quantity in another unit of the same kind."""
-        if unit == self.unit:
+        """This quantity in another unit of the same kind (length or time), so
+        values from formats that record different units compare (decision
+        MR-3: each value stays in the file's unit, D1).  *unit* is OME-Zarr's
+        name or a spelling files use ("um", "ms", "nm").  A unit of another
+        kind, or one micro-reader does not know, raises ``ValueError``."""
+        name = unit_name(unit)
+        if name is None:
+            raise ValueError(f"Quantity.to: unknown unit {unit!r}; use OME-Zarr's names "
+                             f"('micrometer', 'second', ...) or spellings such as 'um', 'ms'")
+        if name == self.unit:
             return self
-        return Quantity(self.value * _FACTORS[self.unit] / _FACTORS[unit], unit)
+        # this quantity's own unit by the same spellings (review cycle 2, R2-13:
+        # Quantity(60000, 'ms').to('s') said "a length and a time")
+        own = unit_name(self.unit)
+        if own is None or own not in _FACTORS:
+            raise ValueError(f"Quantity.to: {self.unit!r} is no unit micro-reader knows a "
+                             f"size of, so it cannot be converted to {name!r}")
+        if (name in SPACE_UNITS) != (own in SPACE_UNITS):
+            kinds = ("a length", "a time")
+            raise ValueError(f"Quantity.to: {self.unit!r} cannot be converted to {name!r}: "
+                             f"{kinds[own not in SPACE_UNITS]} and "
+                             f"{kinds[name not in SPACE_UNITS]}")
+        return Quantity(self.value * _FACTORS[own] / _FACTORS[name], name)
 
 
 #: OME-Zarr's units (UDUNITS-2 names), with each one's size in metres or
@@ -109,6 +128,14 @@ def quantity(value, unit: Optional[str], *, positive: bool = True,
     if SPACE_UNITS.get(name, 0.0) > LARGEST_KEPT_LENGTH:
         return Quantity(number, name).to(LARGE_LENGTH_UNIT)
     return Quantity(number, name)
+
+
+def without_placeholder_white(channels: tuple) -> tuple:
+    """*channels* with no colour when several are all white: what Imaris and Micro-Manager
+    leave unset, not a choice.  One white channel, or white among others, is a colour."""
+    if len(channels) > 1 and all((c.color or "").upper() == "#FFFFFF" for c in channels):
+        return tuple(replace(c, color=None) for c in channels)
+    return channels
 
 
 def color_hex(value) -> Optional[str]:

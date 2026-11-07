@@ -166,9 +166,11 @@ def test_new_style_hs_archive(tmp_path, version):
                   measurement / "cf91602d.xml", measurement / "images" / "image.index.txt"):
         with micro_reader.open(entry) as f:
             assert os.path.basename(f.path) == "index.xml"          # as stored
-    with micro_reader.open(measurement / "images" / "r01c01" / os.listdir(
-            measurement / "images" / "r01c01")[0]) as f:
-        assert f.backend == "tiff"                                   # a plane opens as itself
+    plane = measurement / "images" / "r01c01" / os.listdir(measurement / "images" / "r01c01")[0]
+    with micro_reader.open(plane) as f:
+        assert f.format == f"harmony-{version.lower()}"              # a plane opens its plate
+    with micro_reader.open(plane, multifile=False) as f:
+        assert f.backend == "tiff"                                   # or only itself
     g = micro_reader.group_files(str(measurement))
     assert len(g.groups) == 1 and g.singles == []
     assert len(g.groups[0].members) == len(data) and len(g.groups[0].parts) == 3
@@ -219,7 +221,7 @@ def test_a_plate_without_a_name_is_named_after_its_measurement_folder(tmp_path):
         fh.write(xml)
     with micro_reader.open(index) as f:
         assert f.plates[0].name == measurement.name
-        assert f.images[0].name == f"{measurement.name} well A1 field 0"
+        assert f.images[0].name == "well A1 field 0"           # one plate: no prefix (MR-2)
 
 
 def test_field_positions_are_first_pixels_relative_to_the_well(tmp_path):
@@ -356,3 +358,20 @@ def test_few_member_files_open_at_once_and_threads_read_safely(tmp_path, monkeyp
         with ThreadPoolExecutor(8) as pool:
             assert all(pool.map(check, f.images * 3))
         assert len(f._members._open) <= 2
+
+
+def test_a_tiff_named_like_a_plane_that_the_index_does_not_list_opens_as_itself(tmp_path):
+    # review cycle 1, N-03: it opened the plate, and its own pixels were in no image
+    import shutil
+    tifffile = pytest.importorskip("tifffile")
+    index, data = _write_harmony(str(tmp_path), wells=((1, 1),), fields=1, channels=1)
+    images = os.path.dirname(index)
+    listed = next(n for n in os.listdir(images) if n.endswith(".tiff"))
+    stray = os.path.join(images, "r05c05f01p01-ch1sk1fk1fl1.tiff")
+    shutil.copyfile(os.path.join(images, listed), stray)
+    with micro_reader.open(stray) as f:
+        assert f.backend == "tiff"
+        np.testing.assert_array_equal(np.asarray(f.images[0]).reshape(Y, X), tifffile.imread(stray))
+    with micro_reader.open(os.path.join(images, listed)) as f:      # a listed plane: the plate
+        assert f.backend == "harmony"
+    assert micro_reader.group_files(str(tmp_path)).singles == [stray]

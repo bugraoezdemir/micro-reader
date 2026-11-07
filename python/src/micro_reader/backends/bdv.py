@@ -610,8 +610,17 @@ def _build(h5, path: str, xml: Optional[_Xml], resolutions: str, tiles: str,
             pyramid.append(image)
         if not pyramid:
             continue
+        # the setup's own <name> (rule 2 of the image names: "Angle 45", "Fused"), when
+        # every setup of the image (its channels) gives the same one (review cycle 1,
+        # N-28: they were "view 7"); setups of one image named apart name no image, and
+        # a name that is the setup's id ("0", BigStitcher's) says nothing, as for channels
+        given = {s.name for s in group}
+        own = given.pop() if len(given) == 1 else None
+        if own is not None and own.strip() == str(group[0].id):
+            own = None
         for image in pyramid:
             image._resolutions = pyramid
+            image._own_name = own
         images_by_level.append(pyramid)
     lost = getattr(xml, "missing_files", [])
     lost_text = (f"; {len(lost)} of the partition files the XML lists are missing (e.g. "
@@ -631,7 +640,12 @@ def _build(h5, path: str, xml: Optional[_Xml], resolutions: str, tiles: str,
 
 def _pixel_sizes(setup: _Setup) -> dict:
     """A view setup's voxel size, {axis: Quantity}; an axis without a size
-    or a known unit left out."""
+    or a known unit left out.  In the unit ``pixel`` (BigStitcher's for uncalibrated
+    data) a size is relative, z five times x, and is kept in that unit unless all are 1."""
+    if str(setup.unit).strip().lower() in ("pixel", "pixels"):
+        given = {axis: float(v) for axis, v in zip("xyz", setup.voxel) if v}
+        return {} if set(given.values()) <= {1.0} else \
+            {axis: Quantity(v, "pixel") for axis, v in given.items()}
     sizes = {}
     for axis, value in zip("xyz", setup.voxel):
         q = quantity(value, setup.unit)
@@ -824,8 +838,12 @@ def _metadata(views: _Views, names: dict, image) -> Metadata:
         return Metadata.unknown(len(group))
     sizes = _pixel_sizes(group[0])
     channel_names = names.get("channel", {})
-    channels = tuple(Channel(name=channel_names.get(s.attributes.get("channel")))
-                     for s in group)
+    channels = []
+    for s in group:
+        channel = s.attributes.get("channel")
+        name = channel_names.get(channel)           # an id for a name says nothing
+        channels.append(Channel(name=None if name == str(channel) else name))
+    channels = tuple(channels)
     position = views.placement().position
     return Metadata(pixel_sizes=sizes, position=position, channels=channels,
                     coordinate_system=GLOBAL if position else None)

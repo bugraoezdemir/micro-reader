@@ -272,7 +272,7 @@ def file_collection(file) -> Collection:
     # a node: [kind, value, members (nodes and images, in images order), {(kind, value): node}]
     top = [None, None, [], {}]
     for image in file.images:
-        if not image.is_pyramid:
+        if image.level != 0:
             continue
         index = image.index
         if contains(index, "plate") or contains(index, "well"):
@@ -366,7 +366,7 @@ def check_tree(collection: Collection, images: Sequence, *, where: str = "") -> 
                         f"{dict(child.index)} does not say (3.8: tree and index agree)")
 
     walk(collection, ())
-    missing = [image.name for image in images if image.is_pyramid and id(image) not in seen]
+    missing = [image.name for image in images if image.level == 0 and id(image) not in seen]
     if missing:
         raise InvariantError(f"{here}images missing from the tree: {missing[:5]}"
                              f"{' ...' if len(missing) > 5 else ''} (I7)")

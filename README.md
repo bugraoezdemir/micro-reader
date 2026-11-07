@@ -2,9 +2,9 @@
 
 **Memory-bounded pixel reader for microscopy images.**
 
-`micro-reader` reads regions of large microscopy files without loading the entire image into memory. It provides a common interface across TIFF, CZI, ND2, Leica, OIR, OIB / OIF, Olympus VSI, Imaris, DeltaVision, MRC, common raster formats, OME companion file sets, and high-content screening plates (Harmony, Columbus, MetaXpress, ImageXpress HCS.ai, IN Cell, CellVoyager, CQ1, Opera Flex, scanR, Cellomics).
+`micro-reader` reads regions of large microscopy files without loading the entire image into memory. It provides a common interface across TIFF, CZI, ND2, Leica, OIR, OIB / OIF, Olympus VSI, Imaris, DeltaVision, MRC, KLB, common raster formats, OME companion file sets, and high-content screening plates (Harmony, Columbus, MetaXpress, ImageXpress HCS.ai, IN Cell, CellVoyager, CQ1, Opera Flex, scanR, Cellomics).
 
-> **Status: pre-alpha (0.0.x)**
+> **Status: alpha (0.x)**
 >
 > The API may still change.
 
@@ -22,14 +22,6 @@ Optional support:
 pip install "micro-reader[ims]"      # Imaris (.ims)
 pip install "micro-reader[codecs]"   # additional codecs
 ```
-
-## Compatibility with eubi-bridge
-
-micro-reader 0.1.0 renamed the image index `scene` to `series`. eubi-bridge 0.1.3 to 0.2.x and eubi-bridge-lite below 0.3.0 still read `scene`, so `import micro_reader` refuses to load next to them. It raises an `ImportError` that names the installed eubi version and the two ways out: upgrade eubi (`pip install -U 'eubi-bridge>=0.3.0'`, or the same for `eubi-bridge-lite`), or keep that eubi with the micro-reader it was built for (`pip install 'micro-reader<0.1'`). The check reads the versions of the installed packages; it never imports eubi. An editable install of eubi is checked like any other: its recorded version can be out of date, so the message then says to reinstall it.
-
-To skip the check, set the environment variable `MICRO_READER_SKIP_EUBI_CHECK=1`. Only the value `1` skips it; any other value keeps the check. micro-reader then warns once that the check was skipped. This is meant for work on an eubi checkout, not for normal use.
-
-The check will be removed when every eubi-bridge / eubi-bridge-lite line below 0.3.0 has left the support window, checked by the release version matrix; not before.
 
 ## Quick start
 
@@ -143,6 +135,17 @@ f.select(series=1, view=0)
 
 This returns the images matching the requested indices. For example, if a file contains several series, tiles, and views, selecting `series=1, view=0` returns the tiles belonging to that series and view.
 
+### Image names
+
+`image.name` follows one rule for every format, and is the same whichever file of a dataset you open:
+
+1. A plate's image is named by its well and field: `"well B2 field 0"` (the field counted from 0, as in `select(field=0)`; the plate's name in front when the file holds several plates).
+2. Otherwise the name the format gives the image: a Leica element's name, an OME `Image Name`, an Imaris image name, a slide's associated image by its role in lower case (`label`, `macro`, `thumbnail`). A slide's main scan, which its format does not name, takes the name of its file.
+3. Otherwise, in a file of several images, a label the file records for each one (a CZI scene name, an ND2 point name, a Micro-Manager or MetaMorph position label), or else the index values that tell them apart: `"series 2"`, `"series 1, tile 3"`.
+4. Otherwise (one image) the name of the dataset's main file without its extension: the index file of a set, the main file of a multi-file format, a Luxendo experiment's folder.
+
+Two images left with one name get the index values that differ between them appended, for example `"scan, series 2"`. Resolution levels carry their image's name.
+
 ### Available index dimensions
 
 `micro-reader` uses these index names when a format provides the corresponding dimensions:
@@ -179,7 +182,7 @@ f.path     # the main file: "cells_R3D.dv"
 f.opened   # what was opened: "cells_R3D.dv.log"
 ```
 
-You can also open the folder. A folder opens the image it belongs to (an NDTiff dataset folder, a Harmony or CellVoyager measurement folder, a folder of Opera `.flex` files), or the one image it holds. An Opera Flex plate has no index file: any of its `.flex` files opens the whole folder as the plate (`multifile=False` reads only that file). A folder with several images raises an error that lists them.
+You can also open the folder. A folder opens the image it belongs to (an NDTiff dataset folder, a Harmony or CellVoyager measurement folder, a folder of Opera `.flex` files, a Luxendo experiment), or the one image it holds. A folder that holds no image itself, such as a downloaded sample folder with the export one or two levels down, opens the one dataset found in its sub-folders. An Opera Flex plate has no index file: any of its `.flex` files opens the whole folder as the plate (`multifile=False` reads only that file). A folder of one NIS-Elements well-plate run opens as that plate (with `plates=False`, its files are several images). A folder with several images or datasets raises an error that lists them; an OME-Zarr store is refused with a pointer to `ome_zarr_pyramid`, which reads it.
 
 To sort many files at once, for example everything under a folder you want to convert, `group_files` says which files make one image:
 
@@ -192,7 +195,7 @@ for group in g.groups:
 g.singles           # every other file, as given
 ```
 
-A file that a plate or companion index names is listed only in that index's group. When the main file of a multi-file image is missing, its group has `main=None`. Pass `plates=True` to group as `open(..., plates=True)` reads: a folder of ND2 files from one NIS-Elements well-plate run is then one group.
+A file that a plate or companion index names is listed only in that index's group. When the main file of a multi-file image is missing, its group has `main=None`. It groups as `open()` reads, plates included (`plates=True`, the default): a folder of ND2 files from one NIS-Elements well-plate run is one group; `plates=False` groups as `open(..., plates=False)` reads.
 
 ## Axes
 
@@ -220,11 +223,35 @@ image.shape
 # (1, 3, 40, 5120, 6144)
 ```
 
-Other dimensions, such as illumination, emission, tile, etc., are represented as image indices rather than array axes, as discussed above.
+Other dimensions, such as illumination, excitation, tile, etc., are represented as image indices rather than array axes, as discussed above.
+
+### Lambda scans
+
+A lambda (spectral) scan is one image in every format. Its bands lie along `c`, a detector's bands next to each other in wavelength order, and each channel has its `emission_wavelength` and its wavelength in its name (`"HyD S 1 420 nm"`).
+
+```python
+f = micro_reader.open("scan.lif")
+f.images[0].axes                                  # 'tczyx'
+[c.emission_wavelength for c in f.images[0].metadata.channels]
+
+f = micro_reader.open("scan.lif", axes="native")
+f.images[0].axes                                  # 'tlczyx': a real lambda axis
+f.images[0].metadata.index_values["emission"]      # its wavelengths
+```
+
+Asking for axes that name `l`, such as `axes="tlczyx"`, also gives the axis. An LSM stores its bands as channels, so it has no `l` axis; its channels carry their wavelengths. Excitation scans stay an image index.
+
+`open` gives every image in this canonical order by default, whatever order the file stores: axes the file lacks are added with size 1 (a 2-D TIFF is `(1, 1, 1, Y, X)`) and the others are reordered. Reading costs the same either way.
 
 ### Changing axis order
 
-You can request a specific axis order:
+To keep the order the file stores (ICS `ctzyx`, Micro-Manager OME-TIFF `tzcyx`, a 2-D TIFF `yx`):
+
+```python
+f = micro_reader.open("image.ics", axes="native")
+```
+
+You can also request a specific axis order:
 
 ```python
 image = f.images[0].as_axes("tczyx")
@@ -233,24 +260,10 @@ image = f.images[0].as_axes("tczyx")
 or when opening the file:
 
 ```python
-f = micro_reader.open("image.tif", axes="tczyx")
+f = micro_reader.open("image.tif", axes="zyx")
 ```
 
-You can also request the canonical order:
-
-```python
-f = micro_reader.open("image.tif", axes="canonical")
-```
-
-Canonical order is:
-
-```text
-t c z y x
-```
-
-followed by `s` when RGB samples are present.
-
-Missing axes are added with size 1 and existing axes are reordered.
+`axes="canonical"` (the default) is `t c z y x`, followed by `s` when RGB samples are kept (`samples="keep"`).
 
 ### Removing singleton axes
 
@@ -304,8 +317,8 @@ print(len(f.images))
 print(f.images[0].index)
 # {"series": 0, "sequence": 0}
 
-print(f.images[0].axes)
-# yx
+print(f.images[0].axes, f.images[0].shape)
+# tczyx (1, 1, 1, 16, 16)    (axes="canonical", the default; axes=None gives yx)
 ```
 
 If you know that the pages represent `z`, you can tell the reader:
@@ -317,11 +330,11 @@ f = micro_reader.open(
 )
 ```
 
-The result is a single image with `zyx` axes.
+The result is a single image with the 80 pages along `z`.
 
 ```python
-print(f.images[0].axes)
-# zyx
+print(f.images[0].axes, f.images[0].shape)
+# tczyx (1, 1, 80, 16, 16)   (axes=None gives zyx)
 ```
 
 
@@ -409,6 +422,8 @@ f = micro_reader.open(
 
 CZI tiles are placed by the file's own stitching information, FluoView tiles by the tiling set's grid (where tiles overlap, the later tile is on top; areas without a tile read as 0). Other formats with tiles raise an error for `tiles="mosaic"`.
 
+A format that has tiles it cannot place refuses `tiles="mosaic"` with an error. A file without tiles has nothing to place and opens as usual: Micro-Manager and MetaMorph stage positions are series, not tiles.
+
 `tiles="stitched"`, the name before 0.1.0, still works and warns.
 
 ## Plates
@@ -449,10 +464,10 @@ is its name (`well="B2"` is `well_name="B2"`).
 
 `f.outline()` shows the plates, wells and fields of a file.
 
-Zeiss CZI plates are read as plates with `plates=True`, and as series otherwise:
+A plate in a generic format (a CZI, an ND2, an OME-TIFF or a companion with wells) is read as a plate too. `plates=False` reads it by its series instead:
 
 ```python
-f = micro_reader.open("plate.czi", plates=True)
+f = micro_reader.open("plate.czi")
 ```
 
 Missing plane files are read as zeros, with a `MissingImagesWarning`. A field without any of its files is left out.
@@ -511,6 +526,7 @@ meta.channels[0]
 `micro-reader` follows a few important rules:
 
 * Units use OME-Zarr-compatible names such as `micrometer`, `nanometer`, and `millisecond`.
+* Each value keeps the unit the file records (lengths above a millimetre become micrometres), so two formats can give the same quantity in different units, for example a time step in milliseconds (ND2, OIR) or in seconds (CZI, LIF). Convert to compare: `image.metadata.pixel_sizes["t"].to("s")`, `.to("um")`. Converting a length to a time, or to an unknown unit, raises `ValueError`.
 * Missing metadata is left as `None` or absent.
 * Pixel sizes are never invented as `1.0`.
 * Colours are not invented when the file does not provide them.
@@ -522,7 +538,7 @@ meta.channels[0]
 
 Where possible, format-specific coordinate conventions are converted to this common representation.
 
-The position is omitted when it cannot be determined reliably.
+The position is omitted when it cannot be determined reliably. Micro-Manager's separate files and MetaMorph record where the stage was without saying which point of the field that is: their value is in `image.metadata.stage_position`, as recorded, not in `position`.
 
 ## Supported formats
 
@@ -538,13 +554,14 @@ The position is omitted when it cannot be determined reliably.
 | **VSI**              | Olympus / Evident cellSens and VS120 / VS200 slide scanners |
 | **NDPIS**            | Hamamatsu NanoZoomer fluorescence sets (one NDPI per channel) |
 | **Imaris**           | `.ims`, with the `[hdf5]` extra                       |
-| **HDF5**             | ilastik, BigDataViewer / BigStitcher, Luxendo, Fiji HDF5, with the `[hdf5]` extra |
+| **HDF5**             | ilastik, BigDataViewer / BigStitcher, Luxendo experiments and `.lux.h5`, Fiji HDF5, with the `[hdf5]` extra |
 | **ICS / IDS**        | Image Cytometry Standard 1.0 and 2.0 (SVI Huygens and others) |
 | **MetaMorph**        | `.nd` acquisitions and their TIFF / STK files         |
 | **Micro-Manager 1.4**| image-per-file acquisitions (`metadata.txt` + one TIFF per plane) |
 | **DeltaVision**      | `.dv`, `.r3d` (softWoRx, OMX, Priism)                 |
 | **MRC**              | Common MRC modes and extended headers                 |
-| **Plates (HCS)**     | Harmony, Columbus exports, MetaXpress, ImageXpress HCS.ai (`.jdce`), IN Cell, CellVoyager, Opera Flex, scanR and Cellomics (`.C01`) plates; with `plates=True`, CZI plates, OME companion and OME-TIFF plates (Yokogawa CQ1), ND2 files whose XY points are named after wells, and folders of ND2 files from one NIS-Elements well-plate run |
+| **KLB**              | Every time point and channel, bzip2 and zlib blocks   |
+| **Plates (HCS)**     | Harmony, Columbus exports, MetaXpress, ImageXpress HCS.ai (`.jdce`), IN Cell, CellVoyager, Opera Flex, scanR and Cellomics (`.C01`) plates; also (by default; `plates=False` reads them by series) CZI plates, OME companion and OME-TIFF plates (Yokogawa CQ1), ND2 files whose XY points are named after wells, and folders of ND2 files from one NIS-Elements well-plate run |
 | **JPEG / PNG / BMP** | Common raster image formats                           |
 
 All formats use the same `File`, `Image`, axes, indexing, metadata, and reading interface wherever possible.
@@ -608,9 +625,13 @@ f = micro_reader.open("data_t001.ome.tif", multifile=False)
 
 If the companion is missing or does not list the file, opening the whole set raises an error that names `multifile=False`. With `multifile=False` the file is then read without pixel sizes, with a `CompanionWarning`. A TIFF whose metadata lives in another OME-TIFF (instead of a `.companion.ome`) works the same way, with that OME-TIFF in the companion's place.
 
-A companion that describes a plate (`Plate` / `Well` / `WellSample`) reads as one with `plates=True`, as a CZI plate does: `f.plates` lists its plates and wells, and its images are indexed by plate, acquisition, well and field. RGB images in a companion have a sample axis (`t c z y x s`), as RGB OME-TIFFs do.
+A companion that describes a plate (`Plate` / `Well` / `WellSample`) reads as one, as a CZI plate does: `f.plates` lists its plates and wells, and its images are indexed by plate, acquisition, well and field. RGB images in a companion have a sample axis (`t c z y x s`), as RGB OME-TIFFs do.
 
 Some OME-TIFF sets keep the full OME-XML in their TIFF files instead of a companion. Opening one of those files also reads the whole set, and `multifile=False` reads only the planes stored in that file, with the set's metadata.
+
+Any file of a plate works the same way: opening one plane file opens the plate, and `multifile=False` reads that file alone. Files that belong to the instrument and not to the plate's data, such as CellVoyager shading and dark-current images, open as themselves.
+
+Leica's settings files (`FrameProperties`, `IOManagerConfiguation`) open their experiment. A `.xml` beside a `.lif` opens the `.lif`, and so does a `.lifext`; `multifile=False` reads the `.lifext` itself.
 
 Micro-Manager stacks always open whole, also with `multifile=False`: they split their files by size, so one file does not hold a complete part of the image.
 
@@ -709,7 +730,7 @@ These need the `[hdf5]` extra as well.
 
 * **ilastik**: every dataset with ilastik's `axistags` (its exports, its input files, steinbock's `img`) is one image, in the dataset's own axis order. Pixel sizes are read where ilastik recorded units (`axis_units`, since 2025-09).
 * **BigDataViewer / BigStitcher**: the XML with its HDF5 file (also partitioned). One image per tile, angle and illumination, channels on `c` and time points on `t`, with the stored resolution levels. Opening the HDF5 file opens its XML.
-* **Luxendo / Bruker light-sheet** (`.lux.h5`): one stack per file. A whole acquisition opens through the Imaris file Luxendo writes next to it.
+* **Luxendo / Bruker light-sheet**: an experiment folder (`raw/` with one folder of `.lux.h5` stacks per channel) opens as one image per stack and camera, with all time points and channels. Opening any part opens the whole experiment: the folder, a `.lux.h5`, or the `imaris.ims` / `bdv.xml` next to `raw/`. Files those link files name but `raw/` lacks read as zeros, with a warning. `multifile=False` reads one `.lux.h5` (or `.ims`) alone.
 * **Fiji HDF5** (the Vibez plugin): datasets with `element_size_um`; `t<n>/channel<n>` datasets make one `t c z y x` image.
 
 ### ICS / IDS
@@ -874,6 +895,14 @@ Blocks decoded concurrently from multiple threads are accounted for together. If
 Applications work with the same `File` and `Image` model described in [How it works](#how-it-works). Format-specific complexity stays inside the reader.
 
 The goal is that an application can open a microscopy file, identify the image it needs, read only the required pixels, and obtain standardized metadata without needing to understand the vendor-specific file structure.
+
+## Compatibility with eubi-bridge
+
+micro-reader 0.1.0 renamed the image index `scene` to `series`. eubi-bridge 0.1.3 to 0.2.x and eubi-bridge-lite below 0.3.0 still read `scene`, so `import micro_reader` refuses to load next to them. It raises an `ImportError` that names the installed eubi version and the two ways out: upgrade eubi (`pip install -U 'eubi-bridge>=0.3.0'`, or the same for `eubi-bridge-lite`), or keep that eubi with the micro-reader it was built for (`pip install 'micro-reader<0.1'`). The check reads the versions of the installed packages; it never imports eubi. An editable install of eubi is checked like any other: its recorded version can be out of date, so the message then says to reinstall it.
+
+To skip the check, set the environment variable `MICRO_READER_SKIP_EUBI_CHECK=1`. Only the value `1` skips it; any other value keeps the check. micro-reader then warns once that the check was skipped. This is meant for work on an eubi checkout, not for normal use.
+
+The check will be removed when every eubi-bridge / eubi-bridge-lite line below 0.3.0 has left the support window, checked by the release version matrix; not before.
 
 ## License
 

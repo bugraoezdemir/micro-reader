@@ -41,8 +41,8 @@ def _leaf(images) -> str:
     levels = len(first.resolutions)
     if levels > 1:
         parts.append(f"{levels} levels")
-    if first.is_ragged:
-        typed = len({p.dtype for p in first.parts}) > 1      # parts of different pixel types
+    typed = len({p.dtype for p in first.parts}) > 1          # parts of different pixel types
+    if typed or first.is_ragged:
         parts.append(("parts: " if typed else "ragged: ") + " + ".join(
             f"{p.shape} {p.dtype}" if typed else str(p.shape) for p in first.parts))
     return ", ".join(parts)
@@ -50,7 +50,7 @@ def _leaf(images) -> str:
 
 def outline_lines(f) -> list:
     """The outline of File *f*, one string per line (without the header)."""
-    images = [image for image in f.images if image.is_pyramid]
+    images = [image for image in f.images if image.level == 0]
     lines = []
     if f.plates:
         for p, plate in enumerate(f.plates):

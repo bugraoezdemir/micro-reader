@@ -35,11 +35,15 @@ def decode_threads() -> int:
 
 
 def set_decode_threads(n: int) -> None:
-    """Set the number of decoding threads (1: decode on the caller's thread)."""
+    """Set the number of decoding threads (1: decode on the caller's thread); fewer
+    than 1 is refused (0 was taken as 1 in silence)."""
     global _pool, _threads
+    if int(n) < 1:
+        raise ValueError(f"set_decode_threads({n!r}): at least 1 thread (1 decodes on the "
+                         f"caller's thread)")
     with _lock:
         old, _pool = _pool, None
-        _threads = max(1, int(n))
+        _threads = int(n)
     if old is not None:
         old.shutdown(wait=False)
 

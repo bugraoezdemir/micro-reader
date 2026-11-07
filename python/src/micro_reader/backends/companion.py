@@ -62,6 +62,7 @@ from dataclasses import replace
 
 import numpy as np
 
+from .. import _parts
 from .._base import File
 from .._errors import CompanionWarning, CorruptFileError, UnsupportedFormatError
 from .._fileset import Members, PlaneImage, keep_fields, missing_warning
@@ -367,7 +368,7 @@ class Core:
                 told.append(f"its UUID is {own}, the companion lists {listed}")
             if checks[1] is False:
                 told.append(f"it points to the companion {points_to}, this one is {self.uuid}")
-            raise CorruptFileError(f"{path!r} is not part of the set {self.path!r} "
+            raise NotInItsSet(f"{path!r} is not part of the set {self.path!r} "
                                    f"describes: {'; '.join(told)}")
         from .._fileset import _page, _yx
         for series, _plane, ifd in self.member_pages.get(path, ()):
@@ -510,6 +511,17 @@ def load(path: str) -> Core:
     return core
 
 
+#: (member, axes) -> what its own metadata gives: asked for per image, and the images of
+#: a plate in one OME-TIFF share one member, whose whole OME-XML each answer parses
+#: (0.65 s per image on a 2304-image plate)
+_MEMBER_SIZES: dict = {}
+
+
+class NotInItsSet(CorruptFileError):
+    """A file's UUID is not the one its set lists: CQ1's MIP index and its files.  As a
+    plate such a set cannot be read; by its series it can."""
+
+
 # -- the images ----------------------------------------------------------------
 
 class _CompanionImage(PlaneImage):
@@ -530,6 +542,9 @@ class _CompanionImage(PlaneImage):
         for path, _ifd in sorted(self._planes.values(), key=lambda p: p[1]):
             if not os.path.isfile(path):
                 continue
+            key = (path, tuple(axes))
+            if key in _MEMBER_SIZES:
+                return _MEMBER_SIZES[key]
             try:
                 member = tiff.open(path, "separate", "base", companion=False)
             except Exception:                            # noqa: BLE001 - e.g. multi-file OME
@@ -540,9 +555,12 @@ class _CompanionImage(PlaneImage):
                 own = tiff_metadata(image, n, {}, resolution_tags=False)
             finally:
                 member.close()
-            if own is None:
-                return {}, path
-            return {a: own.pixel_sizes[a] for a in axes if a in own.pixel_sizes}, path
+            found = ({} if own is None else
+                     {a: own.pixel_sizes[a] for a in axes if a in own.pixel_sizes}), path
+            if len(_MEMBER_SIZES) > 4096:
+                _MEMBER_SIZES.clear()
+            _MEMBER_SIZES[key] = found
+            return found
         return {}, None
 
 
@@ -563,6 +581,10 @@ def _series_metadata(core: Core, s: _Series, index: dict, *, members=None, start
             position = ome_plane_position(plane, meta.pixel_sizes, s.sizes)
             changes.update(position=position, coordinate_system=STAGE if position else None)
     sizes = dict(meta.pixel_sizes)
+    step = _delta_t_step(s) if "t" not in sizes and s.sizes["t"] > 1 else None
+    if step is not None:
+        sizes["t"] = step
+        changes["pixel_sizes"] = sizes
     missing = [a for a in "xyzt" if a not in sizes and (a in "xy" or s.sizes[a] > 1)]
     if missing and members is not None:
         found, source = members(missing)
@@ -574,6 +596,20 @@ def _series_metadata(core: Core, s: _Series, index: dict, *, members=None, start
                 f"{', '.join(sorted(found))} size; taken from the member file "
                 f"{os.path.basename(source)!r}"), stacklevel=3)
     return replace(meta, **changes)
+
+
+def _delta_t_step(s: _Series):
+    """The mean time step from the first and last time point's ``Plane@DeltaT``; None
+    without them.  OME-XML records times per plane where ``TimeIncrement`` is absent."""
+    n = s.sizes["t"]
+    first, last = s.plane_at((0, 0, 0)), s.plane_at((n - 1, 0, 0))
+    if first is None or last is None:
+        return None
+    try:
+        span = float(last.get("DeltaT")) - float(first.get("DeltaT"))
+    except (TypeError, ValueError):
+        return None
+    return quantity(span / (n - 1), first.get("DeltaTUnit") or "s")
 
 
 def _position_z_step(s: _Series):
@@ -633,7 +669,11 @@ class _CompanionFile(File):
                 held.append((s, kept[s.number]))
             missing_warning(tally, path)        # one warning for all images
             if not held:
-                raise CorruptFileError(f"{path!r}: none of its images has any of its files")
+                above = _parts.only_file(os.path.dirname(os.path.dirname(os.path.abspath(path))),
+                                         ".companion.ome")
+                raise CorruptFileError(f"{path!r}: none of its images has any of its files"
+                                       + (f"; {above!r} above it may be the set's companion"
+                                          if above else ""))
             index, found = (_plate_index(core, [s for s, _ in held], plan) if plates
                             else ({}, []))
             held.sort(key=lambda h: (h[0].number not in index,
@@ -646,6 +686,8 @@ class _CompanionFile(File):
                     self._members, len(images), planes, shape, dtype, s.name, unit,
                     index.get(s.number, {"series": s.number}), core=core, series=s,
                     samples=s.samples))
+                #: the OME Image's Name (_naming); a plate's fields build theirs
+                images[-1]._own_name = (s.element.get("Name") or "").strip() or None
         except BaseException:
             self._members.close()
             raise
@@ -810,7 +852,9 @@ def metadata_file_of(path: str, tif):
     try:
         followed = _follow(path, tif)
     except _NotFollowed as exc:
-        raise CorruptFileError(
+        # a file its set does not list (a plate's calibration image) is not damaged
+        error = UnsupportedFormatError if exc.why == "does not list it" else CorruptFileError
+        raise error(
             f"{path!r} keeps its metadata in {exc.written!r}, which {exc.why}: the set it "
             f"belongs to cannot be opened. multifile=False opens this file alone.") from None
     return None if followed is None else followed[0]
@@ -932,5 +976,11 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa:
          plates: bool = False) -> _CompanionFile:
     """The images of an OME companion file (*tiles* and *resolutions* change
     nothing: members are plain pages, without tiles or pyramids); *plates*:
-    a companion that describes a plate reads as one."""
-    return _CompanionFile(path, plates)
+    a companion that describes a plate reads as one; one that cannot (CQ1's MIP index
+    does not list its own files as members) reads by its series."""
+    try:
+        return _CompanionFile(path, plates)
+    except NotInItsSet:
+        if not plates:
+            raise
+    return _CompanionFile(path, False)

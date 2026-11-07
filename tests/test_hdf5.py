@@ -252,6 +252,20 @@ def test_bdv_channel_names_and_all_levels(tmp_path):
         assert f.select(resolution=1)[0].shape[-2:] == (20, 25)
 
 
+def test_bdv_views_take_their_setup_names(tmp_path):
+    """review cycle 1, N-28: HisYFP-SPIM's setups 'Angle 0' .. 'Fused' were 'view 0' ..
+    'view 8'. A name that is the setup's id says nothing (BigStitcher's '0', '1'); the
+    channels of one image named apart name no image."""
+    write_bdv(tmp_path, tiles=3, channels=1, setup_names={0: "Angle 0", 1: "Fused", 2: "2"})
+    with micro_reader.open(tmp_path / "dataset.xml") as f:
+        assert [im.name for im in f.images] == ["Angle 0", "Fused", "tile 2"]
+    other = tmp_path / "two"
+    other.mkdir()
+    write_bdv(other, tiles=2, channels=2)          # each image's channels: "setup 0", "setup 1"
+    with micro_reader.open(other / "dataset.xml") as f:
+        assert [im.name for im in f.images] == ["tile 0", "tile 1"]
+
+
 def test_bdv_missing_views_read_as_zeros(tmp_path):
     stored = write_bdv(tmp_path, tiles=1, missing=[(1, 1)])
     with micro_reader.open(tmp_path / "dataset.xml") as f:
@@ -275,6 +289,19 @@ def test_bdv_hdf5_opens_its_xml(tmp_path):
     with micro_reader.open(tmp_path / "dataset.h5") as f:
         assert f.path.endswith("dataset.xml") and f.opened.endswith("dataset.h5")
         assert f.images[0].metadata.pixel_sizes["z"] == (2.0, "micrometer")
+
+
+def test_bdv_hdf5_keeps_the_xmls_letter_case(tmp_path):
+    # the .h5 finds its XML from its lower-cased stem; on a file system that
+    # ignores case the found path kept those letters ('hisyfp-spim.xml angle 0',
+    # gap hunt B-01): every entry point names the dataset as the folder does
+    write_bdv(tmp_path, name="HisYFP-SPIM")
+    with micro_reader.open(tmp_path / "HisYFP-SPIM.xml") as f:
+        by_xml = (f.path, [im.name for im in f.images], f.collection.name)
+    with micro_reader.open(tmp_path / "HisYFP-SPIM.h5") as f:
+        by_h5 = (f.path, [im.name for im in f.images], f.collection.name)
+    assert os.path.basename(by_h5[0]) == "HisYFP-SPIM.xml"
+    assert by_h5[1:] == by_xml[1:]
 
 
 def test_bdv_hdf5_alone(tmp_path):

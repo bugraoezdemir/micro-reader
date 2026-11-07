@@ -1,5 +1,244 @@
 # Changelog
 
+## 0.4.0 (unreleased)
+
+### New
+
+- KLB (Keller Lab Block) files open (backends/klb.py), with no Java and no dependency: every
+  time point and channel, bzip2, zlib or stored, decoding only the blocks a read touches, in
+  parallel. On the three samples held the pixels equal a separate decode of the file's blocks,
+  and all 10 time points of `test.klb` read (Bio-Formats reports one). A 1 in the header is
+  its default, no measurement: on t, on z beside a set x or y, and on x, y and z together.
+- ND2 version 2 files open: the chunked layout with its metadata in XML, which
+  `Ver2.x` files have (13 of the 83 ND2 samples we hold). Pixels equal the `nd2` package's,
+  and sizes, on all but one, which that package misreads.
+- Luxendo / Bruker light-sheet experiments (backends/luxendo.py): the experiment folder
+  (`raw/` with one folder of `.lux.h5` stacks per stack, channel and objective) opens as
+  one image per stack, objective and camera, `t` the time points, `c` the channels by
+  Luxendo channel number, named by their description; the time step from the stacks'
+  time stamps. Any part opens it: the folder, `raw/`, a channel folder, a `.lux.h5` or
+  its `.json`, and the link files next to `raw/` (`main_raw.lux.h5`, `imaris.ims`,
+  `ims/stacks/*.ims`, `bdv.xml` + `bdv.h5`). The pixels always come from `raw/`; the
+  link files say which files should exist, and one they name that `raw/` lacks reads as
+  zeros with one `MissingImagesWarning` (BioImage Archive S-BIAD3686: every `bdv.xml`
+  without its `bdv.h5`, passed over with a `CompositeWarning`). Each stack is checked
+  against its place when first read (`CorruptFileError` naming it). Several stacks or
+  cameras: index `tile` / `view`. At most 64 stack files are kept open.
+- A folder whose chosen file fails to open (an index file is chosen over images) names
+  the folder's other images in the error.
+- A folder that holds no image itself opens the one dataset in its sub-folders
+  (decision MR-6): a downloaded sample folder over its export, down to 6 levels, each
+  sub-folder taken as `open` takes it (a format's root, else its index file, else its
+  images). On the real-data collection 32 sample folders open that did not (38 of 54
+  plate samples failed), none differently, none newly failing. Several datasets: the
+  error lists them (relative paths). With `plates=True` a folder of one NIS-Elements
+  well-plate run is one dataset, and without it the error says that `plates=True`
+  reads the run as a plate.
+- A folder warns about `.ptu`, `.phu` and `.sptw` files beside the images it opens
+  (a `CompositeWarning` naming them). An orphan softWoRx log names the deconvolved image
+  beside it, and a companion with none of its files names a companion in the folder above.
+- Clearer refusals: an OME-Zarr store (or a file in one) names ome_zarr_pyramid, which
+  reads it; `.ptu`, `.phu` and `.sptw` files name their format (PicoQuant) instead of
+  "no micro-reader backend recognises".
+- `Quantity.to(unit)` takes the spellings files use (`"um"`, `"ms"`, `"nm"`) as well as
+  OME-Zarr's names, so values that formats record in different units compare
+  (`pixel_sizes["t"].to("s")`; decision MR-3: each value keeps the file's unit). A
+  length converted to a time, or an unknown unit, raises `ValueError`; before, a length
+  "converted" to seconds returned a number and `"um"` raised a bare `KeyError`.
+
+### Changed
+
+- `Image.name` follows one rule for every format and entry point (decision MR-2;
+  README "Image names"): a plate's image is `"well B2 field 0"`; otherwise the
+  format's own name (Leica element, OME `Image Name`, Imaris, slide roles), else a label
+  the file records (CZI scene, ND2 point, Micro-Manager / MetaMorph position), else the
+  index values that tell the file's images apart (`"series 2"`), else, for one image,
+  the dataset's main file without its extension; duplicates get what differs appended.
+  Before, each backend had its own rule (`"file.czi series 0"`, `"file.nd2 position 0"`,
+  `"series0"`, the file name with its extension), a LIF lambda scan gave 29 images
+  named `Series001`, and the same dataset was named differently through different
+  files. Checked on the real-data collection: every entry point of a dataset gives the
+  same names. eubi-bridge writes the name as the OME `Image Name` and ome_zarr_pyramid
+  as the pyramid's name; output paths do not depend on it.
+- `open` gives every image in the canonical order `t c z y x` (then `s`) by default
+  (decision MR-4): axes the file lacks are added with size 1, the others reordered. Before,
+  each image came in its backend's order: ICS `ctzyx`, Micro-Manager OME-TIFF `tzcyx`,
+  ilastik `txyc` (x before y), a 2-D TIFF `yx`. `axes="native"` (or `axes=None`) keeps
+  that order. An image already in the order asked for stays the backend's own object (no
+  wrapper); reads take the same time (a 100 MB ImageJ movie: 14 ms either way).
+  eubi-bridge asks for the order it reads in itself and sees no change.
+- A `.lux.h5` or an `imaris.ims` in a Luxendo experiment folder opens the experiment
+  (`backend` `"luxendo"`), not the one stack (`"hdf5"`) or the Imaris file (`"ims"`);
+  `open(..., multifile=False)` reads them alone as before.
+- A plate's plane file opens the plate in every format (CellVoyager, Harmony, Columbus,
+  JDCE, IN Cell and IN Carta, MetaXpress did not; Cellomics, Flex, scanR and companions
+  did), and `multifile=False` reads that file alone. A file named like a plane with no
+  index near it is still a TIFF. 91 planes of the real-data plates checked.
+- A slide's main scan is named after its file, not `Baseline` (tifffile's word for it),
+  and its associated images are lower case everywhere (`macro`, `map`; NDPI gave `Macro`,
+  `Map`). `images` stays in file order: which image is the scan is for image roles.
+- Leica: `FrameProperties` and `IOManagerConfiguation` files are parts of their
+  experiment, and a `.lifext` and an `.xml` of a `.lif` are parts of the `.lif`
+  (`multifile=False` reads a `.lifext` itself). `group_files` over the Leica samples gives
+  22 groups that all open, against 57 of which 39 failed; no dataset is lost.
+- A file its set does not list (a plate's calibration image) raises
+  `UnsupportedFormatError`, not `CorruptFileError`: nothing is wrong with the file.
+- `File.path` and messages spell a path one way (`os.path.normpath` of what was opened).
+- A lambda scan is one image in every format (decision MR-5): its bands along `c`, a
+  detector's bands together, each channel with its `emission_wavelength` and its wavelength
+  in its name; with `axes="native"`, or axes naming `l`, a real axis `l` and the wavelengths
+  in `metadata.index_values["emission"]`. Before, LIF, OIR, OIB and OME-TIFF gave one image
+  per band (29 images named `Series001`, index `emission`) and an LSM 30 channels without
+  wavelengths; LSM channels now carry theirs. Excitation scans stay an index. Reads go band
+  by band through the backends' own reads.
+- `open(plates=True)` and `group_files(plates=True)` are the default: a CZI, ND2, OME-TIFF
+  or companion acquired on a plate reads as a plate (`well` and `field` indices,
+  `"well B2 field 0"` names, the plate's image order), and one `.nd2` of a NIS-Elements run
+  opens the run. `plates=False` gives the old reading by series. A file that is no plate
+  does not change.
+- A Leica element's `.lof` and `.xlif` open their experiment, as a plate's plane opens its
+  plate: the same image, name, coordinate system and time step from each (a `.lof` beside its
+  `.xlef` gave `Series001` and another system). `multifile=False` reads the file alone.
+- ScanImage: the frames of a recording of one slice are `t`, with the time step from the
+  frame rate (tifffile calls them `z` when fast z is on: 1000 frames of a plane read as a
+  z stack).
+- Channels with nothing to say say nothing: several channels all `#FFFFFF` (Imaris,
+  Micro-Manager defaults) have no colour, BigDataViewer channels whose name is their id and
+  VSI channels named like their image have no name. One white channel, or white among other
+  colours, stays.
+- `Image.is_pyramid` is deprecated (a `DeprecationWarning`): it means level 0, also for an
+  image with no lower levels, and is too close to `is_pyramidal`, which says whether lower
+  levels are stored. Use `image.level == 0`.
+- `select` raises `ValueError` for a plate, acquisition, well, row or column name no plate
+  has, naming the names there are (`select(well="Z99")` returned `[]`, decided
+  2026-10-30); a name the layout has whose wells hold no images still selects nothing.
+  ome_zarr_pyramid 0.6.0's `select` raises the same.
+
+### Fixed
+
+- A stepped read (`image[::4, ::4]`, `image[::16]`) holds its result and one piece of at most
+  64 MB (`STEPPED_READ_BYTES`), not the whole span it covers, in every format: the span was read
+  whole and then thinned, so `image[:, ::16, ::16]` of a 6.8 GB MRC held 6.6 GB (also in 0.3.x);
+  it now peaks at 98 MB, the result 27 MB. Large spans are read in runs of planes or rows that
+  fit, each thinned, so a compressed tile is decoded once as before; where one step spans more
+  than a piece (`[::16]` of large planes), only the planes kept are read. Small stepped reads
+  stay one read. Against the old single read (which held the whole span), a 302 MB plane read
+  with steps took 1.2 to 1.7 times as long compressed (0.18 s against 0.11 s) and up to 2.7
+  times uncompressed (0.08 s against 0.03 s); `[:, ::4, ::4]` of the 6.8 GB MRC takes 4 s, the
+  first version of this fix 7 s. Reading only the selected rows of an uncompressed file is a
+  faster way still, for a later release.
+- A CZI cut short before its subblock directory says it is truncated and to copy it again,
+  not only "no ZISRAWDIRECTORY at byte N". `set_memory_limit` refuses a negative budget and
+  `set_decode_threads` fewer than 1 thread (they were taken in silence). A Harmony or
+  Columbus plate refused while it opens (a page of another size than the index says) closes
+  the member TIFFs it had opened (they stayed open, with ResourceWarnings).
+- An ND2 with damaged metadata raises `CorruptFileError` ("damaged ND2 metadata ..."), not the
+  decoder's own `UnicodeDecodeError`. The reference pages give `open()`'s and
+  `group_files()`'s defaults as they are (`plates=True`, `axes="canonical"`), the image name
+  rule of this release, and the README's "Ambiguous dimensions" outputs as 0.4.0 prints them.
+- A plate in one OME-TIFF no longer takes minutes to describe: each image's metadata parsed
+  the whole file's OME-XML (0.65 s per image, 25 minutes for 2304 images; now 0.4 s for all).
+- An OME-TIFF a plate's OME-XML cannot be read as a plate from (CQ1's `MeasurementResultMIP`)
+  opens by its series, also now that plates are the default.
+- An OME companion's time step comes from its planes' `DeltaT` where `TimeIncrement` is
+  absent (Bruker time series).
+- ND2 time steps are the mean interval of the frames' own stamps, read from the first and last
+  frame; without stamps, the file's measured `dAvgPeriodDiff`, then the requested period. They
+  agree with the `nd2` package's frame times on all 42 time series compared. A camera slower than
+  the loop gave rates up to twice too fast, old NIS files record a wrong `dAvgPeriodDiff` (14 s
+  for frames 30 s apart), and two files gave no step at all. Time loops whose valid periods
+  differ warn: one step does not describe them.
+- `is_ragged` is False for images whose parts differ only in pixel type or wavelength.
+- BigDataViewer voxel sizes in the unit `pixel` are kept, as relative sizes in that unit.
+- Imaris TIFF exports give their z step (`Dz`).
+- FileConverter's `.h5` copy of an Imaris `.ims` belongs to its set: one group, not two.
+- `rename=` of the wrong type raises a `TypeError` naming the form.
+- Legacy ND2 files give the z step and time interval of their experiment loops.
+- `np.asarray(image)` gives the pixels (it wrapped the Image in a 0-d object array), and
+  `len(image)` works.
+- ScanImage: pages that do not fill the file's shape warn, instead of being dropped in silence.
+- Leica settings files in nested collections belong to their experiment.
+- CellVoyager: one `Ch` used by several actions with other filters gives each its own
+  name and wavelengths.
+- Leica histogram series no longer report their bins as pixel sizes (3921 um per pixel:
+  1 m over the axis is a normalised axis, as 1 m per pixel already was for phasor plots).
+- Two channels of one name folded with their RGB samples stay apart (`"BF 0 R"`, `"BF 1 R"`;
+  an RGB ND2 of two `Brightfield` channels gave the same names twice).
+- HDF5 without `axistags`: the refusal says why (a dataset does not say what its axes are,
+  and micro-reader does not guess them) and that h5py reads it.
+- Imaris files whose text attributes are arrays of 1-byte integers (Luxendo writes
+  them so) lost their metadata: channel names read as the first character's code
+  (`"99"`) and the pixel sizes were missing (the unit read as `"117"`).
+- Plain TIFFs: the resolution tags give a pixel size only with an explicit centimetre
+  `ResolutionUnit`. Inches (TIFF's default when the tag is absent) were a screen or print
+  density on every real file: a CellVoyager plane opened alone gave 903 111 µm per pixel
+  (0.028 / inch), IDR CellVoyager and Prairie View planes 265 µm and 353 µm (96 and
+  72 dpi). Every microscope calibration in the real-data collection uses centimetres.
+- Zeiss LSM files with one z plane gave a z pixel size of 1e-13 µm (`VoxelSizeZ` is
+  1e-19 m on all of them); an Imaris file with one plane gave 0.001 µm (its made-up z
+  extent). Neither reports a z step now.
+- ImageJ TIFFs reported a frame interval for stacks without frames (`finterval=1` on a
+  z stack); the interval is read only with `frames` > 1.
+- A BigDataViewer dataset opened through its `.h5` was named in lower case
+  (`hisyfp-spim.xml angle 0`, also `File.path` and the tree's root): on Windows the XML
+  found from the file's lower-cased stem kept those letters. Files a format's rule
+  finds are now spelled as the folder spells them.
+- `group_files` gave each file of a multi-file OME-TIFF set as an image of its own (a
+  4-D set of 86 files: 86 singles), although opening any of them opens the whole set:
+  the set is one `index` group now, its first file the main. Only an OME-TIFF whose
+  OME-XML names another file is opened for this (its first page read first), after
+  every other index file, so one file alone stays a plain path and grouping a folder
+  costs one open per set. A `BinaryOnly` stub belongs to the file it points to.
+- `select`, `Plate.well_index` and `Plate.rows` / `.columns` compare well, row and column
+  names as vendors spell them (MetaXpress and Cellomics `A01`, Harmony and NGFF `A1`):
+  without letter case and without the leading zeros of the number, so `well="B02"` is
+  `"B2"` and `column_name="05"` is `"5"`; before, they selected nothing. `rows["B":"D"]`
+  takes a slice of names, both ends included (it raised a bare `TypeError`).
+  ome_zarr_pyramid 0.6.0 compares them the same way.
+- A truncated OIR file raised `UnsupportedFormatError` ("OIR file without image data");
+  it is a `CorruptFileError` naming the size its header gives, as for the other formats.
+- A Micro-Manager 2.0 set names its positions by their labels (`2-Pos000_000`): 2.0 writes
+  `Label`, micro-reader looked for `label` and fell back to `Pos0`, `Pos1`; the positions of
+  an MMStack OME-TIFF were `series 0`, `series 1`.
+- Time steps come from the planes' own time stamps where a format records them, as for ND2:
+  a MetaMorph `.nd` set from its planes' `acquisition-time-local` (it had no time step; the
+  `.nd` says "1 min", the planes 60.4 s), Micro-Manager from the frames' `ElapsedTime-ms`
+  first and the Summary's `Interval_ms` second (a set without the interval had none). When
+  the stamps and the declared interval differ by more than 5%, the stamps are used and one
+  warning names both. Imaris warns when its time points are unevenly spaced (the largest gap
+  over 1.1 times the smallest); the step stays their mean.
+- A truncated JPEG (one cut short by an interrupted copy) is refused with `CorruptFileError`;
+  before, its lost rows were read as fill with no error. Data after the end-of-image marker
+  still reads.
+- A TIFF named like a plane of an index-based plate (Harmony, CellVoyager, ...) that the index
+  does not list opens as itself; before, `open()` opened the whole plate from it and the file
+  itself was never read.
+- A squeezed view lists the pixel sizes of its own axes only: `axes="yx"` of a z-stack gave a
+  z size the view has no axis for. A view of all five axes keeps the sizes the file gives,
+  size-1 axes included, and invents none.
+- BigDataViewer images take the name their view setups give in the XML (`Angle 45`,
+  `Fused`), when the setups of an image all give the same one and it is not just the setup's
+  id; they were named `view 0`, `view 1`. BigStitcher datasets, which name setups by id, keep
+  `tile 0`, `tile 1`.
+- An Imaris image whose stored name is a path (the acquisition machine's file,
+  `D:\FusionImages\...\x.ims`) takes its file's name instead.
+- OME-TIFF and OME companion files take their time step from the planes' own times
+  (`Plane@DeltaT`), as the other formats do: a Micro-Manager MMStack file that declares
+  1 ms ("as fast as possible") for frames 1.12 s apart reads 1118 ms, with one warning
+  naming both; files with times but no `TimeIncrement` had no time step at all.
+- Olympus OIR lambda scans: each band's excitation is the laser the acquisition let through
+  (405 nm), not the last laser its channel lists (640 nm, longer than the emission).
+- `select(well=...)` with a well of the plate's layout that holds no images selects
+  nothing, as rows and columns do; it raised `ValueError`. A well outside the layout is
+  still refused.
+- `Quantity.to` takes the quantity's own unit by the same spellings as the target
+  (`Quantity(60000, "ms").to("s")` failed), and its error names the real reason (an
+  unknown unit, or a time and a length).
+- The README and the guides described `plates=True` as an opt-in: it is the default since
+  0.4.0, and `plates=False` reads a plate by its series. The opening guide's CZI plate example
+  opened with `plates=False` and then read `f.plates`. The axes guides printed the axes of
+  0.3.x (`axes="canonical"` is the default; `axes=None` gives the file's own).
+
 ## 0.3.0 (2026-10-28): select by well name, row and column
 
 A minor release: `select` takes new arguments, and refuses a plate, well, field or

@@ -93,7 +93,10 @@ def h5py_module(what: str = "reading HDF5 files"):
 
 
 def attr_text(attrs, key) -> Optional[str]:
-    """An attribute as text: str, bytes, or an array of 1-byte strings (Imaris)."""
+    """An attribute as text: str, bytes, an array of 1-byte strings (Imaris),
+    or an array of 1-byte integers holding the characters' codes (Imaris
+    files Luxendo writes: ``[117, 109]`` is ``"um"``) -- read as text when
+    every code is a printable ASCII character, else as the number it holds."""
     if key not in attrs:
         return None
     value = attrs[key]
@@ -101,6 +104,9 @@ def attr_text(attrs, key) -> Optional[str]:
         if value.dtype.kind in "SU" and value.ndim and value.size > 1:
             return b"".join(v if isinstance(v, bytes) else str(v).encode()
                             for v in value.ravel()).decode(errors="replace")
+        if value.dtype.kind in "iu" and value.dtype.itemsize == 1 and value.ndim and \
+                value.size and ((value >= 32) & (value <= 126)).all():
+            return value.astype(np.uint8).tobytes().decode("ascii")
         value = value.ravel()[0] if value.size else ""
     return value.decode(errors="replace") if isinstance(value, bytes) else str(value)
 
@@ -1015,6 +1021,16 @@ class ChunkReader:
         return UnsupportedFormatError(
             f"{where}: HDF5 filter {names} is not built into micro-reader; h5py "
             f"applies it with the hdf5plugin package (pip install hdf5plugin). h5py said: {exc}")
+
+    def forget(self, path: str) -> None:
+        """Drop what is kept for the HDF5 file *path* (its layouts, its file
+        handles) before it is closed: a set of many files keeps only some
+        open (Luxendo experiments).  Its decoded chunks stay cached: the
+        file is the same when it is opened again."""
+        with self.lock:
+            for key in [k for k, layout in self._layouts.items() if layout.path == path]:
+                del self._layouts[key]
+        self.handles.discard(path)
 
     def close(self) -> None:
         self.handles.close()

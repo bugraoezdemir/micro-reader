@@ -65,6 +65,8 @@ SIDE_FOLDERS = ("assaylayout", "ffc_profile", "flatfieldcorrection", "index")
 SIDE_FOLDER_PATTERN = re.compile(r"evaluation\d+")
 #: plane files: members of the index, opened as themselves (never parts)
 PLANE_SUFFIXES = (".tif", ".tiff")
+#: a plane's file name: r03c03f01p01-ch1sk1fk1fl1.tiff, r04c03f02p01-ch02t01.tiff
+PLANE_NAME = re.compile(r"r\d+c\d+f\d+p\d+-ch\d+(?:sk\d+fk\d+fl\d+|t\d+)\.tiff?", re.IGNORECASE)
 
 
 def _side_folder(name: str) -> bool:
@@ -132,6 +134,13 @@ def owner(path: str, head):
         index = _measurement_index(path)
     elif _side_folder(os.path.basename(parent)):
         index = _measurement_index(os.path.dirname(parent))
+    elif PLANE_NAME.fullmatch(os.path.basename(path)):
+        # a plane: the plate, or itself with open(multifile=False); the index lies
+        # beside it, one folder up (Images/r03c03/) or in the measurement's Images folder
+        beside = next((p for folder in (parent, os.path.dirname(parent)) for p in
+                       (os.path.join(folder, n) for n in INDEX_FILES) if os.path.isfile(p)), None)
+        index = _spelled(beside) if beside is not None else _measurement_index(os.path.dirname(parent))
+        return _parts.Part(index, index, member=True) if index is not None else None
     elif os.path.basename(parent).lower() == "images":
         if path.lower().endswith(PLANE_SUFFIXES):
             return None
@@ -271,6 +280,17 @@ class _HarmonyFile(File):
     format = "harmony"
 
     def __init__(self, path: str, columbus: bool = False):
+        self._members = None
+        try:
+            self._open(path, columbus)
+        except BaseException:
+            # a plate refused part way (a page of another size): the member TIFFs it
+            # opened are closed here, as no File is returned to close them
+            if self._members is not None:
+                self._members.close()
+            raise
+
+    def _open(self, path: str, columbus: bool) -> None:
         self.path = path
         try:
             root = ET.parse(path).getroot()

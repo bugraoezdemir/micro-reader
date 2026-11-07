@@ -116,7 +116,10 @@ def owner(path: str, head):
     if main is not None and sniff(_parts.read_head(main), main):
         return _parts.Part(main, main)
     if any(sign in head for sign in LOG_SIGNATURES):
-        return _parts.Part(None, os.path.join(folder, image))
+        stem = os.path.splitext(image)[0]
+        processed = _parts.find(folder, stem + "_D3D.dv")   # softWoRx's deconvolved image
+        hint = f"{os.path.basename(processed)} beside it opens" if processed else ""
+        return _parts.Part(None, os.path.join(folder, image), hint=hint)
     return None
 
 

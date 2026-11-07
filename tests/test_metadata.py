@@ -35,6 +35,17 @@ def test_quantities_keep_the_files_unit_under_ome_zarr_names():
     assert Quantity(1.5, "micrometer").to("nanometer").value == pytest.approx(1500)
 
 
+def test_quantities_convert_between_formats_units():
+    # MR-3: values keep the file's unit; to() makes them comparable
+    assert Quantity(2.0, "millisecond").to("s") == Quantity(pytest.approx(0.002), "second")
+    assert Quantity(260.0, "nanometer").to("um").value == pytest.approx(0.26)
+    assert Quantity(0.26, "micrometer").to("µm") == Quantity(0.26, "micrometer")
+    with pytest.raises(ValueError, match="cannot be converted"):
+        Quantity(0.26, "micrometer").to("second")                       # a length is no time
+    with pytest.raises(ValueError, match="unknown unit"):
+        Quantity(0.26, "micrometer").to("furlong")
+
+
 def test_lengths_above_a_millimetre_become_micrometres():
     # Bugra: "metre is absurd"; mm and smaller stay in the file's unit (D1)
     _close(quantity(2.1e-8, "m"), 0.021, "micrometer")
@@ -172,15 +183,47 @@ def test_imagej_tiff(tmp_path):
     _close(meta.pixel_sizes["z"], 2.0, "micrometer")
 
 
+def test_imagej_frame_interval_only_with_frames(tmp_path):
+    # ImageJ writes finterval=1 also on stacks without frames (formats/tiff/assorted
+    # filament.tif, a z stack; gap hunt B-21); spacing is its voxel depth and stays
+    zstack = tmp_path / "z.tif"
+    tifffile.imwrite(zstack, np.zeros((3, 8, 10), np.uint8), imagej=True, resolution=(4.0, 4.0),
+                     metadata={"axes": "ZYX", "spacing": 2.0, "finterval": 1.0, "unit": "um"})
+    with micro_reader.open(zstack) as f:
+        sizes = f.images[0].metadata.pixel_sizes
+    assert "t" not in sizes
+    _close(sizes["z"], 2.0, "micrometer")
+    movie = tmp_path / "t.tif"
+    tifffile.imwrite(movie, np.zeros((4, 2, 8, 10), np.uint8), imagej=True, resolution=(4.0, 4.0),
+                     metadata={"axes": "TCYX", "finterval": 3.0, "unit": "um"})
+    with micro_reader.open(movie) as f:
+        _close(f.images[0].metadata.pixel_sizes["t"], 3.0, "second")
+
+
+def test_lsm_single_plane_has_no_z_step():
+    # CZ_LSMINFO of real LSM files (tifffile cannot write LSM): one z plane
+    # writes VoxelSizeZ = 1e-19 m (zenodo-14510432 10-01.lsm, gap hunt A-07)
+    from micro_reader.backends._tiff_metadata import _lsm
+    flat = _lsm({"DimensionZ": 1, "VoxelSizeX": 2.6e-7, "VoxelSizeY": 2.6e-7,
+                 "VoxelSizeZ": 1e-19, "TimeIntervall": 0.0}, 1)
+    assert set(flat.pixel_sizes) == {"x", "y"}
+    _close(flat.pixel_sizes["x"], 0.26, "micrometer")
+    stack = _lsm({"DimensionZ": 12, "VoxelSizeX": 2.6e-7, "VoxelSizeY": 2.6e-7,
+                  "VoxelSizeZ": 4.4859e-7, "TimeIntervall": 0.0}, 1)
+    _close(stack.pixel_sizes["z"], 0.44859, "micrometer")
+
+
 @pytest.mark.parametrize("unit, expected", [("CENTIMETER", ("micrometer", 100.0)),
-                                            ("INCH", ("micrometer", 254.0)), ("NONE", None)])
+                                            ("INCH", None), ("NONE", None), (None, None)])
 def test_plain_tiff_resolution_tags(tmp_path, unit, expected):
+    # only centimetres are a calibration: inches (TIFF's default when the tag is
+    # absent) are a screen density on every real file (72 / 96 / 300 dpi)
     path = tmp_path / "plain.tif"
     tifffile.imwrite(path, np.zeros((8, 8), np.uint8), resolution=(100.0, 100.0),
                      resolutionunit=unit, metadata=None)
     with micro_reader.open(path) as f:
         meta = f.images[0].metadata
-    if expected is None:                     # pixels per "no unit": not a size
+    if expected is None:                     # pixels per inch or "no unit": not a size
         assert meta.pixel_sizes == {}
     else:
         _close(meta.pixel_sizes["x"], expected[1], expected[0])
@@ -382,7 +425,8 @@ def test_ome_modulo_lambda_values(tmp_path):
     path = tmp_path / "spectral.ome.tif"
     tifffile.imwrite(path, np.zeros((3, 4, 6), np.uint8), photometric="minisblack",
                      description=OME_MODULO, metadata=None)
-    with micro_reader.open(path) as f:
+    from micro_reader.backends import tiff
+    with tiff.open(str(path)) as f:                 # the bands, before _lambda gathers them
         assert f.indices == [{"series": 0, "emission": k} for k in range(3)]
         values = [image.metadata.index_values["emission"] for image in f.images]
     assert [q.value for q in values] == [500.0, 510.0, 520.0]
@@ -394,7 +438,8 @@ def test_lif_lambda_values(tmp_path):
     path = tmp_path / "lambda.lif"
     # the writer's dimensions start at 0 and span 1e-4 m
     write_lif(path, [image("img", np.zeros((3, 8, 10), np.uint8), axes="lyx")])
-    with micro_reader.open(path) as f:
+    from micro_reader.backends import lif
+    with lif.open(str(path)) as f:                  # the bands, before _lambda gathers them
         values = [image.metadata.index_values["emission"] for image in f.images]
     assert [round(q.value) for q in values] == [0, 50000, 100000]
     assert {q.unit for q in values} == {"nanometer"}
@@ -433,3 +478,26 @@ def test_nd2_without_camera_matrix_has_no_position(tmp_path):
         meta = f.select(series=1)[0].metadata
     assert meta.position == {} and meta.coordinate_system is None
     _close(meta.pixel_sizes["x"], 0.5, "micrometer")
+
+
+def test_all_white_channels_have_no_colour():
+    from micro_reader._metadata import Channel, without_placeholder_white
+    white = [Channel(name=n, color="#ffffff") for n in "ab"]
+    assert [c.color for c in without_placeholder_white(tuple(white))] == [None, None]
+    assert without_placeholder_white((white[0],))[0].color == "#ffffff"     # one channel: a colour
+    mixed = (white[0], Channel(name="b", color="#FF0000"))
+    assert without_placeholder_white(mixed) == mixed
+
+
+def test_scanimage_frames_of_one_slice_are_time():
+    from types import SimpleNamespace
+
+    from micro_reader.backends._tiff_metadata import scanimage_frame_rate
+
+    def recording(**frame):
+        return SimpleNamespace(is_scanimage=True, scanimage_metadata={"FrameData": frame})
+    one = {"SI.hStackManager.actualNumSlices": 1, "SI.hRoiManager.scanFrameRate": 500.0}
+    assert scanimage_frame_rate(recording(**one)) == 500.0
+    assert scanimage_frame_rate(recording(**{**one, "SI.hStackManager.actualNumSlices": 9})) is None
+    assert scanimage_frame_rate(recording(**{"SI.hStackManager.numSlices": 1})) == 0.0
+    assert scanimage_frame_rate(SimpleNamespace(is_scanimage=False)) is None

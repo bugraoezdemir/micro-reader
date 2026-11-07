@@ -162,6 +162,39 @@ def test_index_files_of_the_same_images_are_one_group(tmp_path):
     assert group.members and not g.singles
 
 
+def _ome_set(folder, names):
+    """A multi-file OME-TIFF set: one image of len(names) z planes, plane k in
+    file k; every file's OME-XML names all files by UUID (pointed both ways)."""
+    uuids = [f"urn:uuid:0000000{k}-0000-0000-0000-000000000000" for k in range(len(names))]
+    tiffdata = "".join(f'<TiffData FirstZ="{k}" IFD="0" PlaneCount="1">'
+                       f'<UUID FileName="{n}">{u}</UUID></TiffData>'
+                       for k, (n, u) in enumerate(zip(names, uuids)))
+    for k, name in enumerate(names):
+        xml = ('<?xml version="1.0" encoding="UTF-8"?>'
+               '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06" '
+               f'UUID="{uuids[k]}"><Image ID="Image:0" Name="cells"><Pixels ID="Pixels:0" '
+               f'DimensionOrder="XYZCT" Type="uint8" SizeX="8" SizeY="6" SizeZ="{len(names)}" '
+               f'SizeC="1" SizeT="1"><Channel ID="Channel:0" SamplesPerPixel="1"/>{tiffdata}'
+               '</Pixels></Image></OME>')
+        tifffile.imwrite(os.path.join(folder, name), np.full((6, 8), k, np.uint8),
+                         description=xml, metadata=None)
+
+
+def test_a_multi_file_ome_tiff_set_is_one_group(tmp_path):
+    # its files name each other by UUID: one image, as opening any of them gives
+    # (gap hunt B-09: 86 files of a 4-D set were 86 single images)
+    _ome_set(str(tmp_path), ["cells_Z0.ome.tif", "cells_Z1.ome.tif", "cells_Z2.ome.tif"])
+    tifffile.imwrite(str(tmp_path / "alone.ome.tif"), np.zeros((6, 8), np.uint8))
+    g = micro_reader.group_files(str(tmp_path))
+    (group,) = g.groups
+    assert group.kind == "index" and os.path.basename(group.main) == "cells_Z0.ome.tif"
+    assert {os.path.basename(m) for m in group.members} == {"cells_Z1.ome.tif", "cells_Z2.ome.tif"}
+    assert _names(g.singles, str(tmp_path)) == ["alone.ome.tif"]     # one file: a plain path
+    with micro_reader.open(group.main) as f:
+        image = f.images[0]
+        assert image.shape[image.axes.index("z")] == 3
+
+
 def test_a_leica_experiment_holds_its_references(tmp_path):
     pytest.importorskip("imagecodecs")
     from _lif_writer import image, write_xlef, write_xlif

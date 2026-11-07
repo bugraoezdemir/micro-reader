@@ -378,3 +378,76 @@ def test_resolution_index_follows_the_file_not_the_image():
     assert pyramidal.is_pyramidal and not flat.is_pyramidal
     assert f.indices == [{"series": 0, "resolution": 0}, {"series": 1, "resolution": 0}]
     assert level1.index == {"series": 0, "resolution": 1}
+
+
+# -- open's default: canonical (decision MR-4, 0.4.0) ---------------------------------
+
+def test_open_gives_tczyx_by_default_and_the_files_order_with_native(tmp_path):
+    # the session's micro_reader.open defaults to native (conftest); the real one:
+    from micro_reader._registry import open as real_open
+    tifffile = pytest.importorskip("tifffile")
+    flat, stack = tmp_path / "flat.tif", tmp_path / "stack.tif"
+    tifffile.imwrite(flat, np.zeros((6, 8), np.uint8))
+    tifffile.imwrite(stack, np.arange(3 * 6 * 8, dtype=np.uint16).reshape(3, 6, 8), imagej=True,
+                     metadata={"axes": "ZYX"})
+    with real_open(str(flat)) as f:
+        image = f.images[0]
+        assert (image.axes, image.shape) == ("tczyx", (1, 1, 1, 6, 8))
+    with real_open(str(stack)) as f:
+        image = f.images[0]
+        assert (image.axes, image.shape) == ("tczyx", (1, 1, 3, 6, 8))
+        np.testing.assert_array_equal(image.read(z=2)[0, 0], tifffile.imread(stack)[2])
+    for native in ("native", None):
+        with real_open(str(stack), axes=native) as f:
+            assert f.images[0].axes == "zyx"
+
+
+def test_an_image_already_tczyx_is_not_wrapped(tmp_path):
+    # no wrapper (no cost, the backend's own attributes) when the order is the asked one
+    from micro_reader._registry import open as real_open
+    tifffile = pytest.importorskip("tifffile")
+    path = tmp_path / "five.tif"
+    tifffile.imwrite(path, np.zeros((2, 1, 3, 6, 8), np.uint8), metadata={"axes": "TCZYX"})
+    with real_open(str(path)) as f, real_open(str(path), axes="native") as g:
+        assert f.images[0].axes == "tczyx" and type(f.images[0]) is type(g.images[0])
+
+
+def test_two_channels_of_one_name_stay_apart_when_folded():
+    from micro_reader._axes import folded_channels
+    from micro_reader._metadata import Channel
+    names = [c.name for c in folded_channels((Channel(name="BF"), Channel(name="BF")), 2, 3)]
+    assert names == ["BF 0 R", "BF 0 G", "BF 0 B", "BF 1 R", "BF 1 G", "BF 1 B"]
+    names = [c.name for c in folded_channels((Channel(name="BF"), Channel(name="DIC")), 2, 3)]
+    assert names[0] == "BF R" and names[3] == "DIC R"
+
+
+def test_numpy_reads_an_image_whole(tmp_path):
+    tifffile = pytest.importorskip("tifffile")
+    path = tmp_path / "a.tif"
+    data = np.arange(24, dtype=np.uint16).reshape(4, 6)
+    tifffile.imwrite(path, data)
+    with micro_reader.open(path) as f:
+        image = f.images[0]
+        assert np.array_equal(np.asarray(image), data) and len(image) == 4
+        assert np.asarray(image, dtype=float).dtype == np.float64
+
+
+def test_a_view_lists_sizes_for_its_own_axes_only(tmp_path):
+    # Bugra, 2026-11-04: a squeezed view drops the sizes of the axes it dropped (a yx view
+    # listed the file's z size); the 5-axis view keeps what the file gives, a size-1 axis too,
+    # and makes up none for an axis it adds
+    tifffile = pytest.importorskip("tifffile")
+    path = str(tmp_path / "one_plane.tif")
+    tifffile.imwrite(path, np.zeros((1, 16, 16), "u2"), imagej=True, resolution=(2.0, 2.0),
+                     metadata={"unit": "um", "spacing": 1.5, "axes": "ZYX"})
+    with micro_reader.open(path, axes="canonical") as f:     # the tests' open defaults to native
+        im = f.images[0]
+        assert im.axes == "tczyx" and sorted(im.metadata.pixel_sizes) == ["x", "y", "z"]
+        assert im.metadata.pixel_sizes["z"].value == 1.5               # the file's, kept
+        assert im.squeeze().axes == "yx" and sorted(im.squeeze().metadata.pixel_sizes) == ["x", "y"]
+    with micro_reader.open(path, axes="canonical", squeeze=True) as f:
+        assert sorted(f.images[0].metadata.pixel_sizes) == ["x", "y"]
+    plain = str(tmp_path / "plain.tif")
+    tifffile.imwrite(plain, np.zeros((16, 16), "u2"))
+    with micro_reader.open(plain, axes="canonical") as f:
+        assert f.images[0].metadata.pixel_sizes == {}                  # nothing made up

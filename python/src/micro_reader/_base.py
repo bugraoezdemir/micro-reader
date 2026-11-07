@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 
 import threading
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
@@ -18,6 +19,11 @@ from ._index import normalise_index
 #: an index holding it, and every read of it, raises (``ImageIndex``).
 _OLD_SERIES = "scene"
 _RENAMED = "the image index 'scene' is now called 'series' (micro-reader 0.1.0); use 'series'"
+#: a stepped read (``image[::4, ::4]``) whose span is larger than this many bytes is read a
+#: piece at a time, only the selected planes and rows (``Image._read_stepped``); before
+#: 0.4.0 the whole span was read and then thinned (``image[::16]`` of a 6.8 GB MRC held
+#: 6.8 GB). Smaller stepped reads keep one read of the span (fewer calls).
+STEPPED_READ_BYTES = 64 << 20
 
 
 class ImageIndex(dict):
@@ -217,14 +223,17 @@ class Image:
         (``resolutions`` holds more than the image itself)."""
         return len(self.resolutions) > 1
 
-    # An image is either a pyramid (the logical image: level 0, also when the
-    # file stores no lower levels) or a lower resolution level of one.
+    # An image is either the image itself (level 0, also when the file stores no
+    # lower levels) or a lower resolution level of it.
 
     @property
     def is_pyramid(self) -> bool:
-        """Whether this image is a pyramid, the image itself at full
-        resolution, rather than a lower resolution level of one.  True for
-        every image without lower levels too."""
+        """Deprecated since 0.4.0, too near ``is_pyramidal`` in name: ``level == 0``
+        says the same (``is_pyramidal``: whether lower levels are stored).  To go
+        when no supported eubi-bridge or ome_zarr_pyramid release uses it (neither does)."""
+        warnings.warn("Image.is_pyramid is deprecated: it means level 0, also for an image "
+                      "without lower levels. Use image.level == 0; image.is_pyramidal says "
+                      "whether the file stores lower levels", DeprecationWarning, stacklevel=2)
         return self.pyramid is self
 
     @property
@@ -276,21 +285,68 @@ class Image:
     def nbytes(self) -> int:
         return int(np.prod(self.shape)) * self.dtype.itemsize
 
+    def __array__(self, dtype=None, copy=None) -> np.ndarray:
+        """``np.asarray(image)``: the whole image, read (without this numpy wrapped the
+        Image in a 0-d object array, silently)."""
+        data = self[...]
+        return data if dtype is None else data.astype(dtype)
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
     def __getitem__(self, key) -> np.ndarray:
         spans, squeeze, steps = normalise_index(key, self.shape)
-        block = tuple(slice(a, b) for a, b in spans)
         requested = int(np.prod([b - a for a, b in spans]))
-        if requested == 0:
-            out = np.empty(tuple(b - a for a, b in spans), dtype=self.dtype)
-            pixels_read = 0
+        stepped = any(step != 1 for step in steps)
+        if requested and stepped and requested * self.dtype.itemsize > STEPPED_READ_BYTES:
+            out = np.empty(tuple(len(range(a, b, s)) for (a, b), s in zip(spans, steps)),
+                           dtype=self.dtype)
+            self._read_stepped(out, list(spans), list(steps), 0)
         else:
-            out, pixels_read = self._read_block(block)
-        self.stats.add(requested, pixels_read)
-        if any(step != 1 for step in steps):
-            out = out[tuple(slice(None, None, step) for step in steps)]
+            if requested == 0:
+                out = np.empty(tuple(b - a for a, b in spans), dtype=self.dtype)
+                pixels_read = 0
+            else:
+                out, pixels_read = self._read_block(tuple(slice(a, b) for a, b in spans))
+            self.stats.add(requested, pixels_read)
+            if stepped:
+                out = out[tuple(slice(None, None, step) for step in steps)]
         if squeeze:
             out = out.squeeze(axis=squeeze)
         return out
+
+    def _read_stepped(self, out: np.ndarray, spans: list, steps: list, axis: int) -> None:
+        """A stepped read into *out*, a piece of at most STEPPED_READ_BYTES at a time: the
+        span is read whole once it fits; else, along *axis*, runs of positions that fit
+        (each starting at a selected position, read and thinned: a compressed tile or strip
+        is decoded once, as for the whole span), or, when one step alone spans more than
+        fits (``[::16]`` of large planes), only the selected positions, one at a time; the
+        next axis splits what is still too large. Each piece is read with the backend's own
+        ``_read_block``. Within a row the columns are read and thinned (a read per pixel
+        would cost more). Peak: *out* and one piece."""
+        item = self.dtype.itemsize
+        size = int(np.prod([b - a for a, b in spans]))
+        if size * item <= STEPPED_READ_BYTES or axis == len(spans) - 1:
+            data, read = self._read_block(tuple(slice(a, b) for a, b in spans))
+            self.stats.add(size, read)
+            out[...] = data[tuple(slice(None, None, step) for step in steps)]
+            return
+        lead = (slice(None),) * axis
+        (a, b), step = spans[axis], steps[axis]
+        per = max(1, STEPPED_READ_BYTES // (size // (b - a) * item))   # positions that fit
+        if per >= step:
+            run = per - per % step                       # a whole number of steps
+            for j in range(a, b, run):
+                k = min(b, j + run)
+                n = (j - a) // step
+                self._read_stepped(out[lead + (slice(n, n + len(range(j, k, step))),)],
+                                   spans[:axis] + [(j, k)] + spans[axis + 1:], steps, axis + 1)
+        else:
+            inner = steps[:axis] + [1] + steps[axis + 1:]
+            for n, j in enumerate(range(a, b, step)):
+                self._read_stepped(out[lead + (slice(n, n + 1),)],
+                                   spans[:axis] + [(j, j + 1)] + spans[axis + 1:], inner,
+                                   axis + 1)
 
     def read(self, **selection) -> np.ndarray:
         """Keyword form: ``image.read(z=3, y=slice(0, 512))``; omitted axes: all."""
@@ -470,13 +526,16 @@ class File:
           named "3"); a name given to a position keyword is its name
           (``well="C3"`` is ``well_name="C3"``).  ``row`` and ``column`` are
           another address of the well, so they do not go with ``well``.
+          Well, row and column names compare without letter case and leading
+          zeros (``"B02"`` is ``"B2"``, ``"03"`` is ``"3"``); a name no plate
+          has raises ``ValueError`` naming the ones there are.
         - A ``Plate``, ``Well``, ``Field`` or ``Acquisition`` object is no
           value (TypeError).
 
         An unknown index name raises ``KeyError``; a known one no image has
         selects nothing."""
-        from ._plate import (PLACE_NAMES, WELL_ADDRESS, index_values, place_conditions,
-                             place_matches, places_of)
+        from ._plate import (PLACE_NAMES, WELL_ADDRESS, check_place_names, index_values,
+                             place_conditions, place_matches, places_of)
         unknown = set(index) - set(INDEX_NAMES) - set(WELL_ADDRESS) - set(PLACE_NAMES)
         if unknown:
             if _OLD_SERIES in unknown:
@@ -490,6 +549,7 @@ class File:
             raise ValueError("select: plate names, well names, rows and columns are a "
                              "plate's places; the file has no plates (open it with "
                              "plates=True)")
+        check_place_names(conditions, plates)
         get, out = dict.get, []
         items = tuple(wanted.items())
         for image in self.images:              # dict.get: not ImageIndex's checks

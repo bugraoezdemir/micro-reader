@@ -260,3 +260,20 @@ def test_truncated_png_is_reported(tmp_path, cut):  # libpng tolerates it, png-r
 def test_other_files_are_not_claimed():
     assert not raster.sniff(b"BM\x00\x00" + b"\x00" * 20, "x.bmp")   # "BM" alone is not enough
     assert not raster.sniff(b"GIF89a" + b"\x00" * 20, "x.gif")
+
+
+@pytest.mark.parametrize("progressive", [False, True])
+@pytest.mark.parametrize("keep", [0.5, 0.9, 0.999])
+def test_a_cut_jpeg_is_refused_and_appended_data_is_not(tmp_path, decoders, progressive, keep):
+    # review cycle 1, N-65: a JPEG cut short read with its lost rows as fill, in silence
+    Image = pytest.importorskip("PIL.Image")
+    data = (np.add.outer(np.arange(64), np.arange(80)) % 256).astype("u1")
+    path = tmp_path / "p.jpg"
+    Image.fromarray(data, "L").save(path, quality=95, progressive=progressive)
+    whole = path.read_bytes()
+    path.write_bytes(whole[:int(len(whole) * keep)])
+    with pytest.raises(micro_reader.CorruptFileError, match="truncated"):
+        _read(str(path))
+    path.write_bytes(whole + b"\x00camera data after the image" * 4)
+    _, read, _ = _read(str(path))
+    assert read.shape == data.shape

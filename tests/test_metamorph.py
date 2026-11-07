@@ -30,7 +30,7 @@ def test_a_full_set_reads_every_plane(tmp_path):
     with micro_reader.open(nd) as f:
         assert (f.backend, f.format) == ("metamorph", "metamorph")
         assert [im.index for im in f.images] == [{"series": 0}, {"series": 1}]
-        assert [im.name for im in f.images] == ["exp A1", "exp B7"]
+        assert [im.name for im in f.images] == ["A1", "B7"]          # Stage labels (MR-2)
         for s, im in enumerate(f.images):
             assert im.axes == "tczyx" and im.shape == (3, 2, 4, Y, X) and im.dtype == "uint16"
             assert not im.is_ragged
@@ -129,7 +129,7 @@ def test_no_wavelengths_like_the_zenodo_sample(tmp_path):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         with micro_reader.open(nd) as f:
-            assert [im.name for im in f.images] == ["exp B2", "exp B3", "exp C4"]
+            assert [im.name for im in f.images] == ["B2", "B3", "C4"]   # Stage labels (MR-2)
             assert f.images[2].metadata.channels[0].name == "Brightfield"
             np.testing.assert_array_equal(f.images[2][1, 0, 0], _plane(data, 2, 1, 0, 0))
 
@@ -345,3 +345,23 @@ def test_zenodo_7963332_wave_names_with_underscores():
             np.testing.assert_array_equal(im[0, 1, 5], ref_gfp)
         with micro_reader.open(w4) as f:                     # a member opens the set
             assert f.backend == "metamorph" and os.path.samefile(f.path, nd)
+
+
+def test_the_time_step_comes_from_the_planes_stamps(tmp_path):
+    # review cycle 1, N-62: no time step, though every plane records its acquisition time
+    nd, _data, _paths = write_set(str(tmp_path), times=4, waves=[("GFP", False), ("RFP", False)],
+                                  t_step=60.5)
+    with micro_reader.open(nd) as f:
+        step = f.images[0].metadata.pixel_sizes["t"]
+        assert (round(step.value, 3), step.unit) == (60.5, "second")
+    nd, _data, _paths = write_set(str(tmp_path / "plain"), times=3)        # no stamps: no step
+    with micro_reader.open(nd) as f:
+        assert "t" not in f.images[0].metadata.pixel_sizes
+
+
+def test_micro_manager_2_position_labels_are_read():
+    # review cycle 1, N-61: 2.0 writes StagePositions[k]["Label"]; it was looked for as "label"
+    from micro_reader.backends.micromanager import _labels
+    summary = {"Positions": 2, "StagePositions": [{"Label": "2-Pos000_000"}, {"Label": "2-Pos001_000"}]}
+    assert _labels(summary) == ["2-Pos000_000", "2-Pos001_000"]
+    assert _labels({"Positions": 2, "StagePositions": [{"label": "A"}, {"label": "B"}]}) == ["A", "B"]

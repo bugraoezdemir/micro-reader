@@ -165,3 +165,16 @@ def test_zenodo_10627948_harmony_archive_imported_into_columbus():
         assert {im.shape for im in f.images} == {(4, 3, 6, 1080, 1080)}
         assert [c.name for c in f.images[0].metadata.channels] == ["Alexa 488", "Alexa 568",
                                                                    "Brightfield"]
+
+
+def test_a_refused_plate_leaves_no_member_open(tmp_path):
+    # tenth review, micro-reader N-12: the member TIFFs opened before the refusal stayed open
+    import gc
+    import warnings
+    _measurement, image_index, _data = _write(str(tmp_path), page_shape=(Y + 2, X))
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always", ResourceWarning)
+        with pytest.raises(micro_reader.CorruptFileError):
+            micro_reader.open(image_index)
+        gc.collect()
+    assert not [w for w in seen if issubclass(w.category, ResourceWarning)]

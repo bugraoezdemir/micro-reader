@@ -160,6 +160,13 @@ def _jpeg_info(data: bytes) -> Info:
 
 
 def _jpeg_decode(data: bytes, info: Info) -> np.ndarray:
+    # a JPEG cut short has no end-of-image marker after its last scan: the decoder would
+    # fill the rows it lost and say nothing (review cycle 1, N-65). FF D9 cannot occur
+    # inside scan data (an FF there is followed by 00 or a restart marker); data some
+    # cameras append after the marker is no harm
+    if bytes(data).rfind(b"\xff\xd9") < bytes(data).rfind(b"\xff\xda"):
+        raise CorruptFileError("the JPEG ends inside its image data, with no end-of-image "
+                               "marker: it is truncated (a copy or download that stopped early?)")
     shape = (info.height, info.width) + ((info.samples,) if info.samples > 1 else ())
     out = np.empty(shape, info.dtype)
     _codecs.jpeg_decode_into(data, out)

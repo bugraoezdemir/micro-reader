@@ -35,7 +35,7 @@ import numpy as np
 from .. import _parts
 from .._base import File, Image
 from .._errors import CorruptFileError, MissingImagesWarning, UnsupportedFormatError
-from .._metadata import Channel, Metadata, Quantity, color_hex, quantity
+from .._metadata import Channel, Metadata, Quantity, color_hex, quantity, without_placeholder_white
 from .._spatial import CoordinateSystem, system_id
 from . import _hdf5
 from ._hdf5 import attr_text as _attr_str
@@ -101,19 +101,27 @@ PART_NAME = re.compile(r"^(?P<stem>.+)--C\d+--T\d+\.h5$", re.IGNORECASE)
 
 
 def may_own(folder: str, name: str, folders) -> bool:
-    """``group_files``' cheap test: a part file of a multi-file Imaris set."""
+    """``group_files``' cheap test: a part file of a multi-file Imaris set, or the ``.h5``
+    copy of its ``.ims``."""
     m = PART_NAME.match(name)
-    names = folders.names(folder) if m else ()
-    return bool(m) and any(m["stem"].lower() + s in names for s in (".ims", ".h5"))
+    if m:
+        return any(m["stem"].lower() + s in folders.names(folder) for s in (".ims", ".h5"))
+    stem, suffix = os.path.splitext(name)
+    return suffix.lower() == ".h5" and stem.lower() + ".ims" in folders.names(folder)
 
 
 def owner(path: str, head):
     """A part file ``<name>--Cxx--Txxxxx.h5`` belongs to ``<name>.ims`` (or the
-    ``.h5`` copy FileConverter also writes); it is no image on its own."""
-    m = PART_NAME.match(os.path.basename(path))
-    if not m or head is None:
+    ``.h5`` copy FileConverter also writes); it is no image on its own.  That copy
+    links the same parts as the ``.ims`` beside it: one set, not two."""
+    name, folder = os.path.basename(path), os.path.dirname(path)
+    m = PART_NAME.match(name)
+    if head is None:
         return None
-    folder = os.path.dirname(path)
+    if not m:
+        stem, suffix = os.path.splitext(name)
+        main = _parts.find(folder, stem + ".ims") if suffix.lower() == ".h5" else None
+        return _parts.Part(main, main) if main is not None else None
     for suffix in (".ims", ".h5"):
         main = _parts.find(folder, m["stem"] + suffix)
         if main is not None:
@@ -159,6 +167,17 @@ class _ImsImage(Image):
                          dtypes.pop(), name=os.path.basename(path),
                          read_unit=(1, 1, *chunks) if chunks else None,
                          index=key if key is not None else {"series": 0})
+        #: ``DataSetInfo/Image`` ``Name`` (Imaris File Format 5.5), the image's own
+        #: name for ``_naming``; Imaris's placeholder "(name not specified)" is none
+        info = h5["DataSetInfo"]["Image"].attrs if "DataSetInfo" in h5 and \
+            "Image" in h5["DataSetInfo"] else {}
+        own = _attr_str(info, "Name")
+        # a name that is a path ("D:\FusionImages\...\x.ims", the acquisition machine's file)
+        # names no image here: the image takes the file's name (rule 4; Bugra 2026-11-04,
+        # review cycle 1, N-68)
+        if own and ("/" in own or "\\" in own):
+            own = None
+        self._own_name = own if own and own != "(name not specified)" else None
 
     def _layout(self, t: int, c: int) -> _hdf5.Layout:
         """How the dataset of time point *t*, channel *c* is stored."""
@@ -206,6 +225,8 @@ def _extent(h5, shape: tuple) -> tuple:
     sizes, position = {}, {}
     nz, ny, nx = shape[2:]
     for k, (axis, n) in enumerate((("x", nx), ("y", ny), ("z", nz))):
+        if axis == "z" and n <= 1:
+            continue        # one plane: Imaris writes a made-up z extent (0.001 um, gap hunt B-22)
         lo, hi = (quantity(_attr_str(image, f"Ext{e}{k}"), unit, positive=False)
                   for e in ("Min", "Max"))
         if lo is None or hi is None:
@@ -216,6 +237,10 @@ def _extent(h5, shape: tuple) -> tuple:
             if axis != "z":
                 position[axis] = Quantity(lo.value + size.value / 2, lo.unit)
     return sizes, position
+
+
+#: time points whose largest gap is more than this many times their smallest are uneven
+UNEVEN = 1.1
 
 
 def _metadata(h5, shape: tuple, channel_ids: list):
@@ -232,6 +257,14 @@ def _metadata(h5, shape: tuple, channel_ids: list):
         step = quantity((times[-1] - times[0]).total_seconds() / (len(times) - 1), "second")
         if step:
             sizes["t"] = step
+            gaps = [(b - a).total_seconds() for a, b in zip(times, times[1:])]
+            if min(gaps) <= 0 or max(gaps) > UNEVEN * min(gaps):
+                # as for ND2 time loops: one step does not describe them (a deconvolved
+                # copy's stamps are processing times: 262.5 s and 1.0 s; review cycle 1, N-64)
+                warnings.warn(f"{getattr(h5, 'filename', 'the file')!r}: the time points are "
+                              f"unevenly spaced ({min(gaps):g} s to {max(gaps):g} s apart): the t "
+                              f"step is their mean, {step.value:g} s, and no one step describes "
+                              f"the series", stacklevel=4)
     channels = []
     for c in channel_ids:
         attrs = info[f"Channel {c}"].attrs if f"Channel {c}" in info else {}
@@ -249,7 +282,8 @@ def _metadata(h5, shape: tuple, channel_ids: list):
             emission_wavelength=quantity(_attr_str(attrs, "LSMEmissionWavelength"), "nanometer"),
             excitation_wavelength=quantity(_attr_str(attrs, "LSMExcitationWavelength"),
                                            "nanometer")))
-    return Metadata(pixel_sizes=sizes, position=position, channels=tuple(channels),
+    return Metadata(pixel_sizes=sizes, position=position,
+                    channels=without_placeholder_white(tuple(channels)),
                     coordinate_system=STAGE if position else None)
 
 
@@ -317,8 +351,10 @@ def _refuse(h5, path: str, found) -> UnsupportedFormatError:
             f"(backend={backend!r}, or no backend= to choose by content)")
     shown = "; ".join(_hdf5.datasets(h5, 8)) or "no datasets"
     return UnsupportedFormatError(
-        f"{path!r}: an HDF5 file of no layout micro-reader reads (Imaris, ilastik, "
-        f"BigDataViewer, Luxendo, Fiji HDF5). Its datasets: {shown}")
+        f"{path!r}: an HDF5 file of no layout micro-reader reads (Imaris, ilastik with "
+        f"axistags, BigDataViewer, Luxendo, Fiji HDF5): without axistags a dataset does not "
+        f"say what its axes are, and micro-reader does not guess them; h5py reads it. "
+        f"Its datasets: {shown}")
 
 
 def open(path: str, tiles: str = "separate", resolutions: str = "base") -> _ImsFile:  # noqa: A001 - backend protocol name

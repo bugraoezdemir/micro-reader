@@ -142,6 +142,24 @@ def scene_position(root, scene: int) -> dict:
     return {}
 
 
+def scene_names(root) -> dict:
+    """{scene index: name} of the scenes the XML names (``Dimensions/S/Scenes/
+    Scene`` ``Name``, as ZEN writes them: "P1", "B2"); not in a public part of
+    the spec (S4), so ``_naming`` uses them only to tell a file's images apart."""
+    out = {}
+    if root is None:
+        return out
+    for e in root.findall("Metadata/Information/Image/Dimensions/S/Scenes/Scene"):
+        try:
+            index = int(e.get("Index"))
+        except (TypeError, ValueError):
+            continue
+        name = (e.get("Name") or "").strip()
+        if name:
+            out[index] = name
+    return out
+
+
 def plate_layout(root):
     """The plate a CZI was acquired on (docs/HCS.md), or None when it is not
     a plate: ``{"rows": n, "columns": m, "scenes": {scene: (row, column,

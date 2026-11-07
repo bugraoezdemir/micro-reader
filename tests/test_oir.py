@@ -149,7 +149,8 @@ def test_lambda_scan_is_one_image_per_emission_band(tmp_path):
     data = _data((3, 2, 2, 1, 16, 20))                       # l t c z y x
     write_oir(path, data, frame_axes={"LAMBDA": lambda lam, t, z: 500.0 + 25 * lam,
                                       "TIMELAPSE": lambda lam, t, z: 1500.0 * t})
-    with micro_reader.open(path) as f:
+    from micro_reader.backends import oir
+    with oir.open(path) as f:                       # the bands, before _lambda gathers them
         assert f.indices == [{"series": 0, "emission": k} for k in range(3)]
         for k, image in enumerate(f.images):
             assert (image.axes, image.shape) == ("tczyx", data.shape[1:])
@@ -203,3 +204,30 @@ def test_concurrent_reads(tmp_path, decode_threads):
         for t in threads:
             t.join()
     assert errors == []
+
+
+def test_a_truncated_file_is_corrupt_not_unsupported(tmp_path):
+    # as every other backend (gap hunt A-13: "OIR file without image data", an
+    # UnsupportedFormatError, for the first 2 KB of a real OIR)
+    path, _ = _write(tmp_path, "single_plane")
+    with open(path, "rb") as fh:
+        head = fh.read(2048)
+    cut = tmp_path / "cut.oir"
+    cut.write_bytes(head)
+    with pytest.raises(micro_reader.CorruptFileError, match="truncated"):
+        micro_reader.open(str(cut))
+
+
+LAMBDA_SAMPLE = os.path.join(os.environ.get("MICROSCOPY_DATA", r"C:\Users\oezdemir\Desktop\data\microscopy"),
+                             "formats", "oir", "ome-samples",
+                             "DAPI_mCherry_22Lambda-420-630-w10nm-s10nm.oir")
+
+
+@pytest.mark.skipif(not os.path.exists(LAMBDA_SAMPLE), reason="real OIR lambda sample not here")
+def test_a_lambda_scan_is_lit_by_the_laser_let_through():
+    """review cycle 2, R2-14: every band took the last laser its channel lists (640 nm,
+    longer than the 420 nm emission); the acquisition lets only LD405 through."""
+    with micro_reader.open(LAMBDA_SAMPLE, axes="canonical") as f:
+        bands = f.images[0].metadata.channels
+        assert {c.excitation_wavelength.value for c in bands} == {405.0}
+        assert bands[0].emission_wavelength.value == 420.0

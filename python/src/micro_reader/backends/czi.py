@@ -152,10 +152,22 @@ def _directory(fh) -> list:
         struct.unpack_from("<iiii16s16siqqiq", head, 32)
     if not directory_position:
         raise CorruptFileError("CZI without a subblock directory")
+    fh.seek(0, 2)
+    size = fh.tell()
+    if directory_position + 32 > size:
+        # the directory is written last: a file cut short (a copy or download that
+        # stopped) ends before it
+        raise CorruptFileError(
+            f"the file ends at byte {size}, before its subblock directory at byte "
+            f"{directory_position}: it is truncated (a copy or download that stopped early?). "
+            f"Copy the file again from its source.")
     fh.seek(directory_position)
     seg = fh.read(32)
     if len(seg) < 32 or not seg[:16].rstrip(b"\x00") == b"ZISRAWDIRECTORY":
-        raise CorruptFileError(f"no ZISRAWDIRECTORY at byte {directory_position}")
+        raise CorruptFileError(
+            f"no subblock directory (ZISRAWDIRECTORY) at byte {directory_position}, where the "
+            f"file header says it is: the file is damaged. Copy it again from its source, or "
+            f"save it again in ZEN.")
     allocated, used = struct.unpack_from("<qq", seg, 16)
     data = fh.read(used or allocated)
     if len(data) != (used or allocated):
@@ -1033,6 +1045,12 @@ class _CziFile(File):
                         level._resolutions = image._resolutions
                     if listed:
                         images.extend(levels)
+        scenes = {im.index.get("series") for im in images if "series" in im.index}
+        if len(scenes) > 1:                         # _naming: scene names tell them apart
+            from ._czi_metadata import scene_names
+            named = scene_names(self._xml_root)
+            for im in images:
+                im._label = named.get(im.index.get("series"))
         if not self._base:                          # the slide's label and preview
             images.extend(self._attached_images(images, resolutions, listed))
         for n, image in enumerate(images):
@@ -1092,13 +1110,15 @@ class _CziFile(File):
                     continue
                 self._attached.append(inner)
                 for picture in inner.images:
-                    if not picture.is_pyramid:
+                    if picture.level != 0:
                         continue                    # its levels come with it
                     for level in picture.resolutions:
                         level.index = {"series": series}
                         if listed or level is not picture:
                             level.index["resolution"] = level.level
                         level.name = f"{base} {label}"
+                        level._own_name = label         # _naming: its role is its name
+                        level._label = None
                         for each in [level] + level.parts:  # no stage position (4.18)
                             each._attachment = True
                     out.extend(picture.resolutions if listed else [picture])

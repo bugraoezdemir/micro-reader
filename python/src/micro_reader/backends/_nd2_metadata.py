@@ -3,9 +3,11 @@ metadata (``ImageMetadataSeqLV|0``) and the experiment loops
 (``ImageMetadataLV``).  Field meanings follow nd2 (Talley Lambert, BSD-3).
 
 - Pixel sizes: ``dCalibration`` (µm per pixel, x and y) when
-  ``bCalibrated``; z: the Z loop's ``dZStep`` (µm); t: the time loop's
-  ``dPeriod`` (the interval asked for, ms), else its measured
-  ``dAvgPeriodDiff``.
+  ``bCalibrated``; z: the Z loop's ``dZStep`` (µm); t: the mean interval of the frames'
+  own stamps (``Nd2Parser.time_step``), else the time loop's ``dAvgPeriodDiff`` (ms), else
+  ``dPeriod``, the interval asked for.  The stamps come first: a camera slower than the
+  loop gives 94 ms for the 50 ms asked for, and old NIS files record a ``dAvgPeriodDiff``
+  of 14 s for frames 30 s apart.  Periods that differ warn: one step does not describe them.
 - Channels: ``sPicturePlanes/sPlaneNew/a<k>``: ``sDescription``, ``uiColor``
   (ABGR), and for the wavelengths the fluorescent probe's spectrum, else
   the first filter's (a line, or a band's middle: ``_wavelength_of``).
@@ -21,6 +23,8 @@ metadata (``ImageMetadataSeqLV|0``) and the experiment loops
 """
 from __future__ import annotations
 
+import warnings
+
 from .._metadata import Channel, Metadata, Quantity, color_hex, quantity
 from .._spatial import system_id
 from ._nd2_structure import NE_TIME_LOOP, TIME_LOOP, XY_POS_LOOP, Z_STACK_LOOP
@@ -30,6 +34,8 @@ from ._nd2_structure import NE_TIME_LOOP, TIME_LOOP, XY_POS_LOOP, Z_STACK_LOOP
 STAGE = system_id("stage")
 #: the camera-to-stage matrix, row by row
 CAMERA_KEYS = ("dStgLgCT11", "dStgLgCT12", "dStgLgCT21", "dStgLgCT22")
+#: periods of a time loop this close (as a ratio) ask for one interval
+PERIODS_ALIKE = 1.05
 
 
 def _loops(raw: dict) -> list:
@@ -165,28 +171,52 @@ def _first_pixel(stage_x: float, stage_y: float, matrix: tuple, sizes: dict,
             "y": Quantity(cy + (0.5 - shape.get("y", 1) / 2) * sizes["y"].value, "micrometer")}
 
 
-def nd2_metadata(picture: dict, experiment: dict, position: int, shape: dict) -> Metadata:
+def _periods_differ(pars: dict) -> bool:
+    """Whether an NE time loop's periods ask for different intervals (more than
+    PERIODS_ALIKE apart: two periods of 18322 and 18341 ms are one).  Only the periods
+    the file marks valid count (old ones stay in it); 0 ms is "as fast as possible"."""
+    periods = pars.get("pPeriod") or {}
+    keys = sorted(periods)
+    valid = pars.get("pPeriodValid")
+    if isinstance(valid, dict):
+        valid = [valid[k] for k in sorted(valid)]
+    flags = list(valid) if valid is not None and len(valid) == len(keys) else [True] * len(keys)
+    asked = [periods[k].get("dPeriod") or 0.0 for k, ok in zip(keys, flags)
+             if ok and isinstance(periods[k], dict)]
+    return len(asked) > 1 and max(asked) > min(asked) * PERIODS_ALIKE
+
+
+def nd2_metadata(picture: dict, experiment: dict, position: int, shape: dict,
+                 time_step: float = None, path: str = "") -> Metadata:
     """*picture*: SLxPictureMetadata; *experiment*: the raw experiment;
-    *position*: the image's XY position; *shape*: axis -> size."""
+    *position*: the image's XY position; *shape*: axis -> size; *time_step*: the mean
+    interval of the frames' stamps (ms), None without; *path*: for a warning."""
     sizes = {}
     q = _xy_size(picture)
     if q:
         sizes["x"] = sizes["y"] = q
+    q = quantity(time_step, "millisecond")
+    if q:
+        sizes["t"] = q
     for kind, pars in _loops(experiment):
+        if kind == NE_TIME_LOOP and _periods_differ(pars):
+            warnings.warn(f"{path!r}: the time loop has periods of different intervals: the "
+                          "t step is their mean, and no one step describes the series",
+                          stacklevel=4)
         if kind == Z_STACK_LOOP and "z" not in sizes:
             q = quantity(abs(pars.get("dZStep", 0.0) or 0.0), "micrometer")
             if q:
                 sizes["z"] = q
         elif kind == TIME_LOOP and "t" not in sizes:
-            q = quantity(pars.get("dPeriod"), "millisecond") or \
-                quantity(pars.get("dAvgPeriodDiff"), "millisecond")
+            q = quantity(pars.get("dAvgPeriodDiff"), "millisecond") or \
+                quantity(pars.get("dPeriod"), "millisecond")
             if q:
                 sizes["t"] = q
         elif kind == NE_TIME_LOOP and "t" not in sizes:
             periods = pars.get("pPeriod") or {}
             first = periods[min(periods)] if periods else {}
-            q = quantity(first.get("dPeriod"), "millisecond") or \
-                quantity(first.get("dAvgPeriodDiff"), "millisecond")
+            q = quantity(first.get("dAvgPeriodDiff"), "millisecond") or \
+                quantity(first.get("dPeriod"), "millisecond")
             if q:
                 sizes["t"] = q
 
@@ -226,15 +256,19 @@ def _legacy_peak(spectrum) -> float:
                            for p in points.values() if isinstance(p, dict)])
 
 
-def legacy_metadata(frame: dict, shape: dict) -> Metadata:
+def legacy_metadata(frame: dict, shape: dict, steps: dict = None) -> Metadata:
     """*frame*: the ``VIMD`` of the image's first frame (as nd2 reads it:
     ``Calibration`` µm per pixel, plane ``OpticalConfigName`` and ``Color``
     (ABGR); emission from the probe's spectrum, else the filter's, as
-    Bio-Formats has it).  No position: see below."""
+    Bio-Formats has it).  *steps*: the experiment loops' z step (µm) and time
+    interval (ms), for axes of more than one plane.  No position: see below."""
     sizes = {}
     q = quantity(frame.get("Calibration"), "micrometer")
     if q:
         sizes["x"] = sizes["y"] = q
+    for axis, unit in (("z", "micrometer"), ("t", "millisecond")):
+        if (steps or {}).get(axis) and shape.get(axis, 1) > 1:
+            sizes[axis] = quantity(steps[axis], unit)
     planes = ((frame.get("PicturePlanes") or {}).get("Plane") or {})
     channels = []
     for key in sorted(planes, key=lambda k: int(k) if str(k).isdigit() else 0):

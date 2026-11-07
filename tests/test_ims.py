@@ -333,21 +333,28 @@ def test_multifile_all_parts_missing_is_refused(tmp_path):
 
 
 def test_luxendo_link_only_ims(tmp_path, decode_threads):
-    """Luxendo's ``imaris.ims`` (S-BIAD3686): real Channel groups whose Data is
-    an external link to a raw ``.lux.h5`` stack; a missing stack reads as
-    zeros, the warning names its file."""
+    """Luxendo's ``imaris.ims`` (S-BIAD3686) read alone (``multifile=False``;
+    otherwise it opens its experiment, test_luxendo.py): real Channel groups
+    whose Data is an external link to a raw ``.lux.h5`` stack; a missing stack
+    reads as zeros, the warning names its file.  Its text attributes are
+    arrays of 1-byte integers: channel names and pixel sizes are read from
+    them (they read as the first character's code until 0.3.1)."""
     data = write_ims_luxendo(tmp_path)
-    with micro_reader.open(tmp_path / "imaris.ims") as f:
+    with micro_reader.open(tmp_path / "imaris.ims", multifile=False) as f:
         image = f.images[0]
         assert (f.backend, image.shape) == ("ims", data.shape)
         for key in _keys(data.shape):
             np.testing.assert_array_equal(image[key], data[key], err_msg=str(key))
+        meta = image.metadata
+        assert [c.name for c in meta.channels] == ["ch0", "ch1"]
+        assert meta.pixel_sizes["x"] == (0.26, "micrometer")
+        assert meta.pixel_sizes["z"] == (2.0, "micrometer")
     lost = tmp_path / "lost"
     lost.mkdir()
     data = write_ims_luxendo(lost, skip=[(1, 0)])
     with pytest.warns(MissingImagesWarning,
                       match=r"1 of 4 .*stack_0-Zstack_channel_0/Cam_long_00001\.lux\.h5"):
-        f = micro_reader.open(lost / "imaris.ims")
+        f = micro_reader.open(lost / "imaris.ims", multifile=False)
     with f:
         image = f.images[0]
         assert not image.read(t=1, c=0).any()
@@ -390,7 +397,7 @@ def test_multifile_may_own_reads_nothing(tmp_path, monkeypatch):
     owned = {n: ims.may_own(folder, n, folders) for n in sorted(os.listdir(tmp_path))}
     assert owned == {"other--C00--T00000.h5": False, "set--C00--T00000.h5": True,
                      "set--C00--T00001.h5": True, "set--C01--T00000.h5": True,
-                     "set--C01--T00001.h5": True, "set.h5": False, "set.ims": False}
+                     "set--C01--T00001.h5": True, "set.h5": True, "set.ims": False}
     assert ims.may_own(folder, "SET--c00--t00000.H5", folders)              # any letter case
 
 
@@ -404,11 +411,11 @@ def test_multifile_group_files(tmp_path, monkeypatch):
     monkeypatch.setattr(_parts, "read_head", lambda p: reads.append(os.path.basename(p)) or real(p))
     g = micro_reader.group_files(str(tmp_path))
     (group,) = g.groups
-    parts = sorted(n for n in os.listdir(tmp_path) if "--C" in n)
+    parts = sorted(n for n in os.listdir(tmp_path) if n != "set.ims")        # with the .h5 copy
     assert (group.kind, group.format) == ("composite", "ims")
     assert os.path.samefile(group.main, tmp_path / "set.ims")
     assert [os.path.basename(p) for p in group.parts] == parts
-    assert [os.path.basename(p) for p in g.singles] == ["set.h5"]           # the copy
+    assert not g.singles
     assert sorted(reads) == parts
 
 
@@ -483,6 +490,18 @@ def test_files_without_a_position_declare_no_system(tmp_path, extent, unit, meta
         assert meta.position == {} and meta.coordinate_system is None
 
 
+def test_a_single_plane_has_no_z_step(tmp_path):
+    """One z plane: Imaris writes a made-up z extent (0.001 um on real files,
+    gap hunt B-22), which is no z step; x and y still come from the extent."""
+    path = tmp_path / "flat.ims"
+    write_ims(path, real=(1, 21, 27), padded=(1, 32, 32), chunks=(1, 16, 16))
+    _set_extent(path, {0: (0.0, 27.0), 1: (0.0, 21.0), 2: (0.0, 0.001)})
+    with micro_reader.open(path) as f:
+        sizes = f.images[0].metadata.pixel_sizes
+    assert "z" not in sizes
+    assert sizes["x"].value == pytest.approx(1.0) and sizes["y"].value == pytest.approx(1.0)
+
+
 def test_coordinate_systems_after_close_raise(tmp_path):
     """Declared on first access, which needs the open file: after closing, a
     ValueError says to read them before."""
@@ -498,3 +517,40 @@ def test_coordinate_systems_after_close_raise(tmp_path):
 def test_ims_is_checked_strictly_by_the_session():
     import conftest
     assert "ims" not in conftest.POSITIONS_WITHOUT_A_SYSTEM
+
+
+@pytest.mark.parametrize("stamps, warns", [
+    (["2020-02-29 00:00:00.000", "2020-02-29 00:01:20.352", "2020-02-29 00:02:40.321"], False),
+    (["2020-02-29 13:21:06.406", "2020-02-29 13:25:28.954", "2020-02-29 13:25:29.954"], True),
+])
+def test_uneven_time_points_warn(tmp_path, stamps, warns):
+    # review cycle 1, N-64: a deconvolved copy's processing times (262.5 s, then 1.0 s) gave
+    # one mean step in silence; ND2 time loops with periods that differ warn
+    import warnings
+    path = str(tmp_path / "t.ims")
+    write_ims(path, n_t=3, n_c=1)
+    with h5py.File(path, "a") as f:
+        info = f.require_group("DataSetInfo/TimeInfo")
+        for n, stamp in enumerate(stamps, 1):
+            info.attrs[f"TimePoint{n}"] = _char(stamp)
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        with micro_reader.open(path) as f:
+            assert "t" in f.images[0].metadata.pixel_sizes
+    assert any("unevenly spaced" in str(w.message) for w in seen) is warns
+
+
+@pytest.mark.parametrize("given, name", [
+    ("Brain section 3", "Brain section 3"),
+    (r"D:\FusionImages\Dave\2018-10-22\x_Protocol.ims", "cell"),
+    ("/data/run/x.ims", "cell"),
+])
+def test_a_name_that_is_a_path_gives_the_file_name(tmp_path, given, name):
+    """review cycle 1, N-68 (Bugra 2026-11-04): four samples name their image by the path of
+    the acquisition machine's file; such a name is no name, the file's name is used."""
+    path = tmp_path / "cell.ims"
+    write_ims(path)
+    with h5py.File(path, "a") as f:
+        f.require_group("DataSetInfo/Image").attrs["Name"] = _char(given)
+    with micro_reader.open(path) as f:
+        assert f.images[0].name == name

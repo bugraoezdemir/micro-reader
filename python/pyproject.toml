@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "micro-reader"
-version = "0.3.0"
+version = "0.4.0"
 description = "Low-level, memory-bounded pixel reading for microscopy formats: read exactly the rectangle you ask for."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,7 +16,7 @@ authors = [{ name = "Bugra Oezdemir", email = "bugraa.ozdemir@gmail.com" }]
 keywords = ["microscopy", "bioimage", "image-io", "memory-bounded", "tiff", "ome-tiff", "czi", "nd2",
             "lif", "leica", "oir", "imaris", "ims", "mrc", "lsm", "eer", "cryo-em"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

@@ -122,7 +122,7 @@ def _expand(paths) -> dict:
     return out
 
 
-def group_files(paths: Union[str, os.PathLike, Iterable], plates: bool = False) -> Grouping:
+def group_files(paths: Union[str, os.PathLike, Iterable], plates: bool = True) -> Grouping:
     """Group *paths* (files, or folders, walked down with all their files)
     into the images they make: see the module docstring.  *plates*: as
     ``open(plates=True)`` reads them, so that a set that is a plate only then
@@ -139,8 +139,14 @@ def group_files(paths: Union[str, os.PathLike, Iterable], plates: bool = False) 
     folders = _Folders()
     found = []                                   # (rank, path, key, module, member keys, members, notes)
     named = set()                                # members of the index files opened so far
-    for key, (path, folder, name) in files.items():
-        modules = [m for m in indexers if m.may_index(name)]
+    # the index files that are one only with members (OME-TIFFs) come last: a
+    # file another index names (a CQ1 title OME-TIFF of its companion) is then
+    # not opened at all
+    late = [m for m in indexers if getattr(m, "INDEX_ONLY_WITH_MEMBERS", False)]
+    passes = ([m for m in indexers if m not in late], late)
+    for modules_now, (key, (path, folder, name)) in (
+            (ms, entry) for ms in passes for entry in files.items()):
+        modules = [m for m in modules_now if m.may_index(name)]
         if not modules or key in named:
             # a member of an index opened already is not opened again: every
             # .flex file of a plate opens the whole plate
@@ -155,6 +161,10 @@ def group_files(paths: Union[str, os.PathLike, Iterable], plates: bool = False) 
         module = next((m for m in modules if m.sniff(head, path)), None)
         if module is None:
             continue
+        worth = getattr(module, "worth_opening", None)
+        if worth is not None and not worth(path):
+            continue                             # cheaply seen to name no other file
+
         members, sides, notes = frozenset(), frozenset(), []
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -165,6 +175,8 @@ def group_files(paths: Union[str, os.PathLike, Iterable], plates: bool = False) 
             except Exception as exc:             # noqa: BLE001 - reported on the group
                 notes.append(f"cannot be read: {type(exc).__name__}: {exc}")
         notes = [str(w.message) for w in caught] + notes
+        if not members and getattr(module, "INDEX_ONLY_WITH_MEMBERS", False):
+            continue                             # one OME-TIFF alone: as before (pass 2)
         found.append((rank[module.NAME], path, key, module, frozenset(map(_key, members)),
                       members, tuple(notes), sides))
         named.update(map(_key, members))
@@ -214,7 +226,8 @@ def group_files(paths: Union[str, os.PathLike, Iterable], plates: bool = False) 
         if group is None:
             group = composites[_key(part.expected)] = {
                 "kind": COMPOSITE, "main": part.main, "expected": part.expected,
-                "format": module.NAME, "parts": [], "members": frozenset(), "notes": ()}
+                "format": module.NAME, "parts": [], "members": frozenset(),
+                "notes": (part.hint,) if part.hint else ()}
         group["parts"].append(path)
     singles = [p for k, p in singles if k not in composites]       # main files with parts
     indexes = {_key(g["main"]): g for g in groups}

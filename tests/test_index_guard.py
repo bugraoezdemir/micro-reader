@@ -161,7 +161,7 @@ def test_file_level_names_say_series(tmp_path):
             f.select(position=0)
         assert "series 0:" in f.outline() and "series 1:" in f.outline()
         assert all(type(im.index) is ImageIndex for im in f.images)
-        assert " series 1 tile 0" in f.images[2].name
+        assert f.images[2].name == "series 1, tile 0"     # built (MR-2)
         assert "series" in repr(f.images[0])
     with micro_reader.open(path, tiles="mosaic") as f:
         assert [dict(im.index) for im in f.images] == [{"series": 0}, {"series": 1}]
@@ -217,7 +217,7 @@ def test_czi_label_and_preview_have_no_position(name):
     without a stage position until their frame is verified; the slide keeps its."""
     path = _real(name)
     with micro_reader.open(path) as f:
-        attached = [im for im in f.images if im.name.endswith((" label", " slide preview"))]
+        attached = [im for im in f.images if im.name in ("label", "slide preview")]   # roles (MR-2)
         assert attached
         assert all(im.metadata.position == {} for im in attached)
         assert f.images[0].metadata.position
