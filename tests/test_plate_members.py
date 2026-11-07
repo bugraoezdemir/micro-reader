@@ -34,7 +34,10 @@ LONE_NAMES = ["P_B02_T0001F001L01A01Z01C01.tif", "r03c03f01p01-ch1sk1fk1fl1.tiff
 
 
 def _plane(folder):
-    planes = glob.glob(os.path.join(glob.escape(folder), "**", "*.tif*"), recursive=True)
+    # any case: MetaXpress writes .TIF, and glob is case-sensitive on Linux and macOS
+    found = glob.glob(os.path.join(glob.escape(folder), "**", "*"), recursive=True)
+    planes = [p for p in found if os.path.isfile(p)
+              and os.path.splitext(p)[1].lower() in (".tif", ".tiff")]
     return sorted(planes)[0]
 
 
