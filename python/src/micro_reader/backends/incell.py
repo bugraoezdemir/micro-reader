@@ -24,8 +24,10 @@ against), ragged timepoints.
 from __future__ import annotations
 
 import os
+import re
 import xml.etree.ElementTree as ET
 
+from .. import _parts
 from .._base import File
 from .._errors import CorruptFileError
 from .._fileset import (Members, PlaneImage, check_times, keep_fields, ragged_field,
@@ -36,6 +38,9 @@ from .._plate import Plate, Well, layout, row_label
 NAME = "incell"
 #: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
 SET_INDEX = True
+#: a plane's file name: A - 1(fld 1 wv Cy5 - Cy5).tif (z and t where they vary), or
+#: IN Carta's t1_B02_s1_w1_z1.tif
+PLANE_NAME = re.compile(r"(?:[A-Za-z]+ - \d+\(fld \d+.*\)|t\d+_[A-Za-z]+\d+_s\d+_w\d+(?:_z\d+)?)\.tiff?")
 
 
 def may_index(name: str) -> bool:
@@ -45,6 +50,15 @@ def may_index(name: str) -> bool:
 
 def sniff(head: bytes, path: str) -> bool:
     return path.lower().endswith(".xdce") and b"<ImageStack" in head
+
+
+def owner(path: str, head):
+    """A plane is a part of the ``.xdce`` beside it, read alone with
+    ``open(multifile=False)``."""
+    if os.path.isdir(path) or PLANE_NAME.fullmatch(os.path.basename(path)) is None:
+        return None
+    index = _parts.only_file(os.path.dirname(os.path.abspath(path)), ".xdce")
+    return _parts.Part(index, index, member=True) if index is not None else None
 
 
 def _int(value, what):

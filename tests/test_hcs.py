@@ -74,7 +74,7 @@ def test_a_zeiss_plate_is_read_as_one_with_plates_true(tmp_path):
         assert f.index_range == {"plate": 1, "acquisition": 1, "well": 2, "field": 2}
         # plate and acquisition need not be given when there is one of each
         assert f.select(well=0) == f.select(plate=0, acquisition=0, well=0) == f.images[:2]
-        assert [image.name.split(".czi ")[1] for image in f.images] == \
+        assert [image.name for image in f.images] == \
             ["well B2 field 0", "well B2 field 1", "well C5 field 0"]
         for image, series in zip(f.images, (1, 2, 0)):
             np.testing.assert_array_equal(image[0, 0, 0], data[(series, 0)])
@@ -84,12 +84,14 @@ def test_a_zeiss_plate_is_read_as_one_with_plates_true(tmp_path):
             plate.well_index("H12")
 
 
-def test_plates_are_opt_in(tmp_path):
-    """Without plates=True a plate reads as today: scenes, no File.plates
-    (eubi-bridge accepts no well / field indices yet)."""
+def test_a_plate_reads_as_a_plate_unless_told_not_to(tmp_path):
+    """plates=True is the default since 0.4.0 (it changes nothing for a file that is no
+    plate); plates=False reads a plate by its series, without File.plates."""
     path = str(tmp_path / "plate.czi")
     _write(path, SCENES, _plate_xml(SCENES))
     with micro_reader.open(path) as f:
+        assert len(f.plates) == 1 and "well" in f.indices[0]
+    with micro_reader.open(path, plates=False) as f:
         assert f.plates == []
         assert f.indices == [{"series": s} for s in range(3)]
 
@@ -212,7 +214,7 @@ def test_the_outline_of_a_plate(tmp_path):
             f"      field 0: tiles 0-1, tczyx (1, 1, 1, {H}, {W}) uint16",
         ]
         assert repr(f) == f.outline()                 # short enough to show whole
-    with micro_reader.open(path) as f:                 # not read as a plate: scenes
+    with micro_reader.open(path, plates=False) as f:   # not read as a plate: scenes
         assert f.outline().splitlines()[1:] == [
             f"  series {s}: tiles 0-1, tczyx (1, 1, 1, {H}, {W}) uint16" for s in range(3)]
 
@@ -251,13 +253,13 @@ def test_an_image_is_a_pyramid_or_a_level(tmp_path):
     _pyramid_tiff(path, data)
     with micro_reader.open(path) as f:
         (image,) = f.images
-        assert image.is_pyramid and image.level == 0 and image.pyramid is image
+        assert image.level == 0 and image.pyramid is image
         for k, lv in enumerate(image.resolutions):
             assert lv.level == k and lv.pyramid is image
-            assert lv.is_pyramid == (k == 0)
+            assert (lv.level == 0) == (k == 0)
     with micro_reader.open(path, resolutions="all") as f:
         assert [im.level for im in f.images] == [0, 1, 2]
-        assert [im.is_pyramid for im in f.images] == [True, False, False]
+        assert [im.level == 0 for im in f.images] == [True, False, False]
         assert all(im.pyramid is f.images[0] for im in f.images)
 
 
@@ -267,7 +269,7 @@ def test_an_image_without_levels_is_its_own_pyramid(tmp_path):
     tifffile.imwrite(path, np.zeros((8, 9), "u1"))
     with micro_reader.open(path) as f:
         (image,) = f.images
-        assert image.is_pyramid and image.level == 0 and image.pyramid is image
+        assert image.level == 0 and image.pyramid is image
         assert not image.is_pyramidal
 
 
@@ -307,10 +309,12 @@ def test_select_takes_each_place_by_position_and_by_name(tmp_path):
         assert f.select(column_name="5", row_name=["B", "C"]) == f.select(well="C5")
         assert f.select(plate_name=plate.name) == f.select(plate=0) == f.images
         assert f.select(plate=plate.name) == f.images         # a name on a position keyword
-        assert f.select(plate_name="no such plate") == []
+        with pytest.raises(ValueError, match="no plate named 'no such plate'"):
+            f.select(plate_name="no such plate")            # a name no plate has
         c5 = plate.well_index("C5")
         assert f.select(well=[c5, "B2"]) == f.images[:3]       # any of: a place or a name
-        assert f.select(acquisition_name="run 2") == []        # no acquisitions recorded
+        with pytest.raises(ValueError, match="none recorded"):  # no acquisitions recorded
+            f.select(acquisition_name="run 2")
         with pytest.raises(TypeError, match=r"well_name=\.\.\.\): a name, not 3; for a 0-based "
                                             r"position, well=3"):
             f.select(well_name=3)
@@ -318,6 +322,38 @@ def test_select_takes_each_place_by_position_and_by_name(tmp_path):
             f.select(well_name="B2", row_name="B")
         with pytest.raises(KeyError, match="row_name"):          # the error lists them
             f.select(well_nam="B2")
+
+
+def test_well_row_and_column_names_compare_as_vendors_spell_them(tmp_path):
+    # MetaXpress and Cellomics write A01, Harmony and NGFF A1 (gap hunt C-08:
+    # select(well="B02") and column="05" found nothing)
+    path = str(tmp_path / "plate.czi")
+    _write(path, WELLS, _plate_xml(WELLS))
+    with micro_reader.open(path, plates=True) as f:
+        plate = f.plates[0]
+        assert f.select(well="B02") == f.select(well="b2") == f.select(well="B2") == f.images[:2]
+        assert f.select(column_name="05", row_name="c") == f.select(well="C5")
+        assert plate.well_index("C05") == plate.well_index("C5")
+        with pytest.raises(ValueError, match="no well named 'Z99'.*'B2'"):
+            f.select(well="Z99")                           # a name no plate has
+        assert f.select(row_name="H") == []                # in the layout, no images
+        assert f.select(well="H12") == f.select(well_name="h012") == []   # a layout well, empty
+                                                           # (review cycle 2, R2-12)
+
+
+def test_plate_rows_slice_by_names_with_both_ends(tmp_path):
+    path = str(tmp_path / "plate.czi")
+    _write(path, WELLS, _plate_xml(WELLS))
+    with micro_reader.open(path, plates=True) as f:
+        plate = f.plates[0]
+        part = plate.rows["B":"C"]                         # names: B and C, as names read
+        assert {w.name[0] for w in part.wells} == {"B", "C"}
+        assert part.wells == plate.rows[1:3].wells == plate.rows[["B", "C"]].wells
+        assert plate.columns["05"].wells == plate.columns["5"].wells
+        with pytest.raises(TypeError, match="names at both ends"):
+            plate.rows["B":3]
+        with pytest.raises(KeyError, match="has no row"):
+            plate.rows["B":"Z"]
 
 
 def test_select_takes_slices_of_positions(tmp_path):
@@ -348,7 +384,7 @@ def test_select_refuses_what_is_no_index_value(tmp_path):
             f.select(well=0, column=1)
         with pytest.raises(KeyError, match="unknown indices"):
             plate.wells[0].fields[0].select(row=0)
-    with micro_reader.open(path) as f:                  # no plates=True: no plates
+    with micro_reader.open(path, plates=False) as f:    # plates=False: no plates
         with pytest.raises(ValueError, match="plates=True"):
             f.select(row="B")
 

@@ -74,9 +74,38 @@ def tiff_metadata(image, n_channels: int, cache: dict, resolution_tags: bool = T
     # its resolution tags are no pixel size (a 96 dpi display default gave 264.6 um)
     stub = bool(tif.is_ome and "BinaryOnly" in (tif.ome_metadata or ""))
     sizes = _resolution_tags(image._key) if resolution_tags and not stub else {}
+    if scanimage_frame_rate(tif):
+        sizes["t"] = quantity(1 / scanimage_frame_rate(tif), "second")
+    z = _imaris_z_step(tif)
+    if z is not None:
+        sizes["z"] = z
     if sizes:
         return Metadata(pixel_sizes=sizes, channels=_unknown_channels(n_channels))
     return None
+
+
+def _imaris_z_step(tif):
+    """The z step in the description of an Imaris TIFF export (one plane per file: the step
+    of the stack the files make up), or None."""
+    text = tif.pages[0].description
+    if not text.startswith("[ImarisDataSet]"):
+        return None
+    step = re.search(r"^Dz\s*=\s*(\S+)", text, re.M)
+    unit = re.search(r"^Unit\s*=\s*(\S+)", text, re.M)
+    return quantity(step[1], unit[1]) if step and unit else None
+
+
+def scanimage_frame_rate(tif):
+    """The frame rate of a ScanImage recording of one slice, whose frames are time
+    (tifffile calls them z when fast z is on: 1000 frames of a plane); 0.0 for one
+    that records no rate; None for a stack or another file."""
+    if not getattr(tif, "is_scanimage", False):
+        return None
+    frame = (tif.scanimage_metadata or {}).get("FrameData") or {}
+    if frame.get("SI.hStackManager.actualNumSlices", frame.get("SI.hStackManager.numSlices")) != 1:
+        return None
+    rate = frame.get("SI.hRoiManager.scanFrameRate")
+    return float(rate) if isinstance(rate, (int, float)) and rate > 0 else 0.0
 
 
 def _stk(md: dict, n_channels: int):
@@ -299,6 +328,22 @@ def ome_image_metadata(element, shape: dict, n_channels: int, index: dict, annot
     q = quantity(p.get("TimeIncrement"), p.get("TimeIncrementUnit") or OME_DEFAULT_TIME)
     if q:
         sizes["t"] = q
+    stamped = _stamped_time_step(p, shape.get("t", 1))
+    if stamped is not None:
+        # the planes' own times win over the declared increment, as in every format
+        # (Bugra 2026-11-04; review cycle 2, R2-04: a Micro-Manager MMStack declared 1 ms,
+        # "as fast as possible", for frames 1.12 s apart, and files with stamps but no
+        # TimeIncrement had no time step)
+        declared = sizes.get("t")
+        if declared is not None:
+            asked = declared.to(stamped.unit).value
+            if abs(stamped.value - asked) > STAMP_TOLERANCE * asked:
+                import warnings
+                warnings.warn(UserWarning(
+                    f"time step: {stamped.value:g} {stamped.unit} by the planes' DeltaT, "
+                    f"{asked:g} {stamped.unit} declared (TimeIncrement): using the "
+                    f"planes'"), stacklevel=4)
+        sizes["t"] = stamped
     channels = []
     for c in _children(p, "Channel"):
         channels.append(Channel(
@@ -319,6 +364,35 @@ def ome_image_metadata(element, shape: dict, n_channels: int, index: dict, annot
                     coordinate_system=STAGE if position else None,
                     channels=_channels(channels, n_channels),
                     index_values=_ome_index_values(element, index, annotations))
+
+
+#: how far a declared time step may differ from the planes' stamps before a warning
+STAMP_TOLERANCE = 0.05
+
+
+def _stamped_time_step(pixels, n_t: int):
+    """The mean time step from the ``Plane@DeltaT`` of the first and last time point
+    (at the first z and channel), as ND2's stamps; None without both, or with less than
+    two time points, or when they do not increase."""
+    if n_t < 2:
+        return None
+    at = {}
+    for plane in _children(pixels, "Plane"):
+        if int(plane.get("TheZ", 0)) or int(plane.get("TheC", 0)):
+            continue
+        t = int(plane.get("TheT", 0))
+        if t in (0, n_t - 1) and plane.get("DeltaT") not in (None, ""):
+            at[t] = plane
+    if len(at) != 2:
+        return None
+    try:
+        span = float(at[n_t - 1].get("DeltaT")) - float(at[0].get("DeltaT"))
+    except ValueError:
+        return None
+    unit = at[0].get("DeltaTUnit") or OME_DEFAULT_TIME
+    if (at[n_t - 1].get("DeltaTUnit") or OME_DEFAULT_TIME) != unit:
+        return None
+    return quantity(span / (n_t - 1), unit)
 
 
 def ome_plane_position(plane, sizes: dict, shape: dict) -> dict:
@@ -391,9 +465,22 @@ def _ome_color(value, argb: bool = False):
 
 # -- Zeiss LSM ----------------------------------------------------------------
 
+def _band_wavelengths(bands) -> list:
+    """The middle of each channel's detection band (CZ_LSMINFO ChannelWavelength: start and
+    end in metres; -1 or 0 when not recorded), as OIR channels give theirs; a lambda scan's
+    bands are its channels in an LSM."""
+    out = []
+    for band in ([] if bands is None else bands):
+        low, high = float(band[0]), float(band[1])
+        out.append(quantity((low + high) / 2 * 1e9, "nanometer") if low > 0 and high > 0 else None)
+    return out
+
+
 def _lsm(lm: dict, n_channels: int):
     sizes = {}
     for axis in "xyz":
+        if axis == "z" and int(lm.get("DimensionZ") or 0) <= 1:
+            continue        # one plane: VoxelSizeZ is a placeholder (1e-19 m on every such file)
         q = quantity(lm.get(f"VoxelSize{axis.upper()}"), "meter")     # CZ_LSMINFO: metres -> µm
         if q:
             sizes[axis] = q
@@ -403,8 +490,10 @@ def _lsm(lm: dict, n_channels: int):
     colors = lm.get("ChannelColors") or {}
     rgbs = colors.get("Colors") or []
     names = colors.get("ColorNames") or []
+    bands = _band_wavelengths(lm.get("ChannelWavelength"))
     channels = [Channel(name=names[k] if k < len(names) and names[k] else None,
-                        color=color_hex(rgbs[k][:3]) if k < len(rgbs) else None)
+                        color=color_hex(rgbs[k][:3]) if k < len(rgbs) else None,
+                        emission_wavelength=bands[k] if k < len(bands) else None)
                 for k in range(max(len(rgbs), len(names)))]
     return Metadata(pixel_sizes=sizes, channels=_channels(channels, n_channels))
 
@@ -415,6 +504,14 @@ def _imagej(tif, key, n_channels: int):
     ij = tif.imagej_metadata or {}
     unit = _imagej_unit(ij.get("unit"))
     sizes = {}
+    # finterval is written also for stacks without frames (finterval=1 on a z
+    # stack, gap hunt B-21): a frame interval only with frames.  spacing stays:
+    # it is ImageJ's voxel depth, a calibration of every image (an OME
+    # companion takes its z step from its members' spacing)
+    try:
+        has_t = int(ij.get("frames") or 0) > 1
+    except (TypeError, ValueError):
+        has_t = False
     if unit:
         for axis, tag in (("x", "XResolution"), ("y", "YResolution")):
             per_unit = _rational(key.tags.get(tag))
@@ -427,7 +524,7 @@ def _imagej(tif, key, n_channels: int):
         if q:
             sizes["z"] = q
     q = quantity(ij.get("finterval"), ij.get("tunit") or "second")
-    if q:
+    if q and has_t:
         sizes["t"] = q
     channels = []
     luts = ij.get("LUTs") or []
@@ -681,14 +778,19 @@ def _rational(tag):
 
 
 def _resolution_tags(key) -> dict:
-    """X / YResolution with an inch or centimetre ResolutionUnit (as
-    Bio-Formats reads plain TIFFs); 'no unit' is not a physical size, and
-    neither is 1 pixel per unit: a writer's placeholder (decided 2026-10-18:
-    ImageXpress JDCE TIFFs carry 1 / inch, which would be 25 400 µm pixels)."""
+    """X / YResolution of a plain TIFF, only with an explicit centimetre
+    ResolutionUnit.  'No unit' is not a physical size, and neither is 1 pixel
+    per unit: a writer's placeholder (decided 2026-10-18: ImageXpress JDCE
+    TIFFs carry 1 / inch, which would be 25 400 µm pixels).  Inches -- TIFF
+    6.0's default when the tag is absent -- are a screen or print density, not
+    a calibration: every inch value on the real-data collection (gap hunt
+    2026-10-29) was one, 72 dpi (Prairie View, 353 µm), 96 dpi (IDR
+    CellVoyager, 265 µm), 300 dpi, or a CellVoyager plane's 0.028 / inch
+    (903 111 µm), while every microscope calibration used centimetres."""
     unit_tag = key.tags.get("ResolutionUnit")
-    unit = RESOLUTION_UNITS.get(int(unit_tag.value) if unit_tag is not None else 2)
-    if unit is None:
+    if unit_tag is None or int(unit_tag.value) != 3:
         return {}
+    unit = RESOLUTION_UNITS[3]
     sizes = {}
     for axis, tag in (("x", "XResolution"), ("y", "YResolution")):
         per_unit = _rational(key.tags.get(tag))

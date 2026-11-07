@@ -101,9 +101,14 @@ def _write(tmp_path, name):
 @pytest.mark.parametrize("name", list(CASES))
 def test_matches_written_data(tmp_path, name, decode_threads):
     path, expected = _write(tmp_path, name)
-    with _native(path) as img:
+    from micro_reader._naming import assign_names
+    from micro_reader.backends import lif
+    with lif.open(path) as img:                     # the bands, before _lambda gathers them
+        assign_names(img)
         assert img.backend == "lif"
-        assert [(s.name, s.axes) for s in img.images] == [(n, a) for n, a, _ in expected]
+        # the element's name; tiles / bands of one element get their index appended (MR-2)
+        assert [(s.name.split(", ")[0], s.axes) for s in img.images] == [(n, a) for n, a, _ in expected]
+        assert len({s.name for s in img.images}) == len(img.images)
         for series, (_, _, ref) in zip(img.images, expected):
             assert series.shape == ref.shape and series.dtype == ref.dtype
             for key in _keys(ref.shape):
@@ -124,7 +129,7 @@ def test_agrees_with_readlif(tmp_path, name):
     path, expected = _write(tmp_path, name)
     lf = readlif.LifFile(path)
     with _native(path) as img:
-        assert list(dict.fromkeys(s.name for s in img.images)) == \
+        assert list(dict.fromkeys(s.name.split(", ")[0] for s in img.images)) == \
             [i["name"] for i in lf.image_list]
         for series in img.images:
             i, m = series.index["series"], series.index.get("tile")
@@ -225,7 +230,8 @@ def test_rotations_are_images(tmp_path):
 
 def test_lambda_scans_are_emission_and_excitation_indices(tmp_path):
     path, expected = _write(tmp_path, "time_lambda")
-    with _native(path) as img:
+    from micro_reader.backends import lif
+    with lif.open(path) as img:                     # the bands, before _lambda gathers them
         assert img.indices == [{"series": 0, "emission": k} for k in range(4)]
     _patch(path, 'DimID="5"', 'DimID="9"')
     with _native(path) as img:
@@ -289,7 +295,7 @@ def test_close_releases_the_file(tmp_path, decode_threads):
 
 def test_concurrent_reads(tmp_path, decode_threads):
     path, expected = _write(tmp_path, "time_lambda")
-    ref = expected[0][2]
+    ref = np.stack([e[2] for e in expected], axis=1)    # t l c z y x
     errors = []
     with _native(path) as img:
         series = img.images[0]

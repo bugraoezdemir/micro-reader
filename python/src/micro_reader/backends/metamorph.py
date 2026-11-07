@@ -39,7 +39,9 @@ wavelength with ``WaveDoZ<k>`` FALSE.
   members' stage coordinates (MetaSeries ``stage-position-x`` / ``-y``) are
   ``Metadata.stage_position``, as recorded, not ``position``: which point of
   the field they mark and which way the stage runs against the camera are not
-  recorded (Bugra, 2026-10-19).  Not read: the time step, wavelengths.
+  recorded (Bugra, 2026-10-19).  The time step: the mean between the first and
+  last timepoint's MetaSeries ``acquisition-time-local`` (the .nd file records
+  no interval).  Not read: wavelengths.
 - Refused (``UnsupportedFormatError``): several wavelengths in one file
   (``WaveInFileName`` FALSE with more than one wavelength) and wavelengths
   imaged at some timepoints only (``WavePointsCollected``) -- no sample yet.
@@ -460,9 +462,39 @@ class _NDImage(PlaneImage):
             z = self._owner._z_size(self._dz, self.name)
             if z is not None:
                 sizes["z"] = z
+        if self.shape[0] > 1:
+            step = self._time_step()
+            if step is not None:
+                sizes["t"] = step
         names = self._owner._channel_names()
         return Metadata(pixel_sizes=sizes, stage_position=stage,
                         channels=tuple(Channel(name=names[c]) for c in self._channels))
+
+    def _time_step(self):
+        """The mean time between timepoints, from the MetaSeries ``acquisition-time-local``
+        of the first and last timepoint's first plane (one channel, one focus): the .nd
+        file records no interval (review cycle 1, N-62). None when either has no stamp,
+        both are one file, or they are not in order."""
+        first, last = min(self._planes), max(self._planes)
+        last = next((key for key in sorted(self._planes, reverse=True)
+                     if key[1:] == first[1:]), None)
+        if last is None or last[0] == first[0]:
+            return None
+        stamps = []
+        for key in (first, last):
+            path = self._planes[key][0]
+            entry = self._members.acquire(path)
+            try:
+                from ._tiff_metadata import metaseries_plane_info
+                stamps.append(None if entry[0]._tif.is_stk
+                              else metaseries_plane_info(entry[0]._tif).get("acquisition-time-local"))
+            finally:
+                self._members.release(entry)
+        if self._planes[first][0] == self._planes[last][0] or not all(
+                hasattr(s, "timestamp") for s in stamps):
+            return None
+        seconds = (stamps[1] - stamps[0]).total_seconds() / (last[0] - first[0])
+        return quantity(seconds, "second")
 
 
 class _NDFile(File):
@@ -547,6 +579,9 @@ class _NDFile(File):
                                 channels=chs, dz=dz)
 
             images.append(ragged_field(make, kept[s], z_at, times, parts, index))
+            # _naming: the .nd's name for one stage position, its Stage label for several
+            images[-1]._own_name = self._lay.base if not self._lay.stage_on else None
+            images[-1]._label = self._lay.stages[s] if self._lay.stage_on else None
         return images
 
     def _image_name(self, s: int) -> str:

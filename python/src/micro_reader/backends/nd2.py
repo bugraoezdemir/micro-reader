@@ -33,6 +33,7 @@ import builtins
 import itertools
 import os
 import re
+import struct
 import threading
 import zlib
 
@@ -81,17 +82,26 @@ class Nd2Parser:
         self.path = path
         with builtins.open(path, "rb") as fh:
             ver = structure.version(fh.read(structure.START_CHUNK.size))
-            if ver < (3, 0):
-                raise UnsupportedFormatError(f"{path!r}: legacy ND2 version {ver}")
             cmap = structure.chunkmap(fh)
+            # version 2: the same chunks, in XML, their names without "LV"
+            two = ver < (3, 0)
+            decode = structure.decode_xml if two else structure.decode_clx_lite
 
             def decoded(name):
+                if two:
+                    name = name.replace(b"LV", b"")
                 if name not in cmap:
                     return {}
-                return structure.decode_clx_lite(structure.read_chunk(fh, cmap[name][0]))
+                return decode(structure.read_chunk(fh, cmap[name][0]))
 
             picture = decoded(b"ImageMetadataSeqLV|0!")
             experiment = decoded(b"ImageMetadataLV!")
+            if two:
+                calibration = decoded(b"ImageCalibrationLV|0!")
+                picture.update(dCalibration=calibration.get("dCalibration"),
+                               bCalibrated=calibration.get("bValid", False))
+                planes = picture.get("sPicturePlanes") or {}
+                planes.setdefault("sPlaneNew", planes.get("sPlane") or {})
             self.attrs = structure.attributes(decoded(b"ImageAttributesLV!"), picture)
             self.loops = structure.experiment(experiment)
             #: raw picture metadata and experiment, for ``_nd2_metadata``
@@ -141,6 +151,27 @@ class Nd2Parser:
             start, length = structure.data_offset(fh, header)
             where = self._data_at[number] = (start + TIMESTAMP_BYTES, length - TIMESTAMP_BYTES)
         return where
+
+    def _stamp(self, fh, number: int) -> float:
+        """The timestamp (ms) a frame chunk starts with."""
+        start, _ = structure.data_offset(fh, self.frames[number])
+        fh.seek(start)
+        return struct.unpack("<d", fh.read(TIMESTAMP_BYTES))[0]
+
+    def time_step(self, position: int):
+        """The mean interval (ms) between the frames of *position*, from the stamps of its
+        first and last frame written; None for one frame or a file without stamps.  These
+        are two small reads, on a handle of their own: metadata is also asked for after
+        the file was closed."""
+        written = [t for t in range(self.size("T")) if self.frame_number(t, position, 0)
+                   in self.frames]
+        if len(written) < 2:
+            return None
+        first, last = written[0], written[-1]
+        with builtins.open(self.path, "rb") as fh:
+            step = (self._stamp(fh, self.frame_number(last, position, 0)) -
+                    self._stamp(fh, self.frame_number(first, position, 0))) / (last - first)
+        return step if step > 0 else None
 
 
 class _Nd2Image(Image):
@@ -247,7 +278,8 @@ class _Nd2Image(Image):
     def _read_metadata(self):
         from ._nd2_metadata import nd2_metadata
         return nd2_metadata(self._f.picture, self._f.experiment, self._p,
-                            dict(zip(self.axes, self.shape)))
+                            dict(zip(self.axes, self.shape)), self._f.time_step(self._p),
+                            self._f.path)
 
     def _streamed_into(self, where, dst, cs, ys, xs, ss) -> int:
         """Rows *ys* of a "lossless" frame too large to decode whole: its zlib
@@ -340,5 +372,11 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base",  # noqa:
     nd2 = Nd2Parser(path)
     plate = _point_plate(nd2) if plates else None
     index, found = plate if plate is not None else ([None] * nd2.size("P"), [])
-    return _Nd2File(path, [_Nd2Image(nd2, p, index[p]) for p in range(nd2.size("P"))], nd2,
-                    plates=found)
+    images = [_Nd2Image(nd2, p, index[p]) for p in range(nd2.size("P"))]
+    if len(images) > 1:                     # _naming: the XY points' names tell them apart
+        from ._nd2_metadata import _xy_points
+        points = _xy_points(nd2.experiment)
+        if len(points) == len(images):
+            for image, point in zip(images, points):
+                image._label = (point.get("dPosName") or "").strip() or None
+    return _Nd2File(path, images, nd2, plates=found)

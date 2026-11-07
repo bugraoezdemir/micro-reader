@@ -25,7 +25,8 @@ def test_lifetime_and_lambda_are_indices(tmp_path):
     data = RNG.integers(0, 4000, (3, 2, 4, 9, 11)).astype("u2")   # H E Z Y X
     path = str(tmp_path / "flim.tif")
     _write(path, data, "HEZYX")
-    with micro_reader.open(path) as f:
+    from micro_reader.backends import tiff
+    with tiff.open(path) as f:                      # the bands, before _lambda gathers them
         assert f.index_range == {"series": 1, "emission": 2, "lifetime": 3}
         assert f.indices[:2] == [{"series": 0, "emission": 0, "lifetime": 0},
                                  {"series": 0, "emission": 0, "lifetime": 1}]

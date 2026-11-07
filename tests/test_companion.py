@@ -774,12 +774,12 @@ def test_a_companion_plate_reads_as_one_with_plates_true(tmp_path):
         assert [w.name for w in plate.wells] == ["A3", "B2"]
         b2 = plate.wells[1]
         assert [field.index for field in b2.fields] == [0, 1]
-        assert [field.image.name for field in b2.fields] == ["series 1", "series 2"]
+        assert [field.image.name for field in b2.fields] == ["well B2 field 0", "well B2 field 1"]
         _check(b2.fields[1].image, data, im=2)
         assert [im.index for im in f.images] == [_place(0, 0), _place(1, 0), _place(1, 1),
                                                  {"series": 3}]     # in no well: beside
-        assert [im.name for im in f.select(well_name="B2", field=1)] == ["series 2"]
-    with _native(path) as f:                  # without plates=True: as before
+        assert [im.name for im in f.select(well_name="B2", field=1)] == ["well B2 field 1"]
+    with _native(path, plates=False) as f:    # plates=False: by series
         assert f.plates == [] and [im.index for im in f.images] == [{"series": n}
                                                                      for n in range(4)]
 
@@ -807,7 +807,7 @@ def test_plate_acquisitions_number_the_fields_of_each_run(tmp_path):
     with _native(path, plates=True) as f:
         assert [(a.id, a.name) for a in f.plates[0].acquisitions] == [(0, "run 0"), (1, "run 1")]
         assert [im.index for im in f.images] == [_place(0, 0), _place(0, 1), _place(0, 0, 1)]
-        assert [im.name for im in f.select(acquisition=1)] == ["series 1"]
+        assert [im.name for im in f.select(acquisition=1)] == ["well A1 field 0, acquisition 1"]
 
 
 def test_acquisitions_without_images_are_left_out_and_numbered_anew(tmp_path):
@@ -1055,7 +1055,7 @@ def test_each_series_of_a_multi_file_ome_tiff_gets_its_own_image_metadata(tmp_pa
     at IFD 0 of the master: the OME Image is found by file and IFD (the fields
     took the title image's metadata: no channel names, no pixel sizes)."""
     master, _members, data = _plate_master(str(tmp_path))
-    with micro_reader.open(master) as f:
+    with micro_reader.open(master, plates=False) as f:
         names = [im.name for im in f.images]
         assert names == ["TitleImage", "W102,F1", "W102,F2"]
         field = f.images[2]

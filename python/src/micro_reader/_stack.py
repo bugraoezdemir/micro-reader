@@ -46,6 +46,11 @@ class ChannelStack(Image):
         for part in parts:
             part._whole = self
 
+    @property
+    def is_ragged(self) -> bool:
+        """False: the parts differ in ``c`` and pixel type only (see the constructor)."""
+        return False
+
     def _read_block(self, block):
         ci = self._ci
         cs = block[ci]

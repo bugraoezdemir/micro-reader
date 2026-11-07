@@ -10,9 +10,9 @@ with t = c = 1.  Channel name: ``channel_description``; excitation: the one
 laser switched on; emission: the centre of the detection filter's band
 (``BP 459-499``, ``BP 525/50``).  No position: the stage positions and the
 transform to sample coordinates disagree on the axes, unchecked on overlapping
-stacks.  A whole acquisition (several time points, channels, cameras) is
-opened through the Imaris file Luxendo writes next to it, whose time points and
-channels link to the ``.lux.h5`` files (the ``ims`` backend).
+stacks.  This backend reads a ``.lux.h5`` alone: one outside an experiment
+folder, or opened with ``multifile=False``; in an experiment folder it opens
+the whole experiment (the ``luxendo`` backend).
 
 **Fiji HDF5** (the Vibez plugin, ``File > Save As > HDF5``): datasets with
 ``element_size_um`` (z, y, x).  Datasets named ``t<n>/channel<n>`` (the
@@ -220,6 +220,9 @@ def _fiji(h5, path, reader) -> list:
         meta = Metadata(pixel_sizes=_sizes(ds), channels=(Channel(),))
         images.append(_StackImage(n, f"{where} {name}", {"series": n}, "zyx"[-ds.ndim:], [[ds]],
                                   ds.shape, ds.dtype.newbyteorder("="), reader, name, meta))
+    if len(images) > 1:                     # datasets of one file: named by their paths (_naming)
+        for image, name in zip(images, names):
+            image._own_name = name
     return images
 
 

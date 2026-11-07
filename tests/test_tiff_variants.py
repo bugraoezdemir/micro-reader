@@ -55,7 +55,7 @@ def test_svs_drops_thumbnail_names_associated(tmp_path):
     base, label, macro = _svs(path)
     with _native(path) as f:
         assert f.format == "svs"
-        assert [im.name for im in f.images] == ["Baseline", "label", "macro"]
+        assert [im.name for im in f.images] == ["slide", "label", "macro"]
         for im, ref in zip(f.images, (base, label, macro)):
             np.testing.assert_array_equal(im[...], ref)
 
@@ -107,7 +107,7 @@ def test_qptiff_channels_and_thumbnail_kept(tmp_path):
     channels, thumb = _qptiff(path)
     with _native(path) as f:
         assert f.format == "qptiff"
-        assert [im.name for im in f.images] == ["Baseline", "thumbnail"]   # Bio-Formats keeps it
+        assert [im.name for im in f.images] == ["scan", "thumbnail"]   # Bio-Formats keeps it
         np.testing.assert_array_equal(f.images[0][...], channels)
         np.testing.assert_array_equal(f.images[1][...], thumb)
         meta = f.images[0].metadata
@@ -204,7 +204,7 @@ def test_philips_levels_macro_metadata(tmp_path):
                  description="Macro -offset=(0,0)-pixelsize=(0.0315,0.0315)")
     with _native(path) as f:
         assert f.format == "philips"
-        assert [im.name for im in f.images] == ["Baseline", "macro"]
+        assert [im.name for im in f.images] == ["slide", "macro"]
         np.testing.assert_array_equal(f.images[0][...], base)
         np.testing.assert_array_equal(f.images[0].resolutions[1][...], level1)
         np.testing.assert_array_equal(f.images[1][...], macro)
@@ -326,7 +326,7 @@ def test_qptiff_scan_thumbnail_overview_and_label_on_the_slide(tmp_path, reads):
     with _native(path, resolutions="all") as f:
         _declares_slide(f, reads)
         assert [(im.name, im.index["resolution"]) for im in f.images] == [
-            ("Baseline", 0), ("Resolution", 1), ("thumbnail", 0), ("macro", 0), ("label", 0)]
+            ("scan", 0), ("scan", 1), ("thumbnail", 0), ("macro", 0), ("label", 0)]   # a level: its image's name
         first = {(im.index["series"], im.index["resolution"]): im.metadata for im in f.images}
         expected = {(0, 0): (500 + 0.25, 4250 + 0.25),               # scan: corner + half a pixel
                     (0, 1): (500 + 0.25, 4250 + 0.25),               # its level: level 0's (8.22)
@@ -350,7 +350,7 @@ def test_qptiff_overview_of_unknown_type_is_unplaced(tmp_path, image_type):
     _qptiff_slide(path, overview_type=image_type, label_type=image_type)
     with _native(path) as f:
         by_name = {im.name: im.metadata for im in f.images}
-        assert by_name["Baseline"].coordinate_system == "slide"
+        assert by_name["scan"].coordinate_system == "slide"
         for name in ("macro", "label"):
             assert by_name[name].pixel_sizes and by_name[name].position == {}, name
             assert by_name[name].coordinate_system is None
@@ -468,7 +468,7 @@ def test_bif_tiles_placed_by_their_joints(tmp_path):
     expected = _compose(grid)
     with _native(path) as f:
         assert f.format == "bif"
-        assert [im.name for im in f.images] == ["Baseline", "macro", "probability"]
+        assert [im.name for im in f.images] == ["slide", "macro", "probability"]
         im = f.images[0]
         assert im.shape == (ROWS * TILE, COLS * TILE - 6, 3)
         np.testing.assert_array_equal(im[...], expected)
@@ -634,7 +634,7 @@ def test_iscan_bif_areas_placed_as_openslide_does(tmp_path):
     levels, macro, thumb = _iscan_bif(path)
     with _native(path) as f:
         assert f.format == "bif"
-        assert [im.name for im in f.images] == ["Baseline", "macro", "thumbnail"]
+        assert [im.name for im in f.images] == ["iscan", "macro", "thumbnail"]
         im = f.images[0]
         expected = _iscan_compose(levels[0], 0)
         assert im.shape == expected.shape

@@ -121,7 +121,8 @@ def test_a_lambda_scan_is_one_image_per_band(tmp_path):
         _main, files = oif_files(band)
         with open(os.path.join(storage, f"s_C001L{k + 1:03d}.tif"), "wb") as fh:
             fh.write(files["s_C001.tif"])
-    with micro_reader.open(path) as f:
+    from micro_reader.backends import oif
+    with oif.open(path) as f:                       # the bands, before _lambda gathers them
         assert [dict(i.index) for i in f.images] == [{"series": 0, "emission": k} for k in range(4)]
         for k, image in enumerate(f.images):
             assert image.shape == (1, 1, 1, 9, 11)

@@ -276,8 +276,9 @@ class _VsiImage(Image):
                     if source is not None and isinstance(source.value, list) and source.value:
                         color = color_hex(source.value[-1])
                         break
-            channels.append(Channel(
-                name=name or None, color=color,
+            channels.append(Channel(                # the image's name on a channel says nothing
+                name=None if not name or name == getattr(self, "_own_name", None) else name,
+                color=color,
                 emission_wavelength=quantity(wave.value, "nanometer")
                 if wave is not None and isinstance(wave.value, (int, float)) and wave.value > 0
                 else None))
@@ -408,6 +409,8 @@ def open(path: str, tiles: str = "separate", resolutions: str = "base") -> _VsiF
             name = TYPE_NAMES.get(volume.type) or volume.name or f"stack{stack}"
             images.append(_pyramid(len(images), name, ets, volume.size, slots, extents, volume,
                                    ets.fill))
+            # _naming: a label / overview by its role, a scan by its STACK_NAME
+            images[-1]._own_name = TYPE_NAMES.get(volume.type) or volume.name or None
         macro = _macro(path, len(images))
         if macro is not None:
             owned.append(macro._file)
@@ -433,6 +436,7 @@ def _macro(path: str, position: int):
         return None
     image = file.images[0]
     image.name = "macro"
+    image._own_name = "macro"                          # _naming: its role is its name
     # its resolution tags are a display default (96 dpi -> 264.6 um), not a pixel size
     image._metadata = Metadata.unknown(1)
     image.index = {"series": position}

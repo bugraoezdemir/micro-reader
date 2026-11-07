@@ -201,7 +201,7 @@ def test_after_open_with_axes_every_leaf_is_an_object_in_images(tmp_path, monkey
         tree = _fresh_tree(f, monkeypatch)
         assert len(tree.images) == len(f.images) == 7
         for leaf, image in zip(tree.images, f.images):
-            assert leaf is image and leaf.source is not leaf
+            assert leaf is image          # an image already tczyx stays the backend's (0.4.0)
         assert _shape(tree)[0][3][0][3][0][3] == ["acquisition0_tile0", "acquisition0_tile1"]
     index, _data = _write_harmony(str(tmp_path / "harmony"))
     with micro_reader.open(index, axes="tczyx", samples="channels") as f:
@@ -233,7 +233,7 @@ def test_only_full_resolution_images_are_leaves(tmp_path):
         assert len(f.images) > 1
         tree = f.collection
         assert tree.name == "pyramid"                              # .ome.tif dropped (M1-2)
-        assert tree.images == [image for image in f.images if image.is_pyramid]
+        assert tree.images == [image for image in f.images if image.level == 0]
         assert tree.names == ("series0",)
 
 

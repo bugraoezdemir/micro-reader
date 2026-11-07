@@ -7,8 +7,9 @@ axes an image has: formats with an order of their own (TIFF, MRC) in that
 order, the others in ``tczyx``.  An axes image rearranges them without
 guessing:
 
-- ``axes=None`` keeps the image's order; ``"canonical"`` gives ``t c z y x``,
-  then ``s``; any other string is the exact axes wanted;
+- ``axes=None`` keeps the image's order (``open``'s ``"native"``);
+  ``"canonical"`` gives ``t c z y x``, then ``s`` (``open``'s default since
+  0.4.0, decision MR-4); any other string is the exact axes wanted;
 - axes the file lacks are inserted with size 1;
 - RGB samples ``s`` stay a trailing ``s`` when asked for, or are folded into
   the channels with ``samples="channels"`` (channel ``k`` = sample ``k % S``
@@ -50,8 +51,9 @@ def folded_channels(channels, n: int, samples: int) -> tuple:
     (Bio-Formats-style: one channel per sample) is kept; otherwise each
     channel becomes "<name> R" / "G" / "B" ("A"), tinted from ``SAMPLE_COLORS``,
     keeping its wavelengths; an unnamed one among several is "Channel {c} R";
-    a single unnamed channel gives unnamed, tinted channels; sample counts
-    without labels are numbered ("<name> 0") and untinted."""
+    a single unnamed channel gives unnamed, tinted channels; two channels of
+    one name are "<name> {c} R"; sample counts without labels are numbered
+    ("<name> 0") and untinted."""
     from ._metadata import Channel
     channels = tuple(channels)
     if len(channels) == n * samples:
@@ -61,10 +63,13 @@ def folded_channels(channels, n: int, samples: int) -> tuple:
     labels = SAMPLE_LABELS.get(samples, tuple(str(i) for i in range(samples)))
     colors = SAMPLE_COLORS.get(samples) or (None,) * samples
     single_unnamed = n == 1 and not channels[0].name
+    names = [ch.name for ch in channels]
     out = []
     for c, ch in enumerate(channels):
+        # two channels of one name (an RGB ND2): told apart by their position
+        label = ch.name if names.count(ch.name) == 1 else f"{ch.name} {c}"
         for i in range(samples):
-            name = None if single_unnamed else f"{ch.name or f'Channel {c}'} {labels[i]}"
+            name = None if single_unnamed else f"{label if ch.name else f'Channel {c}'} {labels[i]}"
             out.append(Channel(name=name, color=colors[i],
                                emission_wavelength=ch.emission_wavelength,
                                excitation_wavelength=ch.excitation_wavelength))
@@ -96,6 +101,8 @@ class AxesImage(Image):
         if left:
             hint = ("; samples='channels' folds RGB samples into the channels"
                     if "s" in left else "")
+            if "l" in left:
+                hint += "; opened without axes='native', a lambda scan has its bands along c"
             raise ValueError(f"{source.name!r} has axes {''.join(left)!r} that {axes!r} cannot "
                              f"hold{hint}")
         if self._fold and "c" not in axes:
@@ -130,7 +137,7 @@ class AxesImage(Image):
             return STANDARD + ("s" if "s" in free and not fold else "")
         if len(set(axes)) != len(axes) or not axes.isalpha():
             raise ValueError(f"axes {axes!r}: one letter per axis, each once")
-        stray = sorted(set(axes) - set(CANONICAL))
+        stray = sorted(set(axes) - set(CANONICAL) - set(names))
         if stray:
             raise ValueError(f"axes {axes!r}: {stray} are not array axes (arrays have "
                              f"{CANONICAL!r}; other dimensions are image indices)")
@@ -201,11 +208,17 @@ class AxesImage(Image):
     @property
     def metadata(self):
         """The native image's metadata; with samples folded into the channels,
-        one channel per folded channel (``folded_channels``)."""
+        one channel per folded channel (``folded_channels``). The sizes of axes this view
+        does not have are left out (``squeeze`` dropped them: a ``yx`` view listed the
+        file's z size; Bugra, 2026-11-04); an axis it has keeps what the file gives,
+        a size-1 one too, and none is made up for an axis the view adds."""
+        from dataclasses import replace
         meta = self.source.metadata
+        sizes = dict(meta.pixel_sizes or {})
+        if any(axis not in self.axes for axis in sizes):
+            meta = replace(meta, pixel_sizes={a: q for a, q in sizes.items() if a in self.axes})
         if not self._fold:
             return meta
-        from dataclasses import replace
         n = self.source.shape[self._names.index("c")] if "c" in self._names else 1
         return replace(meta, channels=folded_channels(meta.channels, n, self._samples))
 

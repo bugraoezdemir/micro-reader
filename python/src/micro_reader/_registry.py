@@ -10,7 +10,7 @@ from ._base import SAMPLED_INDICES, File
 from . import _parts
 from ._errors import CorruptFileError, OpenInstead, UnsupportedFormatError
 from .backends import (bdv, cellomics, columbus, companion, czi, cv7000, dv, flex, harmony, hdf5, ics, ilastik, ims, incell,
-                       jdce, lif, metamorph, metaxpress, micromanager, mrc, nd2, ndpis, oif, oir,
+                       jdce, klb, lif, luxendo, metamorph, metaxpress, micromanager, mrc, nd2, ndpis, oif, oir,
                        omp2info, raster, scanr, tiff, vsi)
 
 #: Tried in order: VSI before TIFF (a .vsi is a TIFF with a metadata tree);
@@ -28,11 +28,14 @@ from .backends import (bdv, cellomics, columbus, companion, czi, cv7000, dv, fle
 #: in this order, docs/COMPOSITE.md rule 5).  ICS headers by their ``ics_version`` line;
 #: ``.ids`` pixel files and Huygens Remote Manager's side files are their parts.  Hamamatsu
 #: ``.ndpis`` set files by their ``[NanoZoomer Digital Pathology Image Set]`` line.
+#: Luxendo experiment folders (a folder holding ``raw/``) before BigDataViewer and Imaris:
+#: their ``bdv.xml`` / ``.ims`` link files, ``raw/`` and its ``.lux.h5`` stacks are parts
+#: (``luxendo.owner``); the experiment is read as a folder (``sniff_folder``).
 #: Micro-Manager image-per-file acquisitions by a ``metadata.txt`` starting with its
 #: ``"Summary"``; their plane TIFFs, other positions' ``metadata.txt`` and folders are
 #: parts (``micromanager.owner``, after ``tiff.owner``: MMStack names never collide).
-BACKENDS = [vsi, flex, tiff, czi, bdv, ilastik, hdf5, ims, nd2, oir, omp2info, oif, lif, harmony, columbus, scanr, cellomics, jdce,
-            metaxpress, metamorph, micromanager, incell, cv7000, companion, ndpis, ics, raster, dv, mrc]
+BACKENDS = [vsi, flex, tiff, czi, luxendo, bdv, ilastik, hdf5, ims, nd2, oir, omp2info, oif, lif, harmony, columbus, scanr, cellomics, jdce,
+            metaxpress, metamorph, micromanager, incell, cv7000, companion, ndpis, ics, raster, klb, dv, mrc]
 
 #: Bytes read from the start of the file for sniffing.
 HEAD_BYTES = 1024
@@ -48,11 +51,13 @@ DEPRECATED_TILE_POLICIES = {"stitched": "mosaic"}
 #: resolution levels: full resolution only (default), or every level as its
 #: own image indexed by "resolution" (image.resolutions gives a pyramid either way)
 RESOLUTION_POLICIES = ("base", "all")
+#: the canonical array axes (``_axes.STANDARD``), the default since 0.4.0
+STANDARD_AXES = "tczyx"
 
 
 def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noqa: A001
-         resolutions: str = "base", rename: Optional[dict] = None, plates: bool = False,
-         multifile: bool = True, axes: Optional[str] = None, samples: str = "channels",
+         resolutions: str = "base", rename: Optional[dict] = None, plates: bool = True,
+         multifile: bool = True, axes: Optional[str] = "canonical", samples: str = "channels",
          squeeze: bool = False) -> File:
     """Open *path* with the backend that recognises it (or the one named).
 
@@ -70,10 +75,12 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
     as one z-stack.  The target is ``t``, ``c`` or ``z``; a format that
     cannot do it for that index raises.
 
-    *plates* (opt-in for now, docs/HCS.md): ``True`` reads a file that is a
-    plate as one: ``File.plates`` describes it, and its images are indexed by
-    well and field instead of series.  For a file that is not a plate (or a
-    format without plates) it changes nothing: ``File.plates`` stays empty.
+    *plates* (docs/HCS.md): ``True``, the default, reads a file that is a plate
+    as one: ``File.plates`` describes it, and its images are indexed by well and
+    field instead of series.  For a file that is not a plate (or a format
+    without plates) it changes nothing: ``File.plates`` stays empty.  ``False``
+    reads a plate acquired in a generic format (CZI, ND2, OME-TIFF) by its series;
+    plate formats are plates either way.
 
     *multifile*: a file of a multi-file OME set opens as the whole set
     (``True``, the default) or alone (``False``):
@@ -96,9 +103,13 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
     size, mid-timepoint, so a file is no block of the image; single-file
     OME-TIFFs.
 
-    *axes* (``"canonical"``, or letters such as ``"tczyx"``), *samples* and
-    *squeeze* present every image as ``Image.as_axes`` does.  Each image's
-    ``.source`` is then its native image.  *samples*: ``"channels"`` (the
+    *axes*: ``"canonical"`` (the default since 0.4.0, decision MR-4) gives every
+    image ``t c z y x`` (then ``s``), axes the file lacks with size 1;
+    ``"native"`` (or None) keeps the order the backend reports (ICS ``ctzyx``,
+    Micro-Manager OME-TIFF ``tzcyx``, a 2-D TIFF ``yx``); letters such as
+    ``"zyx"`` ask for exactly those.  *axes*, *samples* and *squeeze* present
+    every image as ``Image.as_axes`` does; an image already in the order asked
+    for is not wrapped.  A presented image's ``.source`` is its native image.  *samples*: ``"channels"`` (the
     default since 0.3.0) folds RGB samples into the channels -- an RGB image
     has ``c`` 3, channels "<name> R" / "G" / "B" -- and only images with
     samples are presented anew; ``"keep"`` keeps them as a trailing ``s``
@@ -122,22 +133,58 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
     from ._axes import SAMPLE_POLICIES
     if samples not in SAMPLE_POLICIES:
         raise ValueError(f"samples={samples!r}: one of {SAMPLE_POLICIES}")
-    opened = os.fspath(path)
-    main = opened if backend is not None else _parts.main_file(opened, BACKENDS)
-    image = _open(main, backend, tiles, resolutions, rename, bool(plates), bool(multifile))
+    opened = os.path.normpath(os.fspath(path))
+    main = opened if backend is not None else _parts.main_file(opened, BACKENDS, bool(multifile),
+                                                                bool(plates))
+    try:
+        image = _open(main, backend, tiles, resolutions, rename, bool(plates), bool(multifile))
+    except (CorruptFileError, UnsupportedFormatError) as exc:
+        # a folder opened the file it holds that is chosen first (an index
+        # file over images): when that one fails, name the others
+        if backend is None and main != opened and os.path.isdir(opened) and \
+                os.path.dirname(os.path.abspath(main)) == os.path.abspath(opened):
+            others = _parts.other_images(opened, main, BACKENDS)
+            if others:
+                raise type(exc)(f"{exc} (the folder also holds {', '.join(others[:10])}: "
+                                "open one of them)") from exc
+        raise
+    if backend is None and multifile and main != opened and _unlisted_image(image, opened):
+        # a file named like a member that its set does not list (a TIFF named like a
+        # Harmony plane, no part of the index): it opens as itself, as group_files lists it
+        # (a single), not as the set, which would leave its pixels out (review cycle 1, N-03)
+        image.close()
+        return open(path, tiles=tiles, resolutions=resolutions, rename=rename, plates=plates,
+                    multifile=False, axes=axes, samples=samples, squeeze=squeeze)
     image.opened = opened
     left = sorted({name for index in image.indices for name in index if name in rename})
     if left:
         image.close()
         raise UnsupportedFormatError(
             f"rename: {path!r}: the {image.backend} backend cannot make {left} an axis")
-    # an image is presented anew when asked to, or when its samples fold
-    anew = axes is not None or bool(squeeze)
-    if anew or (samples == "channels" and any("s" in s.axes for s in image.images)):
+    if axes is not None and str(axes).lower() == "native":
+        axes = None
+    from ._lambda import gather
+    from ._naming import assign_names
+    # one image per lambda scan (MR-5): a real l axis only when asked for
+    gather(image, axes is None or "l" in str(axes).lower().replace("canonical", ""))
+    assign_names(image)                     # one naming rule for every format (MR-2)
+    # an image is presented anew when asked to, or when its samples fold; one
+    # already in the order asked for stays the backend's own (no wrapper)
+
+    def as_asked(s) -> bool:
+        if squeeze or (samples == "channels" and "s" in s.axes):
+            return False
+        if axes is None:
+            return True
+        wanted = STANDARD_AXES if str(axes).lower() == "canonical" else str(axes).lower()
+        return s.axes == wanted
+
+    if any(not as_asked(s) for s in image.images):
         from ._axes import AxesImage
         try:
-            image.images = [AxesImage(s, axes, samples=samples, squeeze=squeeze)
-                            if anew or "s" in s.axes else s for s in image.images]
+            image.images = [s if as_asked(s) else
+                            AxesImage(s, axes, samples=samples, squeeze=squeeze)
+                            for s in image.images]
             image._bind_plates()            # plate navigation reaches the new images
         except BaseException:
             image.close()
@@ -146,6 +193,9 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
 
 
 def _check_rename(rename: Optional[dict]) -> dict:
+    if rename is not None and not isinstance(rename, dict):
+        raise TypeError(f"rename={rename!r}: a dict from index to axis, such as "
+                        "{'sequence': 'z'}")
     rename = {str(k).lower(): str(v).lower() for k, v in (rename or {}).items()}
     for name, axis in rename.items():
         if name not in SAMPLED_INDICES:
@@ -156,6 +206,30 @@ def _check_rename(rename: Optional[dict]) -> dict:
     if len(set(rename.values())) != len(rename):
         raise ValueError(f"rename {rename}: two indices onto one axis")
     return rename
+
+
+def _unlisted_image(file: File, opened: str) -> bool:
+    """Whether *opened*, a file that opened the set *file* by its name, is an image the set
+    does not list: neither one of its members nor one of its side files. A side file that is
+    no image (an index's text or XML companion) still opens the set."""
+    if not os.path.isfile(opened):
+        return False
+    module = next((m for m in BACKENDS if getattr(m, "NAME", None) == file.backend), None)
+    if not getattr(module, "SET_INDEX", False):
+        return False                # not a set an index lists (a Luxendo experiment's parts)
+    head = _parts.read_head(opened)
+    part = _parts.part_of(opened, head, BACKENDS)
+    if part is None or not part.member:
+        return False                # a structural part (a side file, an experiment's .xml)
+    key = os.path.normcase(os.path.abspath(opened))
+    try:
+        listed = file._member_files() | file._side_files()
+    except Exception:                                   # noqa: BLE001 - a set that cannot say
+        return False
+    if not listed or key in {os.path.normcase(os.path.abspath(p)) for p in listed}:
+        return False
+    return any(module.sniff(head, opened) for module in BACKENDS
+               if getattr(module, "NAME", None) != file.backend)
 
 
 def _open(path: str, backend: Optional[str], tiles: str, resolutions: str,
@@ -190,9 +264,26 @@ def _open(path: str, backend: Optional[str], tiles: str, resolutions: str,
                 return call(module)
         raise UnsupportedFormatError(
             f"unknown backend {backend!r}; available: {[m.NAME for m in BACKENDS]}")
+    if os.path.isdir(path):              # a main file that is a folder (a Luxendo experiment)
+        for module in BACKENDS:
+            sniff_folder = getattr(module, "sniff_folder", None)
+            if sniff_folder is not None and sniff_folder(path):
+                return call(module)
+        raise UnsupportedFormatError(f"no micro-reader backend reads the folder {path!r} "
+                                     "as one image")
     with builtins.open(path, "rb") as fh:
         head = fh.read(HEAD_BYTES)
     for module in BACKENDS:
         if module.sniff(head, path):
             return call(module)
+    name = os.path.basename(path).lower()
+    folder = os.path.dirname(os.path.abspath(path))
+    if name in _parts.ZARR_MARKERS or _parts.is_zarr_store(folder):
+        raise _parts._zarr_refusal(folder)
+    for suffix, what in _parts.NOT_READ.items():
+        if name.endswith(suffix):
+            raise UnsupportedFormatError(f"{path!r} is {what}, which micro-reader does not "
+                                         f"read yet")
     raise UnsupportedFormatError(f"no micro-reader backend recognises {path!r}")
+
+

@@ -13,6 +13,7 @@ Navigation follows containment only (docs/AXES.md, index architecture):
 are picked with ``select``."""
 from __future__ import annotations
 
+import functools
 import numbers
 import re
 from dataclasses import dataclass, field as _field, replace
@@ -247,7 +248,7 @@ class Plate:
         ``File.select(well=...)``: its place in the whole plate's wells (the
         index its images carry), also for a part of the plate."""
         for i, well in enumerate(self.whole or self.wells):
-            if well.name == name:
+            if name_key("well", well.name) == name_key("well", name):
                 return i
         raise KeyError(f"no well {name!r} with images in plate {self.name!r}; "
                        f"wells: {[w.name for w in self.whole or self.wells]}")
@@ -267,7 +268,8 @@ class Axis:
     decision C-19): ``axis[i]``, ``axis[a:b]``, ``axis["C"]`` and
     ``axis[["B", "D"]]`` give the part of the plate in those rows or columns.
     Positions count from 0 in the whole layout; a slice's negative bounds count
-    from its end.  ``len`` is the layout's row (column) count; the names are
+    from its end.  A slice of names includes both ends (``rows["B":"D"]`` is
+    rows B, C and D); names compare as ``select`` does (``columns["03"]``).  ``len`` is the layout's row (column) count; the names are
     ``plate.row_names`` (``column_names``)."""
 
     def __init__(self, plate: Plate, axis: str):
@@ -282,15 +284,30 @@ class Axis:
                         f"plate.{self.axis}_names; plate.{self.axis}s[...] gives a part of "
                         f"the plate")
 
+    def _position_of(self, name: str) -> int:
+        keys = [name_key(self.axis, n) for n in self.names]
+        key = name_key(self.axis, name)
+        if key not in keys:
+            raise KeyError(f"plate {self.plate.name!r} has no {self.axis} {name!r}; its "
+                           f"{self.axis}s are {list(self.names)}")
+        return keys.index(key)
+
     def _positions(self, value) -> list:
         n = len(self.names)
+        if isinstance(value, slice) and (isinstance(value.start, str)
+                                         or isinstance(value.stop, str)):
+            # names: both ends included, as names are read ('B':'D' is B, C, D)
+            if value.step is not None or not all(isinstance(b, (str, type(None)))
+                                                 for b in (value.start, value.stop)):
+                raise TypeError(f"plate.{self.axis}s[{value.start!r}:{value.stop!r}]: a "
+                                f"slice of names takes names at both ends and no step")
+            lo = 0 if value.start is None else self._position_of(value.start)
+            hi = n - 1 if value.stop is None else self._position_of(value.stop)
+            return list(range(lo, hi + 1))
         if isinstance(value, slice):
             return list(range(*value.indices(n)))
         if isinstance(value, str):
-            if value not in self.names:
-                raise KeyError(f"plate {self.plate.name!r} has no {self.axis} {value!r}; its "
-                               f"{self.axis}s are {list(self.names)}")
-            return [self.names.index(value)]
+            return [self._position_of(value)]
         if isinstance(value, _SEQUENCES):
             return [p for v in value for p in self._positions(v)]
         if isinstance(value, numbers.Integral) and not isinstance(value, bool):
@@ -340,6 +357,62 @@ PLACE_NAMES = ("plate_name", "acquisition_name", "well_name", "row_name", "colum
 _PLACES = ("plate", "acquisition", "well", "row", "column")
 #: a value of one of these types is "any of" its items, in ``select``
 _SEQUENCES = (list, tuple, range, set, frozenset)
+#: the places whose names vendors spell differently (A1 / A01 / a1): compared by
+#: ``name_key``; plate and acquisition names are free text, compared as given
+_LOOSE_NAMES = ("well", "row", "column")
+_LETTERS_NUMBER = re.compile(r"([A-Z]*)0*(\d+)")
+
+
+@functools.lru_cache(maxsize=8192)                 # select asks once per image: few names
+def name_key(place: str, name):
+    """How a *place*'s name is compared: a well, row or column name in upper
+    case with the leading zeros of its number dropped, so ``"B02"``, ``"b2"``
+    and ``"B2"`` are one well and ``"03"`` is column ``"3"`` (vendors write
+    both: MetaXpress and Cellomics ``A01``, Harmony and NGFF ``A1``; gap hunt
+    C-08).  Other places, and names that are not letters + a number, keep
+    their spelling (upper case for wells, rows and columns)."""
+    if place not in _LOOSE_NAMES or not isinstance(name, str):
+        return name
+    text = name.strip().upper()
+    m = _LETTERS_NUMBER.fullmatch(text)
+    return f"{m[1]}{int(m[2])}" if m else text
+
+
+def known_names(plates, place: str) -> set:
+    """The name keys (``name_key``) of every *place* of *plates*: their
+    names, their acquisitions', or their whole layout's wells, rows or
+    columns."""
+    out = set()
+    for plate in plates:
+        names = {"plate": (plate.name,),
+                 "acquisition": tuple(a.name for a in plate.acquisitions),
+                 "well": tuple(w.name for w in (plate.whole or plate.wells)),
+                 "row": plate.row_names, "column": plate.column_names}[place]
+        out.update(name_key(place, n) for n in names if n is not None)
+        if place == "well":
+            # every well of the layout, imaged or not: a row and a column of it, so a
+            # well the layout has selects nothing rather than raising (review cycle 2,
+            # R2-12: rows and columns did, wells did not)
+            out.update(name_key("well", f"{r}{c}") for r in (plate.row_names or ())
+                       for c in (plate.column_names or ()))
+    return out
+
+
+def check_place_names(conditions, plates, where: str = "select") -> None:
+    """A name no plate has raises ``ValueError`` naming the names there are
+    (gap hunt C-08: ``select(well="Z99")`` gave ``[]``; Bugra 2026-10-30).  A
+    name the layout has whose places hold no images selects nothing, as any
+    other value."""
+    for place, _numbers, labels in conditions:
+        if not labels:
+            continue
+        there = known_names(plates, place)
+        missing = sorted(set(labels) - there, key=str)
+        if missing:
+            listed = sorted(there, key=str)
+            shown = ", ".join(map(repr, listed[:24])) + (", ..." if len(listed) > 24 else "")
+            raise ValueError(f"{where}: no {place} named {', '.join(map(repr, missing))} in the "
+                             f"file's plates; the {place} names are: {shown or 'none recorded'}")
 
 
 class Span:
@@ -413,13 +486,13 @@ def place_conditions(wanted: dict, where: str = "select") -> list:
             if wrong:
                 raise TypeError(f"{where}({named}=...): a name, not {wrong[0]!r}; for a "
                                 f"0-based position, {place}={wrong[0]!r}")
-            out.append((place, (), frozenset(values)))
+            out.append((place, (), frozenset(name_key(place, v) for v in values)))
         values = wanted.get(place)
         if values is not None and (place in WELL_ADDRESS
                                    or any(isinstance(v, str) for v in values)):
             del wanted[place]
             out.append((place, tuple(v for v in values if not isinstance(v, str)),
-                        frozenset(v for v in values if isinstance(v, str))))
+                        frozenset(name_key(place, v) for v in values if isinstance(v, str))))
     given = {place for place, _, _ in out}
     if "well" in given or "well" in wanted:
         if given & {"row", "column"}:
@@ -434,7 +507,7 @@ def place_matches(conditions, positions: dict, names: dict) -> bool:
     column) with *names* (their names) meets every place condition
     (``place_conditions``)."""
     for place, numbers, labels in conditions:
-        if positions.get(place) not in numbers and names.get(place) not in labels:
+        if positions.get(place) not in numbers and name_key(place, names.get(place)) not in labels:
             return False
     return True
 
@@ -466,7 +539,7 @@ def navigate(plates, images) -> list:
     groups: dict = {}
     for image in images:
         index = image.index
-        if "well" in index and image.is_pyramid:
+        if "well" in index and image.level == 0:
             key = (index.get("plate", 0), index["well"], index.get("field", 0))
             groups.setdefault(key, []).append(image)
     out = []

@@ -65,7 +65,7 @@ from .._errors import (CorruptFileError, MicroReaderError, MissingImagesWarning,
                        UnsupportedFormatError)
 from .._io import DecodeCache, ThreadHandles
 from .._spatial import CoordinateSystem
-from ._tiff_metadata import SLIDE, STAGE
+from ._tiff_metadata import SLIDE, STAGE, scanimage_frame_rate
 
 NAME = "tiff"
 MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")   # classic and BigTIFF
@@ -285,6 +285,48 @@ _AS_NORMALISED = {"YX": lambda a: a[None, :, :, None],
 
 def sniff(head: bytes, path: str) -> bool:
     return head[:4] in MAGIC
+
+
+#: OME-TIFF file names: a file of a multi-file set names the others (UUIDs)
+OME_SUFFIXES = (".ome.tif", ".ome.tiff", ".ome.btf", ".ome.tf2", ".ome.tf8")
+#: ``group_files``: an OME-TIFF is an index only when it has members -- one
+#: file alone stays a plain path
+INDEX_ONLY_WITH_MEMBERS = True
+
+
+def may_index(name: str) -> bool:
+    """``group_files``' cheap test (reads nothing): an OME-TIFF may be one file
+    of a multi-file set, which its OME-XML names (gap hunt B-09: a 4-D set of 86
+    files grouped as 86 single images).  Micro-Manager stacks are grouped by
+    their names (``owner``), before this is asked."""
+    return name.lower().endswith(OME_SUFFIXES)
+
+
+#: a TiffData's file: <UUID FileName="...">
+_UUID_FILE = re.compile(r'<(?:\w+:)?UUID\b[^>]*\bFileName="([^"]+)"')
+
+
+def worth_opening(path: str) -> bool:
+    """``group_files``, before it opens an OME-TIFF as an index: only the first
+    page's OME-XML is read, no series is built.  Worth opening when the XML names
+    another file of the set; not for one file alone, nor for a ``BinaryOnly``
+    stub, whose metadata file (a companion, or the set's master OME-TIFF) is
+    the index -- so grouping a folder costs one full open per set."""
+    import tifffile
+    if MMSTACK in os.path.basename(path).lower():
+        return False                                    # Micro-Manager: grouped by names (owner)
+    try:
+        with tifffile.TiffFile(path) as tif:
+            if tif.is_micromanager:
+                return False
+            text = tif.pages.first.description or ""
+    except Exception:                                   # noqa: BLE001 - grouped as a plain path
+        return False
+    if "<OME" not in text or "BinaryOnly" in text:
+        return False
+    own = os.path.basename(path).lower()
+    return any(os.path.basename(name.replace("\\", "/")).lower() != own
+               for name in _UUID_FILE.findall(text))
 
 
 #: the frame index of an NDTiff dataset (Micro-Manager 2), in its folder
@@ -508,6 +550,12 @@ class _TiffImage(Image):
         super().__init__(index, "".join(letters[i] for i in keep), [shape[i] for i in keep],
                          series.dtype, name=series.name or f"series{index}", read_unit=unit,
                          index=image_key)
+        #: the format's own name (``_naming``): an OME ``Image@Name``, a slide
+        #: image's role in lower case (``macro``, ``label``, ``map``)
+        self._own_name = (series.name.lower() if series.kind != "ome" else series.name) or None
+        #: a slide's main scan has no name of its own (``Baseline`` is tifffile's word
+        #: for it): it takes the file's
+        self._main_scan = series.name == "Baseline" and series.kind != "ome"
 
     # -- page index ---------------------------------------------------------
 
@@ -545,6 +593,21 @@ class _TiffImage(Image):
                         getattr(page, "jpegtables", None) or key.jpegtables, handles)
                 self._pages[p] = entry
             return self._pages[p]
+
+    def _member_paths(self) -> set:
+        """The other files of a multi-file OME-TIFF set this image's planes are
+        in (``File._member_files``, for ``group_files``): the set is pointed both
+        ways -- each file's OME-XML names the others by UUID -- so its files are
+        one image.  Empty for one file, and for Micro-Manager stacks, which
+        ``group_files`` groups as a composite by their names (gap hunt B-09)."""
+        if not getattr(self._series, "is_multifile", False) or self._tif.is_micromanager:
+            return set()
+        out = set()
+        for page in self._series.pages:
+            path = getattr(getattr(getattr(page, "parent", None), "filehandle", None), "path", None)
+            if path is not None:
+                out.add(path)
+        return out
 
     def _handles_of(self, page) -> ThreadHandles:
         """The handles of the file *page* is in: a series spread over several
@@ -1102,6 +1165,14 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
             if level and s.shape[pos] > 1:
                 by_level.setdefault(level, []).append(pos)
         levels.update(level for level in by_level if level != "series")
+        if scanimage_frame_rate(tif) is not None and "t" not in letters:
+            letters = ["t" if letter == "z" else letter for letter in letters]
+        filled = int(np.prod(s.shape[:-2]))
+        if getattr(tif, "is_scanimage", False) and filled < len(tif.pages):
+            warnings.warn(MissingImagesWarning(
+                f"{path!r}: the file holds {len(tif.pages)} pages, of which {filled} fill its "
+                "shape (an acquisition stopped early?): the last ones are not read"),
+                stacklevel=4)
         plans.append((s, letters, frame, by_level))
     levels = [level for level in OTHER_INDICES if level in levels]
     if tiles == "mosaic" and "tile" in levels:
@@ -1119,6 +1190,11 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
                  if len(lv.shape) == len(s.shape) and lv.axes == s.axes]
         level_first: dict = {}
         series_here = int(np.prod([s.shape[p] for p in by_level.get("series", [])]))
+        # a Micro-Manager stack's positions are named by their labels (``_naming`` rule 3)
+        labels = None
+        if s.kind == "mmstack" and series_here > 1:
+            from .micromanager import _labels
+            labels = _labels((tif.micromanager_metadata or {}).get("Summary") or {})
         for values in itertools.product(*(range(s.shape[p]) for p in varying)):
             fixed = {pos: 0 for pos in positions}
             fixed.update(zip(varying, values))
@@ -1129,6 +1205,9 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
                 key["resolution"] = 0
             image = _TiffImage(tif, len(images), s, letters, fixed=fixed, key=key, share=first)
             image._series_index = n                 # position in the listed series
+            position = _ravel(fixed, by_level.get("series", []), s.shape)
+            if labels and position < len(labels):
+                image._label = labels[position]
             first = first or image
             images.append(image)
             pyramid = [image]
@@ -1388,8 +1467,11 @@ def _ome_plate(tif, path: str):
         return None                     # planes without file names: no companion route
     if not any(plate["places"] for plate in core.plates()):
         return None
+    try:
+        found = ome_set._CompanionFile(path, plates=True)
+    except ome_set.NotInItsSet:
+        return None                     # a file its own OME-XML does not list (CQ1's MIP)
     tif.close()
-    found = ome_set._CompanionFile(path, plates=True)
     found.backend, found.format = NAME, "ome-tiff"
     return found
 

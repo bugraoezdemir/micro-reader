@@ -1,0 +1,58 @@
+# The user documentation site (mkdocs.yml, pages in docs/api) on GitHub Pages.
+#
+# It follows the releases: a published GitHub release deploys the site of that
+# release's commit, so the site always describes the version on PyPI.
+# workflow_dispatch deploys by hand (a docs fix between releases). A pull
+# request that touches the site only builds it (--strict: broken links and
+# anchors fail).
+#
+# One-time setup: Settings > Pages > Source: GitHub Actions.
+name: Docs
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - docs/api/**
+      - mkdocs.yml
+      - .github/workflows/docs.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # MkDocs 2.0 drops the plugin and theme system mkdocs-material needs
+      - run: pip install "mkdocs>=1.6,<2" "mkdocs-material>=9.5,<10"
+      - run: mkdocs build --strict
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

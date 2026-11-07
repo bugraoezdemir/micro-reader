@@ -20,5 +20,6 @@ Thumbs.db
 # irrelevant
 smoke_tests/
 harness/
-docs/
+docs_private/
+site/
 

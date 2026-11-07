@@ -91,7 +91,7 @@ def test_a_measurement_opens_from_each_entry_file(tmp_path, entry):
         assert f.indices == [{"plate": 0, "acquisition": 0, "well": w, "field": fd}
                              for w in range(2) for fd in range(2)]
         image = plate.wells[1].fields[1].image
-        assert image.shape == (1, 2, 1, Y, X) and image.name == "P1 well C5 field 1"
+        assert image.shape == (1, 2, 1, Y, X) and image.name == "well C5 field 1"      # one plate: no prefix (MR-2)
         for a in range(2):
             np.testing.assert_array_equal(image[0, a, 0], data[(3, 5, 2, 1, a + 1, 1)])
 

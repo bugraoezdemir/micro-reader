@@ -28,13 +28,21 @@ def write_ilastik(path, data: np.ndarray, keys: str, name="exported_data", chunk
 
 
 def write_luxendo(path, data: np.ndarray, size_zyx=(2.0, 0.26, 0.26), levels=(2,),
-                  lasers_on=(445,), band="BP 459-499", description="Cyan"):
+                  lasers_on=(445,), band="BP 459-499", description="Cyan", channel=0,
+                  time_point=0, stack=0, objective="bottom", camera="long", stamp=None,
+                  sidecar=False):
     """A Luxendo .lux.h5 (github.com/Luxendo/luxendo-image): Data (z, y, x),
     uncompressed 64^3-style chunks, Data_f_f_f levels, element_size_um as
-    float32, JSON metadata.  -> {level name: array}."""
-    meta = {"processingInformation": {"channel": "0", "channel_description": description,
+    float32, JSON metadata saying the stack's place (numbers as strings, as
+    Luxendo writes them); *stamp* (ISO time) its first plane's time stamp;
+    *sidecar*: the same JSON next to it as ``<stem>.json``.  -> {level name: array}."""
+    place = {"time_point": str(time_point), "channel": str(channel),
+             "channel_description": description, "stack": str(stack),
+             "stack_description": "Zstack", "objective": objective, "camera": camera}
+    meta = {"processingInformation": {**place,
                                       "voxel_size_um": {"width": size_zyx[2], "height": size_zyx[1],
                                                         "depth": size_zyx[0]}},
+            "acquisition": [{**place, "time_stamps": [stamp] if stamp else []}],
             "metaData": {"lasers": [{"name": f"{nm} nm", "on": nm in lasers_on, "intensity": 50,
                                      "wavelength_nm": nm} for nm in (445, 488, 561)]
                          + [{"name": "LED", "on": False, "wavelength_nm": 100}],
@@ -49,6 +57,9 @@ def write_luxendo(path, data: np.ndarray, size_zyx=(2.0, 0.26, 0.26), levels=(2,
             ds.attrs["element_size_um"] = np.array(size_zyx, np.float32)
             out[name] = arr
         f["metadata"] = json.dumps(meta)
+    if sidecar:
+        with open(str(path)[:-len(".lux.h5")] + ".json", "w", encoding="utf-8") as fh:
+            json.dump(meta, fh)
     return out
 
 
@@ -61,8 +72,9 @@ def write_fiji(path, datasets: dict, size_zyx=(0.5, 0.2, 0.2)):
 
 def _xml(h5_name, setups, timepoints, voxel=(0.5, 0.5, 2.0), unit="µm", missing=(),
          registrations=None, loader="bdv.hdf5", partitions=(), channel_names=None,
-         timepoint_xml=None):
-    """A SpimData XML: *setups* = [(id, attributes dict, size zyx)]."""
+         timepoint_xml=None, setup_names=None):
+    """A SpimData XML: *setups* = [(id, attributes dict, size zyx)]; *setup_names*:
+    {id: name} (default "setup <id>")."""
     lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<SpimData version="0.2">',
              '  <BasePath type="relative">.</BasePath>', '  <SequenceDescription>',
              f'    <ImageLoader format="{loader}">',
@@ -71,7 +83,7 @@ def _xml(h5_name, setups, timepoints, voxel=(0.5, 0.5, 2.0), unit="µm", missing
         lines.append(f'      <partition><path type="relative">{part}</path></partition>')
     lines += ['    </ImageLoader>', '    <ViewSetups>']
     for sid, attrs, (z, y, x) in setups:
-        lines += ['      <ViewSetup>', f'        <id>{sid}</id>', f'        <name>setup {sid}</name>',
+        lines += ['      <ViewSetup>', f'        <id>{sid}</id>', f'        <name>{(setup_names or {}).get(sid, f"setup {sid}")}</name>',
                   f'        <size>{x} {y} {z}</size>',
                   f'        <voxelSize><unit>{unit}</unit><size>{voxel[0]} {voxel[1]} {voxel[2]}</size></voxelSize>',
                   '        <attributes>']
@@ -162,14 +174,19 @@ def _ims_text(value):
     return np.array(list(str(value)), dtype="S1")
 
 
-def _ims_info(f, n_c, extent_um):
+def _ims_bytes(value):
+    """Imaris attributes as Luxendo writes them: arrays of 1-byte integers."""
+    return np.frombuffer(str(value).encode(), np.uint8)
+
+
+def _ims_info(f, n_c, extent_um, text=_ims_text):
     info = f.require_group("DataSetInfo/Image")
     for k, v in enumerate(extent_um):                   # x, y, z
-        info.attrs[f"ExtMin{k}"] = _ims_text(0.0)
-        info.attrs[f"ExtMax{k}"] = _ims_text(v)
-    info.attrs["Unit"] = _ims_text("um")
+        info.attrs[f"ExtMin{k}"] = text(0.0)
+        info.attrs[f"ExtMax{k}"] = text(v)
+    info.attrs["Unit"] = text("um")
     for c in range(n_c):
-        f.require_group(f"DataSetInfo/Channel {c}").attrs["Name"] = _ims_text(f"ch{c}")
+        f.require_group(f"DataSetInfo/Channel {c}").attrs["Name"] = text(f"ch{c}")
 
 
 def write_ims_multifile(folder, name="set", n_t=2, n_c=2, shape=(3, 20, 24), padded=(4, 32, 32),
@@ -212,12 +229,16 @@ def write_ims_multifile(folder, name="set", n_t=2, n_c=2, shape=(3, 20, 24), pad
     return data
 
 
-def write_ims_luxendo(folder, name="imaris", n_t=2, n_c=2, shape=(3, 20, 24), skip=(), seed=0):
+def write_ims_luxendo(folder, name="imaris", n_t=2, n_c=2, shape=(3, 20, 24), skip=(), seed=0,
+                      link_prefix=""):
     """Luxendo's link-only Imaris file (as S-BIAD3686's ``imaris.ims``): its
     Channel groups carry the ImageSize attributes, ``Data`` is an external
     link to ``Data`` of ``raw/stack_0-Zstack_channel_<c>/Cam_long_<ttttt>.lux.h5``
-    (Luxendo .lux.h5 stacks, write_luxendo).  Stacks whose (t, c) is in
-    *skip* are not written.  -> data (T, C, Z, Y, X), zeros where skipped."""
+    (Luxendo .lux.h5 stacks, write_luxendo); its text attributes are arrays
+    of 1-byte integers, as Luxendo writes them (``ImarisVersion`` [53, 46, ...]).
+    Stacks whose (t, c) is in *skip* are not written.  *link_prefix* goes
+    before each link (``../../`` for ``ims/stacks/``).  -> data (T, C, Z, Y,
+    X), zeros where skipped."""
     rng = np.random.default_rng(seed)
     data = rng.integers(0, 4000, (n_t, n_c, *shape)).astype(np.uint16)
     with h5py.File(folder / f"{name}.ims", "w") as f:
@@ -227,12 +248,13 @@ def write_ims_luxendo(folder, name="imaris", n_t=2, n_c=2, shape=(3, 20, 24), sk
                 stack = f"raw/stack_0-Zstack_channel_{c}/Cam_long_{t:05d}.lux.h5"
                 if (t, c) in skip:
                     data[t, c] = 0
-                else:
+                elif not link_prefix:                    # ims/stacks/: the stacks are written by the caller
                     (folder / stack).parent.mkdir(parents=True, exist_ok=True)
-                    write_luxendo(folder / stack, data[t, c], levels=())
+                    write_luxendo(folder / stack, data[t, c], levels=(), channel=c, time_point=t,
+                                  description=f"ch{c}")
                 g = f.require_group(f"DataSet/ResolutionLevel 0/TimePoint {t}/Channel {c}")
                 for axis, size in zip("ZYX", shape):
                     g.attrs[f"ImageSize{axis}"] = np.frombuffer(str(size).encode(), np.uint8)
-                g["Data"] = h5py.ExternalLink(stack, "Data")
-        _ims_info(f, n_c, (shape[2] * 0.26, shape[1] * 0.26, shape[0] * 2.0))
+                g["Data"] = h5py.ExternalLink(link_prefix + stack, "Data")
+        _ims_info(f, n_c, (shape[2] * 0.26, shape[1] * 0.26, shape[0] * 2.0), text=_ims_bytes)
     return data

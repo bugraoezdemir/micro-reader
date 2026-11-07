@@ -108,6 +108,55 @@ def test_a_folder_without_images_raises(tmp_path):
         micro_reader.open(str(tmp_path))
 
 
+def test_a_sample_folder_opens_the_one_dataset_below_it(tmp_path):
+    # MR-6: a folder with no image of its own opens the one dataset in its
+    # sub-folders (38 of 54 plate sample folders failed: their export sits below)
+    deep = tmp_path / "sample" / "export" / "scan"
+    deep.mkdir(parents=True)
+    image = write_dv(deep / "a_R3D.dv", dv_data((1, 1, 2, 5, 6)))
+    (tmp_path / "sample" / "README.txt").write_text("from the depositors")
+    with micro_reader.open(str(tmp_path / "sample")) as f:
+        assert os.path.samefile(f.path, image)
+
+
+def test_a_sample_folder_takes_a_companion_below_it_as_one_set(tmp_path):
+    # each sub-folder is taken as open would take it: its index file wins over
+    # the member TIFFs next to it, so the set is one dataset
+    companion, _ = test_companion._write(str(tmp_path / "sample" / "set"))
+    with micro_reader.open(str(tmp_path / "sample")) as f:
+        assert f.backend == "companion" and os.path.samefile(f.path, companion)
+
+
+def test_a_folder_of_several_datasets_below_lists_them(tmp_path):
+    for name in ("one", "two"):
+        (tmp_path / name).mkdir()
+        write_dv(tmp_path / name / f"{name}.dv", dv_data((1, 1, 1, 4, 4)))
+    with pytest.raises(MicroReaderError, match=r"2 datasets in its sub-folders: "
+                                               r"one[\\/]one\.dv, two[\\/]two\.dv"):
+        micro_reader.open(str(tmp_path))
+
+
+def test_an_ome_zarr_store_is_refused_naming_ome_zarr_pyramid(tmp_path):
+    # gap hunt B-06: the generic "no file in this folder is an image" before
+    store = tmp_path / "cells.ome.zarr"
+    store.mkdir()
+    (store / "zarr.json").write_text('{"zarr_format": 3, "node_type": "group"}')
+    for path in (store, store / "zarr.json"):
+        with pytest.raises(UnsupportedFormatError, match="OME-Zarr store.*ome_zarr_pyramid"):
+            micro_reader.open(str(path))
+    with pytest.raises(UnsupportedFormatError, match="holds OME-Zarr stores"):
+        micro_reader.open(str(tmp_path))
+
+
+@pytest.mark.parametrize("name, what", [("scan.ptu", "PicoQuant time-tagged"),
+                                        ("scan.phu", "PicoQuant histogram")])
+def test_formats_known_but_not_read_are_named(tmp_path, name, what):
+    # gap hunt B-07: they got the generic "no micro-reader backend recognises"
+    (tmp_path / name).write_bytes(b"\x00" * 64)
+    with pytest.raises(UnsupportedFormatError, match=f"{what}.*does not read yet"):
+        micro_reader.open(str(tmp_path / name))
+
+
 def test_a_folder_with_an_index_file_opens_the_set(tmp_path):
     """A companion's member TIFFs are images too; the index file wins."""
     companion, _ = test_companion._write(str(tmp_path / "set"))
@@ -175,3 +224,72 @@ def test_micro_manager_stack_files_are_parts_of_the_first(tmp_path):
     assert os.path.basename(part.main) == names[0]
     with micro_reader.open(str(tmp_path)) as f:
         assert os.path.basename(f.path) == names[0]
+
+
+# -- side files, messages (gap hunt 2026-10-29, closed for 0.4.0) ------------------------
+
+def test_leica_files_of_settings_are_parts_of_their_experiment(tmp_path):
+    from micro_reader.backends import lif
+    (tmp_path / "scan" / "Metadata").mkdir(parents=True)
+    xlef = tmp_path / "scan.xlef"
+    xlef.write_text("<x/>")
+    for path in (tmp_path / "scan" / "FrameProperties.lof",
+                 tmp_path / "scan" / "Metadata" / "FrameProperties.xlif",
+                 tmp_path / "scan" / "Metadata" / "IOManagerConfiguation.xlif"):
+        path.write_text("<x/>")
+        assert os.path.normcase(lif.owner(str(path), b"<x/>").main) == os.path.normcase(str(xlef))
+    assert not lif.may_index("FrameProperties.xlif") and lif.may_index("scan.xlif")
+
+
+def test_a_lifext_and_an_xml_are_parts_of_their_lif(tmp_path):
+    from micro_reader.backends import lif
+    main = tmp_path / "scan.lif"
+    main.write_bytes(b"x")
+    ext, xml = tmp_path / "scan.lifext", tmp_path / "scan.xml"
+    ext.write_bytes(b"x")
+    xml.write_text("<LMSDataContainerHeader/>")
+    assert lif.owner(str(ext), b"").member                      # alone with multifile=False
+    part = lif.owner(str(xml), b"<LMSDataContainerHeader/>")
+    assert part.main == str(main) and not part.member
+    assert lif.owner(str(xml), b"<other/>") is None             # an XML of something else
+
+
+def test_a_folder_says_what_it_skips_beside_its_images(tmp_path):
+    tifffile = pytest.importorskip("tifffile")
+    tifffile.imwrite(tmp_path / "img.tif", np.zeros((6, 8), np.uint8))
+    (tmp_path / "img.ptu").write_bytes(b"x")
+    with pytest.warns(micro_reader.CompositeWarning, match="img.ptu"):
+        micro_reader.open(tmp_path).close()
+
+
+def test_a_path_has_one_spelling(tmp_path):
+    tifffile = pytest.importorskip("tifffile")
+    path = tmp_path / "a.tif"
+    tifffile.imwrite(path, np.zeros((6, 8), np.uint8))
+    with micro_reader.open(str(path).replace(os.sep, "/")) as f:
+        assert f.path == str(path)
+
+
+def test_an_orphan_log_names_the_deconvolved_image_beside_it(tmp_path):
+    from micro_reader.backends import dv
+    log = tmp_path / "cell_R3D.dv.log"
+    log.write_bytes(dv.LOG_SIGNATURES[0])
+    (tmp_path / "cell_R3D_D3D.dv").write_bytes(b"x")
+    part = dv.owner(str(log), dv.LOG_SIGNATURES[0])
+    assert part.main is None and "cell_R3D_D3D.dv" in part.hint
+
+
+def test_a_leica_element_opens_its_experiment(tmp_path):
+    from micro_reader.backends import lif
+    (tmp_path / "Metadata").mkdir()
+    xlef = tmp_path / "exp.xlef"
+    xlef.write_text("<x/>")
+    lof, xlif = tmp_path / "scan.lof", tmp_path / "Metadata" / "scan.xlif"
+    lof.write_text("<x/>")
+    xlif.write_text("<x/>")
+    for path in (lof, xlif):
+        part = lif.owner(str(path), b"<x/>")
+        assert part.member and os.path.normcase(part.main) == os.path.normcase(str(xlef))
+    lone = tmp_path / "other.lof"                       # no .xlif of it: no element of the experiment
+    lone.write_text("<x/>")
+    assert lif.owner(str(lone), b"<x/>") is None

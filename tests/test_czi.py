@@ -515,7 +515,7 @@ def test_channels_of_different_pixel_types(tmp_path):
         assert image.dtype == np.uint16 and image.shape == (1, 3, 1, 20, 30)
         np.testing.assert_array_equal(image.read(t=0, z=0), np.stack([a0, a1, a2]))
         np.testing.assert_array_equal(image[0, 1:3, 0, 5:9, 7:20], np.stack([a1, a2])[:, 5:9, 7:20])
-        assert image.is_ragged
+        assert not image.is_ragged                  # one sampling, two pixel types
         parts = image.parts
         assert [(p.dtype, p.shape[1], p.index["part"]) for p in parts] == \
             [(np.uint8, 2, 0), (np.uint16, 1, 1)]
@@ -552,7 +552,7 @@ def test_label_and_slide_preview_are_scenes(tmp_path):
     write_raw(path, [t0], attachments=attachments)
     with _native(path) as f:
         assert [im.index for im in f.images] == [{"series": 0}, {"series": 1}, {"series": 2}]
-        assert [im.name.split(" ", 1)[1] for im in f.images[1:]] == ["label", "slide preview"]
+        assert [im.name for im in f.images[1:]] == ["label", "slide preview"]    # their roles (MR-2)
         np.testing.assert_array_equal(f.images[0].read(t=0, c=0, z=0), image)
         np.testing.assert_array_equal(f.images[1].read(t=0, c=0, z=0), label)
         np.testing.assert_array_equal(f.images[2][0, 0, 0, 2:8, 3:11], preview[2:8, 3:11])

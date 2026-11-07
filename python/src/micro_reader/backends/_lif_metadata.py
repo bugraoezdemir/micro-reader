@@ -258,8 +258,9 @@ def lif_metadata(element, shape: dict, index: dict, tiled: bool = False,
         except (TypeError, ValueError):
             continue
         unit = d.get("Unit") or ("s" if axis == "t" else "m")
-        if axis != "t" and unit == "m" and length == n - 1:
-            continue                # 1 m per sample: index space (FLIM phasor plots), no size
+        if axis != "t" and unit == "m" and length in (n - 1, 1):
+            continue                # 1 m per sample (FLIM phasor plots) or 1 m over the axis
+                                    # (a histogram's bins): index space, no size
         q = quantity(length / (n - 1), unit)
         if q:
             sizes[axis] = q

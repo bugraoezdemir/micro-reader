@@ -325,7 +325,7 @@ def test_points_named_after_wells_read_as_a_plate(tmp_path):
         assert [(im.index["well"], im.index["field"]) for im in f.images] == [
             (1, 0), (0, 0), (0, 1), (1, 1), (2, 0)]
         np.testing.assert_array_equal(plate.wells[0].fields[1].image[0, 0, 0], frames[2, ..., 0, 0])
-    with micro_reader.open(path) as f:                         # without plates=True: as before
+    with micro_reader.open(path, plates=False) as f:           # plates=False: by series
         assert f.plates == [] and f.images[0].index == {"series": 0}
 
 
@@ -427,14 +427,25 @@ def test_a_run_of_files_one_per_well_is_a_plate(tmp_path):
         assert (im.axes, im.shape) == ("tczyx", (3, 1, 1, 6, 8))
         np.testing.assert_array_equal(im[:, 0, 0], data["WellF04_ChannelDIC_Seq0014.nd2"][..., 0, 0])
         assert [c.name for c in im.metadata.channels] == ["DIC"] or im.metadata.channels[0].name
-    for kwargs in ({}, {"plates": True, "multifile": False}):         # the one file
+    for kwargs in ({"plates": False}, {"multifile": False}):          # the one file
         with micro_reader.open(first, **kwargs) as f:
             assert len(f.images) == 1 and f.plates == []
-    g = micro_reader.group_files(folder, plates=True)
+    g = micro_reader.group_files(folder)
     (group,) = g.groups
     assert not g.singles and len(group.members) == 2            # the run's other files
     assert os.path.basename(group.main) in data
-    assert len(micro_reader.group_files(folder).singles) == 3       # without plates: files
+    assert len(micro_reader.group_files(folder, plates=False).singles) == 3    # its files
+
+
+def test_a_run_folder_and_its_sample_folder_open_the_plate(tmp_path):
+    # MR-6 / gap hunt C-05: the folder listed the run's files
+    folder = str(tmp_path / "sample" / "20220701_140147")
+    _run(folder, {"WellB02_ChannelDIC_Seq0000.nd2": 100, "WellB03_ChannelDIC_Seq0001.nd2": 200})
+    for where in (folder, str(tmp_path / "sample")):
+        with micro_reader.open(where) as f:
+            assert f.format == "nd2-run" and len(f.plates[0].wells) == 2
+        with pytest.raises(micro_reader.MicroReaderError, match="with plates=True"):
+            micro_reader.open(where, plates=False)
 
 
 def test_a_run_of_files_one_per_point_has_the_points_as_fields(tmp_path):
@@ -530,3 +541,97 @@ def test_real_nis_runs_read_as_plates(folder, layout, wells, fields, shape):
         assert im.shape == shape and im.metadata.coordinate_system == "stage"
         with micro_reader.open(first) as alone:
             np.testing.assert_array_equal(im[0, 0, 0, :64, :64], alone.images[0][0, 0, 0, :64, :64])
+
+
+def test_a_version_2_chunked_file_decodes_as_version_3():
+    # the same fields as XML (jonas_*.nd2 of the nd2 package's samples: 14 of 14 files
+    # equal its pixels, but for one the package itself misreads)
+    from micro_reader.backends import _nd2_structure as structure
+    xml = (b'<?xml version="1.0"?><variant version="1.0"><no_name runtype="CLxListVariant">'
+           b'<uiWidth runtype="lx_uint32" value="348"/><dX runtype="double" value="0.5"/>'
+           b'<bOn runtype="bool" value="true"/><s runtype="CLxStringW" value="GFP"/>'
+           b'<uLoopPars runtype="CLxListVariant"><no_name runtype="RLx">'
+           b'<uiCount runtype="lx_uint32" value="26"/></no_name></uLoopPars>'
+           b'</no_name></variant>\x00')
+    assert structure.decode_xml(xml) == {"uiWidth": 348, "dX": 0.5, "bOn": True, "s": "GFP",
+                                         "uLoopPars": {"i0000000000": {"uiCount": 26}}}
+
+
+def test_a_legacy_file_gives_the_steps_of_its_loops():
+    from micro_reader.backends._nd2_metadata import legacy_metadata
+    sizes = legacy_metadata({"Calibration": 0.5}, {"z": 5, "t": 3}, {"z": 0.25, "t": 60000.0}).pixel_sizes
+    assert sizes["z"].value == 0.25 and sizes["t"] == (60000.0, "millisecond")
+    assert "z" not in legacy_metadata({}, {"z": 1}, {"z": 0.25}).pixel_sizes    # one plane: no step
+
+
+# -- the time step: the frames' own stamps first (gap hunt 2026-11-02, F-05) ----------
+
+def test_the_time_step_is_the_mean_of_the_frame_stamps(tmp_path):
+    path = tmp_path / "a.nd2"
+    write_nd2(path, _frames(4, channels=1), [("T", 4)], stamps=[5.0, 255.0, 505.0, 755.0])
+    with micro_reader.open(path) as f:
+        assert f.images[0].metadata.pixel_sizes["t"].value == pytest.approx(250.0)
+
+
+def test_each_position_has_its_stamps_and_z_planes_do_not_count(tmp_path):
+    path = tmp_path / "a.nd2"
+    stamps = [(t * 1000.0 + p * 300.0 + z * 10.0) for t in range(3) for p in range(2) for z in range(2)]
+    write_nd2(path, _frames(12, channels=1), [("T", 3), ("P", 2), ("Z", 2)], stamps=stamps)
+    with micro_reader.open(path) as f:
+        assert [i.metadata.pixel_sizes["t"].value for i in f.images] == [1000.0, 1000.0]
+
+
+def test_a_frame_never_written_does_not_stop_the_stamps(tmp_path):
+    path = tmp_path / "a.nd2"
+    write_nd2(path, _frames(4, channels=1), [("T", 4)], stamps=[0.0, 40.0, 80.0, 0.0], missing=(3,))
+    with micro_reader.open(path) as f:
+        assert f.images[0].metadata.pixel_sizes["t"].value == pytest.approx(40.0)
+
+
+def test_stamps_that_say_nothing_leave_the_loop_s_period(tmp_path):
+    path = tmp_path / "a.nd2"
+    write_nd2(path, _frames(3, channels=1), [("T", 3)], stamps=[0.0, 0.0, 0.0])
+    with micro_reader.open(path) as f:
+        assert f.images[0].metadata.pixel_sizes["t"].value == 100.0
+
+
+def test_the_loop_gives_the_measured_period_then_the_one_asked_for():
+    from micro_reader.backends._nd2_metadata import nd2_metadata
+    loop = {"eType": 1, "uLoopPars": {"dPeriod": 50.0, "dAvgPeriodDiff": 94.3}}
+    assert nd2_metadata({}, loop, 0, {}).pixel_sizes["t"].value == 94.3
+    assert nd2_metadata({}, loop, 0, {}, 30000.0).pixel_sizes["t"].value == 30000.0
+    del loop["uLoopPars"]["dAvgPeriodDiff"]
+    assert nd2_metadata({}, loop, 0, {}).pixel_sizes["t"].value == 50.0
+
+
+def _ne_loop(*periods):
+    return {"eType": 8, "uLoopPars": {"pPeriod": {f"i{n:010}": {"dPeriod": p}
+                                                  for n, p in enumerate(periods)}}}
+
+
+def test_periods_that_differ_warn():
+    from micro_reader.backends._nd2_metadata import nd2_metadata
+    with pytest.warns(UserWarning, match="periods of different intervals"):
+        nd2_metadata({}, _ne_loop(500.0, 50.0), 0, {}, 200.0, "a.nd2")
+
+
+def test_periods_the_file_marks_invalid_do_not_count(recwarn):
+    from micro_reader.backends._nd2_metadata import nd2_metadata
+    loop = _ne_loop(10000.0, 60000.0)
+    loop["uLoopPars"]["pPeriodValid"] = {"_00": True, "_01": False}
+    nd2_metadata({}, loop, 0, {}, 10000.0, "a.nd2")
+    loop["uLoopPars"]["pPeriodValid"] = bytes([1, 0])
+    nd2_metadata({}, loop, 0, {}, 10000.0, "a.nd2")
+    assert not recwarn.list
+
+
+def test_as_fast_as_possible_beside_a_period_warns():
+    from micro_reader.backends._nd2_metadata import nd2_metadata
+    with pytest.warns(UserWarning, match="periods of different intervals"):
+        nd2_metadata({}, _ne_loop(0.0, 500.0), 0, {}, 200.0, "a.nd2")
+
+
+def test_periods_alike_do_not_warn(recwarn):
+    from micro_reader.backends._nd2_metadata import nd2_metadata
+    nd2_metadata({}, _ne_loop(18322.0, 18341.0), 0, {}, 18330.0, "a.nd2")
+    assert not recwarn.list

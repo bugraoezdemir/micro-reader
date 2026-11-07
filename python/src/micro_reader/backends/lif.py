@@ -110,6 +110,10 @@ OTHER_INDICES = ("tile", "rotation", "emission", "excitation")
 XML_CODECS = ((b"\xef\xbb\xbf", "utf-8-sig"), (b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16"),
               (b"<\x00", "utf-16-le"), (b"\x00<", "utf-16-be"), (b"<", "utf-8"))
 IMAGE_FRAMES = (".jpg", ".jpeg", ".png", ".bmp")
+#: files of settings beside an image's data (lower case, without suffix)
+SETTINGS_FILES = ("frameproperties", "iomanagerconfiguation")
+#: how many folders up from a file of settings its experiment's .xlef is looked for
+EXPERIMENT_DEPTH = 8
 TIFF_FRAMES = (".tif", ".tiff")
 
 
@@ -122,7 +126,63 @@ def _xml_codec(head: bytes):
 
 def may_index(name: str) -> bool:
     """``group_files``' cheap test (reads nothing): XLEF, XLCF and XLIF files name the files their images come from."""
-    return name.lower().endswith(('.xlef', '.xlcf', '.xlif'))
+    return name.lower().endswith(('.xlef', '.xlcf', '.xlif')) and not _settings_file(name)
+
+
+def _settings_file(name: str) -> bool:
+    """A file LAS X writes beside an image's data, holding no image."""
+    stem, suffix = os.path.splitext(name.lower())
+    return stem in SETTINGS_FILES and suffix in (".xlif", ".lof")
+
+
+def _experiment(folder: str):
+    """The ``.xlef`` of a file in *folder*: there or in a folder above; else the
+    ``.lof`` the folder holds the frame properties of, beside the folder."""
+    above = folder
+    for _ in range(EXPERIMENT_DEPTH):
+        xlef = _parts.only_file(above, ".xlef")
+        if xlef is not None:
+            return xlef
+        above = os.path.dirname(above)
+    lof = folder + ".lof"
+    return lof if os.path.isfile(lof) else None
+
+
+def may_own(folder: str, name: str, folders) -> bool:
+    """``group_files``' cheap test (reads nothing but the folder listing
+    *folders* caches): a settings file, or a ``.lifext`` / ``.xml`` beside a ``.lif``."""
+    stem, suffix = os.path.splitext(name.lower())
+    return _settings_file(name) or (suffix in (".lifext", ".xml")
+                                    and stem + ".lif" in folders.names(folder))
+
+
+def owner(path: str, head):
+    """A settings file is a part of its experiment; a ``.lifext`` and an ``.xml``
+    of a ``.lif`` are parts of the ``.lif`` (the ``.lifext``, whose images are the
+    histograms and analysis blocks of its series, is read with ``multifile=False``)."""
+    if os.path.isdir(path):
+        return None
+    name = os.path.basename(path)
+    folder = os.path.dirname(os.path.abspath(path))
+    if _settings_file(name):
+        main = _experiment(folder)
+        return _parts.Part(main, main) if main is not None else None
+    stem, suffix = os.path.splitext(name)
+    if suffix.lower() in (".xlif", ".lof"):
+        # an element of an experiment: its .xlif in Metadata, its frames beside that
+        # folder.  The same image, name and systems as through the .xlef (gap hunt A-06)
+        element = suffix.lower() == ".xlif" and os.path.basename(folder).lower() == "metadata"
+        if not element and not any(os.path.isfile(os.path.join(folder, m, stem + ".xlif"))
+                                   for m in ("Metadata", "metadata")):
+            return None
+        main = _experiment(folder)
+        return _parts.Part(main, main, member=True) if main is not None else None
+    if suffix.lower() not in (".lifext", ".xml"):
+        return None
+    main = _parts.find(folder, stem + ".lif")
+    if main is None or (suffix.lower() == ".xml" and not sniff(head or b"", path)):
+        return None
+    return _parts.Part(main, main, member=suffix.lower() == ".lifext")
 
 
 def sniff(head: bytes, path: str) -> bool:
@@ -408,6 +468,7 @@ class _LifMosaic(Mosaic):
 
     def __init__(self, position, tiles, name, index, corner: dict):
         super().__init__(position, tiles, name, index)
+        self._own_name = name or None
         self._corner = corner                     # axis -> Quantity of the canvas corner
 
     def _read_metadata(self):
@@ -462,6 +523,8 @@ class _LifImage(Image):
             letters += "s"
         self._closed = False
         super().__init__(index, letters, shape, layout.dtype, name=name, index=key)
+        #: the element's Name, set in LAS X (``_naming``: Leica names every image)
+        self._own_name = name or None
 
     @property
     def tile_position(self):
@@ -553,7 +616,9 @@ class _LifFile(File):
         try:
             entries = self._collect(path, frozenset())
             if not entries:
-                raise CorruptFileError(f"{path!r}: no images")
+                hint = (": a file of settings; open the experiment's .xlef, or the image's "
+                        ".xlif or .lof" if _settings_file(os.path.basename(path)) else "")
+                raise CorruptFileError(f"{path!r}: no images{hint}")
             layouts = []
             for name, element, block, where in entries:
                 layout = _Layout(element, where, block.by_tags)

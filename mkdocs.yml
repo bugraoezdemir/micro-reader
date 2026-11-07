@@ -1,5 +1,6 @@
 site_name: micro-reader
 site_description: Memory-bounded pixel reader for microscopy images
+site_url: https://bugraoezdemir.github.io/micro-reader/
 repo_url: https://github.com/bugraoezdemir/micro-reader
 repo_name: bugraoezdemir/micro-reader
 
@@ -74,6 +75,7 @@ nav:
       - Axes: guide/axes.md
       - Resolution levels: guide/pyramids.md
       - Metadata: guide/metadata.md
+      - Coordinate systems: guide/coordinates.md
       - Plates (HCS): guide/plates.md
       - Multi-file images: guide/multi-file.md
       - Memory and threads: guide/performance.md
@@ -85,6 +87,7 @@ nav:
       - Image: reference/image.md
       - Metadata: reference/metadata.md
       - Plates: reference/plates.md
+      - Coordinate systems: reference/coordinates.md
       - Grouping: reference/grouping.md
       - Errors and warnings: reference/errors.md
       - Constants: reference/constants.md

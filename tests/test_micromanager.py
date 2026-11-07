@@ -67,7 +67,7 @@ def test_the_2_0_beta_naming(tmp_path):
     assert os.path.isfile(os.path.join(root, "Pos1", name_20(1, 1, 1, 0)))
     with micro_reader.open(os.path.join(root, "Pos1", name_20(0, 1, 1, 0))) as f:
         assert f.backend == "micromanager" and os.path.samefile(f.path, files[0])
-        assert [im.name for im in f.images] == ["beta Pos0", "beta Pos1"]
+        assert [im.name for im in f.images] == ["Pos0", "Pos1"]     # position labels (MR-2)
         assert [im.shape for im in f.images] == [(2, 2, 1, Y, X)] * 2
         _check_all(f, data)
         md = f.images[1].metadata
@@ -90,7 +90,7 @@ def test_positions_are_scenes_and_any_part_opens_them(tmp_path):
             assert f.backend == "micromanager" and os.path.samefile(f.path, files[0])
             assert f.opened == opened
             assert [im.index for im in f.images] == [{"series": k} for k in range(3)]
-            assert [im.name for im in f.images] == [f"acq {label}" for label in labels]
+            assert [im.name for im in f.images] == list(labels)          # position labels (MR-2)
             np.testing.assert_array_equal(f.images[2][1, 1, 0], data[(2, 1, 1, 0)])
     with micro_reader.open(root) as f:
         _check_all(f, data)
@@ -107,7 +107,7 @@ def test_pos_k_folders_without_a_position_list(tmp_path):
     data, files = write_acquisition(root, frames=1, positions=2, labels=None)
     assert sorted(os.listdir(root)) == ["Pos0", "Pos1", "display_and_comments.txt"]
     with micro_reader.open(os.path.join(root, "Pos1")) as f:
-        assert [im.name for im in f.images] == ["acq Pos0", "acq Pos1"]
+        assert [im.name for im in f.images] == ["Pos0", "Pos1"]     # position labels (MR-2)
         _check_all(f, data)
 
 
@@ -304,7 +304,7 @@ def test_the_2_0_0_naming_with_the_position_folder_in_the_file_name(tmp_path):
         warnings.simplefilter("error")
         with micro_reader.open(os.path.join(root, "Pos1", name_20(0, 1, 1, 0))) as f:
             assert f.backend == "micromanager" and os.path.samefile(f.path, files[0])
-            assert [im.name for im in f.images] == ["HJ Pos0", "HJ Pos1"]
+            assert [im.name for im in f.images] == ["Pos0", "Pos1"]     # position labels (MR-2)
             assert [im.shape for im in f.images] == [(3, 2, 1, Y, X)] * 2
             _check_all(f, data)
             md = f.images[1].metadata
@@ -358,12 +358,14 @@ def test_zenodo_6659532_micro_manager_2_0_0_subset():
     assert any("3900 image files are missing" in m for m in messages)
     with f:
         assert os.path.samefile(f.path, os.path.join(root, "Pos0", "metadata.txt"))
-        assert [im.name for im in f.images] == ["HJ Pos0", "HJ Pos1"]
+        assert [im.name for im in f.images] == ["Pos0", "Pos1"]     # position labels (MR-2)
         assert [im.shape for im in f.images] == [(1000, 2, 1, 1024, 1024)] * 2
         assert len(f._member_files()) == 2 * 25 * 2
         im = f.images[1]
         assert [c.name for c in im.metadata.channels] == ["637", "532"]
-        assert im.metadata.pixel_sizes == {}                  # PixelSizeUm 0.0: unknown
+        sizes = im.metadata.pixel_sizes                       # PixelSizeUm 0.0: unknown
+        assert set(sizes) == {"t"}                            # the planes' ElapsedTime-ms (N-63)
+        assert (round(sizes["t"].value, 2), sizes["t"].unit) == (93.62, "millisecond")
         assert im.metadata.stage_position["y"] == (897.85, UM)
         ref = tifffile.imread(os.path.join(root, "Pos1", name_20(24, 1, 1, 0)))
         np.testing.assert_array_equal(im[24, 1, 0], ref)
@@ -372,11 +374,11 @@ def test_zenodo_6659532_micro_manager_2_0_0_subset():
 
 @pytest.mark.parametrize("parts, backend, shapes, names", [
     (("ome-serge",), "micromanager", [(7, 4, 1, 2048, 2048)] * 2,
-     ["YAV_1724_1778_test_lectin_1 Pos0", "YAV_1724_1778_test_lectin_1 Pos1"]),
+     ["Pos0", "Pos1"]),
     (("ome-thomas", "test", "test_sep"), "micromanager", [(4, 2, 1, 128, 128)], ["test_sep"]),
     (("ome-thomas", "test", "test2_sep"), "micromanager", [(2, 2, 1, 128, 128)], ["test2_sep"]),
     (("aics-mm2-2pos", "image_stack_tpzc_50tp_2p_5z_3c_512k_1_MMStack_2-Pos000_000.ome.tif"),
-     "tiff", [(50, 5, 3, 256, 256)] * 2, ["series0", "series1"]),
+     "tiff", [(50, 5, 3, 256, 256)] * 2, ["2-Pos000_000", "2-Pos001_000"]),          # the position labels (N-61)
 ], ids=["serge-1.4.16", "thomas-1.4.22", "thomas-2.0-beta3", "aics-2.0-mmstack"])
 def test_the_other_micro_manager_samples_still_open(parts, backend, shapes, names):
     """1.4 image-per-file (bare FileName), the 2.0 beta and a 2.0 MMStack

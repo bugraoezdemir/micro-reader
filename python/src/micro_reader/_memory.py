@@ -92,10 +92,15 @@ def memory_limit() -> int:
 
 def set_memory_limit(limit: Union[int, float, str, None]) -> None:
     """Set the decoding memory budget (bytes or e.g. "8GB"); None restores
-    the default (environment variable, else a quarter of the memory)."""
+    the default (environment variable, else a quarter of the memory). A budget
+    below MINIMUM_LIMIT is raised to it; a negative one is refused."""
     global _limit
+    size = None if limit is None else parse_size(limit)
+    if size is not None and size < 0:
+        raise ValueError(f"set_memory_limit({limit!r}): a memory budget cannot be negative; "
+                         f"give bytes or e.g. '8GB', or None for the default")
     with _lock:
-        _limit = None if limit is None else max(MINIMUM_LIMIT, parse_size(limit))
+        _limit = None if size is None else max(MINIMUM_LIMIT, size)
 
 
 #: blocks larger than this are streamed where their codec allows: the

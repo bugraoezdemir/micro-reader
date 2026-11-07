@@ -98,9 +98,10 @@ def _plate_htd(folder: str, base: str):
 
 
 def owner(path: str, head):
-    """A plate's ``_thumb`` previews, the projection TIFFs in ``ZStep_0`` (not
-    read: not planes of the z series) and the copies of its ``.HTD`` in its
-    ``TimePoint_`` / ``ZStep_`` folders are parts of the plate's ``.HTD`` --
+    """A plate's planes (read alone with ``open(multifile=False)``), its ``_thumb``
+    previews, the projection TIFFs in ``ZStep_0`` (not read: not planes of the z
+    series) and the copies of its ``.HTD`` in its ``TimePoint_`` / ``ZStep_``
+    folders are parts of the plate's ``.HTD`` --
     only when that file exists (exact names: no folder listing), so a lone
     file named like one is not taken for a part."""
     if os.path.isdir(path):
@@ -115,11 +116,14 @@ def owner(path: str, head):
         same = htd is not None and os.path.normcase(htd) == os.path.normcase(os.path.abspath(path))
         return _parts.Part(htd, htd, standalone=True) if htd and not same else None
     match = NAME_RE.match(name)
-    if match is None or not ("thumb" in match["rest"].lower()
-                             or _projection_folder(os.path.basename(folder))):
+    if match is None:
         return None
     htd = _plate_htd(folder, match["base"])
-    return _parts.Part(htd, htd, standalone=True) if htd else None
+    if not htd:
+        return None
+    if not ("thumb" in match["rest"].lower() or _projection_folder(os.path.basename(folder))):
+        return _parts.Part(htd, htd, member=True)   # a plane: alone with multifile=False
+    return _parts.Part(htd, htd, standalone=True)
 
 
 def may_index(name: str) -> bool:

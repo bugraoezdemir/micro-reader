@@ -93,6 +93,8 @@ DEFAULT_TARGET = "Microscope Image"
 CORRECTION_PREFIXES = ("SC_", "DC_", "OTF_")
 #: files of a measurement folder that are parts of its main file (lower case)
 SIDE_EXTENSIONS = (".wpi", ".mrf", ".mlf", ".wpp", ".mes", ".ppp", ".ppf", ".icr", ".xml")
+#: a plane's file name: <plate>_<well>_T0001F001L01A01Z01C01.tif
+PLANE_NAME = re.compile(r"_[A-Za-z]+\d+_T\d+F\d+L\d+A\d+Z\d+C\d+\.tiff?$", re.IGNORECASE)
 
 
 #: folder -> (its modification time, its main entry): a measurement folder
@@ -131,8 +133,13 @@ def may_own(folder: str, name: str, folders) -> bool:
 
 def owner(path: str, head):
     """The entry, export and settings files of a measurement folder are
-    parts of its main file (module docstring)."""
-    if os.path.isdir(path) or not path.lower().endswith(SIDE_EXTENSIONS):
+    parts of its main file (module docstring); so are its planes, read
+    alone with ``open(multifile=False)``."""
+    if os.path.isdir(path):
+        return None
+    name = os.path.basename(path)
+    member = PLANE_NAME.search(name) is not None
+    if not member and not path.lower().endswith(SIDE_EXTENSIONS):
         return None
     folder = os.path.dirname(path)
     if not os.path.isfile(os.path.join(folder, DATA)):     # exact name: no folder listing
@@ -140,7 +147,7 @@ def owner(path: str, head):
     main = _main_entry(folder)
     if main is None or os.path.normcase(os.path.abspath(main)) ==             os.path.normcase(os.path.abspath(path)):
         return None
-    return _parts.Part(main, main)
+    return _parts.Part(main, main, member=member)
 
 
 def may_index(name: str) -> bool:
@@ -249,7 +256,7 @@ class _CVImage(PlaneImage):
         """The channel's description: the settings file's for camera channel *ch*,
         else a name from the action and channel; a channel a second timeline
         added (*run*: its TimelineIndex, 0 for the first) says so."""
-        channel = names.get(ch, Channel(name=f"Action {act}, Ch {ch}"))
+        channel = names.get((ch, act - 1), names.get((ch, 0), Channel(name=f"Action {act}, Ch {ch}")))
         if run:
             channel = replace(channel, name=f"{channel.name or f'Action {act}, Ch {ch}'} "
                                             f"(timeline {run})")
@@ -406,7 +413,7 @@ class _CVFile(File):
         root = _parse(mes)
         lights = {_a(e, "Name"): _float(e, "WaveLength")
                   for e in root.iterfind(".//{*}LightSource")}
-        out, fallback = {}, {}
+        out, fallback, seen = {}, {}, {}
         for e in root.iterfind(".//{*}Channel"):
             if _a(e, "Ch") is None:
                 continue
@@ -418,6 +425,10 @@ class _CVFile(File):
             if band.startswith("BP") and "/" in band:      # "BP445/45": centre / width
                 em = quantity(band[2:].split("/", 1)[0], "nm")
             ch = _int(e, "Ch")
+            # (Ch, k): the k-th entry of one Ch, for a Ch several actions use with other filters
+            k = seen.get(ch, 0)
+            seen[ch] = k + 1
+            ch = (ch, k)
             name = (_a(e, "Target") or "").strip()
             if name in ("", DEFAULT_TARGET):
                 # the software's default target names nothing: the light source does

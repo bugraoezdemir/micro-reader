@@ -62,7 +62,7 @@ from .. import _parts
 from .._base import File
 from .._errors import CompositeWarning, CorruptFileError, MicroReaderError, MissingImagesWarning
 from .._fileset import Members, PlaneImage, keep_fields
-from .._metadata import Channel, Metadata, color_hex, quantity
+from .._metadata import Channel, Metadata, color_hex, quantity, without_placeholder_white
 
 NAME = "micromanager"
 #: the index file of a set: a folder holding it opens it (docs/COMPOSITE.md)
@@ -71,6 +71,9 @@ METADATA = "metadata.txt"
 DISPLAY = "display_and_comments.txt"
 #: relative tolerance when metadata.txt and a plane's TIFF give one value
 TOLERANCE = 1e-6
+#: a time step by the planes' stamps that differs from the declared interval by more than this
+#: share is said (timer jitter stays below it)
+STAMP_TOLERANCE = 0.05
 #: the two plane file names (Micro-Manager 1.4; 2.0)
 NAME_14 = re.compile(r"img_(?P<t>\d+)_(?P<channel>.+)_(?P<z>\d+)\.tiff?", re.IGNORECASE)
 NAME_20 = re.compile(r"img_channel(?P<c>\d+)_position(?P<p>\d+)_time(?P<t>\d+)_z(?P<z>\d+)\.tiff?",
@@ -144,10 +147,12 @@ def _labels(summary: dict) -> list:
     list's labels (1.4 ``InitialPositionList``, 2.0 ``StagePositions``) when it
     lists them all, else ``Pos<k>`` (Micro-Manager's default label)."""
     n = max(1, _count(summary, "Positions"))
-    for key, field in (("InitialPositionList", "Label"), ("StagePositions", "label")):
+    for key in ("InitialPositionList", "StagePositions"):
         listed = summary.get(key)
         if isinstance(listed, list) and len(listed) == n:
-            labels = [p.get(field) if isinstance(p, dict) else None for p in listed]
+            # 2.0 writes "Label" too (an AICS sample: StagePositions[k]["Label"])
+            labels = [(p.get("Label") or p.get("label")) if isinstance(p, dict) else None
+                      for p in listed]
             if all(isinstance(x, str) and x for x in labels):
                 return labels
     return [f"Pos{k}" for k in range(n)]
@@ -457,6 +462,22 @@ class _MMImage(PlaneImage):
         super().__init__(*args, **kwargs)
         self._owner, self._meta = owner, meta
 
+    def _elapsed_step(self) -> Optional[float]:
+        """ms: the mean between the first and last frame's ``ElapsedTime-ms`` (one channel,
+        one slice): before the Summary's interval (review cycle 1, N-63: a 1.4 set without
+        Interval_ms had no time step, though every plane records its time)."""
+        if not self._meta:
+            return None
+        first = min(self._meta)
+        last = max((key for key in self._meta if key[1:] == first[1:]), default=first)
+        if last[0] == first[0]:
+            return None
+        times = [_unwrap(self._meta[key].get("ElapsedTime-ms")) for key in (first, last)]
+        if not all(isinstance(t, (int, float)) and not isinstance(t, bool) for t in times) \
+                or times[1] <= times[0]:
+            return None
+        return (times[1] - times[0]) / (last[0] - first[0])
+
     def _read_metadata(self):
         f, summary = self._owner, self._owner._summary
         first = min(self._planes) if self._planes else None
@@ -490,7 +511,15 @@ class _MMImage(PlaneImage):
         dz = _positive(summary.get("z-step_um"))
         if dz is not None and self.shape[2] > 1:
             sizes["z"] = quantity(dz, "micrometer")
-        dt = f._time_step()
+        # the planes' own stamps first, then the declared interval, as for ND2 (Bugra,
+        # 2026-11-04): the stamps say what happened, the Summary what was asked for
+        stamped = self._elapsed_step() if self.shape[0] > 1 else None
+        declared = f._time_step()
+        dt = stamped if stamped is not None else declared
+        if stamped is not None and declared is not None \
+                and abs(stamped - declared) > STAMP_TOLERANCE * declared:
+            told.append(f"time step (ms): {stamped:g} by the planes' ElapsedTime-ms, "
+                        f"{declared:g} asked for in the Summary")
         if dt is not None and self.shape[0] > 1:
             sizes["t"] = quantity(dt, "millisecond")
         stage = {}
@@ -569,6 +598,10 @@ class _MMFile(File):
             name = base if len(listed) == 1 else f"{base} {label}"
             images.append(_MMImage(self._members, len(images), kept[k], (nt, nc, nz) + tuple(shape_yx),
                                    dtype, name, unit, {"series": k}, owner=self, meta=metas[k]))
+            # _naming: the acquisition's name for one position (the main file is
+            # metadata.txt), the position's label to tell several apart
+            images[-1]._own_name = base if len(listed) == 1 else None
+            images[-1]._label = label
         return images
 
     def _time_step(self) -> Optional[float]:
@@ -590,9 +623,10 @@ class _MMFile(File):
         colors = self._summary.get("ChColors")
         names = names if isinstance(names, list) else []
         colors = colors if isinstance(colors, list) and len(colors) == len(names) else []
-        return tuple(Channel(name=str(names[c]) if c < len(names) and names[c] not in (None, "") else None,
-                             color=_argb(colors[c]) if c < len(colors) else None)
-                     for c in range(self._nc))
+        return without_placeholder_white(tuple(
+            Channel(name=str(names[c]) if c < len(names) and names[c] not in (None, "") else None,
+                    color=_argb(colors[c]) if c < len(colors) else None)
+            for c in range(self._nc)))
 
     def _side_files(self) -> set:
         """The other positions' ``metadata.txt`` and ``display_and_comments.txt``:
