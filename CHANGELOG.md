@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.4.0 (unreleased)
+## 0.4.1 (unreleased)
+
+### New
+
+- BigDataViewer / BigStitcher tiles open as one image with `tiles="mosaic"` (they were
+  refused): every level of each angle's and illumination's tiles on one canvas, at their
+  nominal positions (the acquisition grid or tile configuration, not a stitching result),
+  rounded to whole pixels; the later tile supplies the pixel where tiles overlap, nothing is
+  blended. The image is placed at the canvas corner in `global`. Tiles that cannot be placed
+  so (a turned, sheared or mirrored view, tiles apart along z, different pixel sizes) are
+  still refused, naming why. On BigStitcher's grid-3d sample, 6 tiles of 512 x 512 make one
+  1434 x 973 image.
+
+## 0.4.0 (2026-11-07)
 
 ### New
 
