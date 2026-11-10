@@ -21,7 +21,13 @@ HDF5::
 
 Images: one per tile, angle and illumination (indices ``tile``, ``view``,
 ``illumination``, each only when it takes several values), its channels the
-``c`` axis and its time points the ``t`` axis: ``tczyx``.  Stored levels are
+``c`` axis and its time points the ``t`` axis: ``tczyx``.  With
+``tiles="mosaic"`` the tiles of each angle and illumination are one image
+(``_mosaic.Mosaic``): every level of the tiles placed on one canvas at their
+nominal positions (below), a whole number of pixels from its corner, the later
+tile on top where they overlap; nothing registered or blended.  Tiles that
+cannot be placed so (no position, positions apart along z, different pixel
+sizes) are refused: read them with ``tiles="separate"``.  Stored levels are
 the image's ``resolutions``.  BigDataViewer stores unsigned 16-bit pixels as
 signed 16-bit HDF5 data; they are read as ``uint16``.
 
@@ -64,6 +70,7 @@ import numpy as np
 
 from .. import _parts
 from .._base import File, Image
+from .._mosaic import Mosaic
 from .._errors import (CompositeWarning, CorruptFileError, MissingImagesWarning,
                        UnsupportedFormatError)
 from .._metadata import Channel, Metadata, Quantity, quantity
@@ -455,6 +462,106 @@ class _BdvImage(Image):
         self._closed = True
 
 
+class _BdvMosaic(Mosaic):
+    """The tiles of one angle / illumination at one level on one canvas
+    (``tiles="mosaic"``); its metadata is the first tile's, placed at the canvas
+    corner."""
+
+    def __init__(self, position, tiles, name, index, corner: dict, members: set):
+        super().__init__(position, tiles, name, index)
+        self._corner = corner                     # axis -> Quantity of the canvas corner
+        self._members = members
+        self._own_name = None
+
+    def _read_metadata(self):
+        from dataclasses import replace
+        md = self._tiles[0][0].metadata
+        return replace(md, position={**md.position, **self._corner})
+
+    def _member_paths(self) -> set:
+        return set(self._members)
+
+
+class _PlacedViews:
+    """The placement of a mosaic: its canvas corner, a position in ``GLOBAL``
+    and no edge (the tiles' registrations do not carry over to the canvas)."""
+
+    def __init__(self, position: dict):
+        self._placement = _Placement(position)
+
+    def placement(self) -> "_Placement":
+        return self._placement
+
+
+def _mosaics(pyramids: list, where: str) -> list:
+    """Each angle / illumination's tile pyramids as one pyramid of mosaics: every
+    level's tiles at their nominal positions (``_place``), in pixels of that level
+    from the canvas corner, rounded to whole pixels (as LIF tile scans are); drawn in
+    tile order, the later on top.  Refused (UnsupportedFormatError, naming why) when a
+    tile has no position along y and x, the tiles lie apart along another axis (the
+    canvas is a y / x plane), or their pixel sizes or numbers of levels differ."""
+    groups: dict = {}
+    for pyramid in pyramids:
+        key = tuple((k, v) for k, v in pyramid[0].index.items() if k != "tile")
+        groups.setdefault(key, []).append(pyramid)
+    out = []
+    for key, members in groups.items():
+        members.sort(key=lambda pyramid: pyramid[0].index["tile"])
+        label = " ".join(f"{k} {v}" for k, v in key if k != "series")
+        what = f"{where}: tiles='mosaic'{f' ({label})' if label else ''}"
+        placed = [pyramid[0]._views.placement().position for pyramid in members]
+        if any(not {"x", "y"} <= set(position) for position in placed):
+            raise UnsupportedFormatError(
+                f"{what}: a tile has no position on the acquisition grid (its views turn, "
+                f"shear or mirror, or disagree): read the tiles with tiles='separate'")
+        for axis in sorted(set().union(*placed) - {"x", "y"}):
+            values = {round(position[axis].to(placed[0][axis].unit).value, 9)
+                      for position in placed if axis in position}
+            if len(values) > 1 or any(axis not in position for position in placed):
+                raise UnsupportedFormatError(
+                    f"{what}: the tiles lie apart along {axis} ({sorted(values)}); a mosaic "
+                    f"places tiles in y and x only: read them with tiles='separate'")
+        sizes = [pyramid[0].metadata.pixel_sizes for pyramid in members]
+        unit = placed[0]["x"].unit
+        steps = []
+        for axis in "yx":
+            if any(axis not in size for size in sizes):
+                raise UnsupportedFormatError(f"{what}: a tile has no pixel size along {axis}")
+            values = {round(size[axis].to(unit).value, 12) for size in sizes}
+            if len(values) != 1:
+                raise UnsupportedFormatError(f"{what}: the tiles' pixel sizes along {axis} "
+                                             f"differ ({sorted(values)})")
+            steps.append(values.pop())
+        if len({len(pyramid) for pyramid in members}) != 1:
+            raise UnsupportedFormatError(f"{what}: the tiles store different numbers of "
+                                         f"levels {sorted({len(p) for p in members})}")
+        y0 = min(position["y"].to(unit).value for position in placed)
+        x0 = min(position["x"].to(unit).value for position in placed)
+        offsets = [((position["y"].to(unit).value - y0) / steps[0],
+                    (position["x"].to(unit).value - x0) / steps[1]) for position in placed]
+        corner = {"y": Quantity(y0, unit), "x": Quantity(x0, unit)}
+        views = _PlacedViews({**placed[0], **corner})
+        files = set().union(*(pyramid[0]._member_paths() for pyramid in members))
+        mosaic_pyramid = []
+        for level in range(len(members[0])):
+            canvas = []
+            for pyramid, (dy, dx) in zip(members, offsets):
+                base, image = pyramid[0], pyramid[level]
+                fy = base.shape[-2] / image.shape[-2]          # this level's downsampling
+                fx = base.shape[-1] / image.shape[-1]
+                canvas.append((image, round(dy / fy), round(dx / fx)))
+            first = members[0][level]
+            index = {k: v for k, v in first.index.items() if k != "tile"}
+            name = f"{where} {label}".strip()
+            mosaic = _BdvMosaic(0, canvas, name, index, corner, files)
+            mosaic._views = views
+            mosaic_pyramid.append(mosaic)
+        for mosaic in mosaic_pyramid:
+            mosaic._resolutions = mosaic_pyramid
+        out.append(mosaic_pyramid)
+    return out
+
+
 def _pixel_type(datasets, declared: set, where: str):
     """(dtype the image has, view to apply to the stored values or None).
     bdv-core (Hdf5ImageLoader): a setup group's ``dataType`` attribute names the
@@ -558,10 +665,6 @@ def _build(h5, path: str, xml: Optional[_Xml], resolutions: str, tiles: str,
     else:
         dims, index_names, ranks = ["sequence"], ["sequence"], {"sequence": [s.id for s in setups]}
         groups = {(s.id,): [s] for s in setups}
-    if tiles == "mosaic" and "tile" in index_names:
-        raise UnsupportedFormatError(f"{where}: tiles='mosaic': micro-reader does not compose "
-                                     "BigDataViewer tiles (each tile is its own image)")
-
     absent = []
     images_by_level = []
     for g, (gkey, group) in enumerate(sorted(groups.items())):
@@ -622,6 +725,8 @@ def _build(h5, path: str, xml: Optional[_Xml], resolutions: str, tiles: str,
             image._resolutions = pyramid
             image._own_name = own
         images_by_level.append(pyramid)
+    if tiles == "mosaic" and "tile" in index_names and images_by_level:
+        images_by_level = _mosaics(images_by_level, where)
     lost = getattr(xml, "missing_files", [])
     lost_text = (f"; {len(lost)} of the partition files the XML lists are missing (e.g. "
                  f"{lost[0]!r})" if lost else "")

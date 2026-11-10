@@ -394,10 +394,60 @@ def test_bdv_other_loader_refused(tmp_path):
         micro_reader.open(tmp_path / "dataset.xml")
 
 
-def test_bdv_mosaic_refused(tmp_path):
-    write_bdv(tmp_path)
-    with pytest.raises(UnsupportedFormatError, match="mosaic"):
+def test_bdv_tiles_as_a_mosaic(tmp_path):
+    """tiles="mosaic": a dataset's tiles on one canvas at their nominal positions (the
+    writer's grid: tile k 45 pixels right of tile k-1), the later tile on top where they
+    overlap, every pixel a copy of a stored one; its position is the canvas corner, in
+    global, with no edge (the tiles' own placements do not carry over)."""
+    from micro_reader._spatial import check_invariants
+    stored = write_bdv(tmp_path, tiles=3)                    # (6, 40, 50) each, 2 channels
+    with micro_reader.open(tmp_path / "dataset.xml", tiles="mosaic") as f:
+        assert len(f.images) == 1
+        image = f.images[0]
+        assert "tile" not in image.index and image.shape == (2, 2, 6, 40, 140)
+        assert [(t.index["tile"], y, x) for t, y, x in image.tiles] == [(0, 0, 0), (1, 0, 45),
+                                                                         (2, 0, 90)]
+        want = np.zeros(image.shape, dtype=np.uint16)
+        for (t, tile, c, level), arr in stored.items():
+            if level == 0:
+                want[t, c, :, :, 45 * tile:45 * tile + 50] = arr.view(np.uint16)
+        np.testing.assert_array_equal(image.read(), want)
+        np.testing.assert_array_equal(image[1, 0, 2:4, 10:30, 40:100], want[1, 0, 2:4, 10:30, 40:100])
+        md = image.metadata
+        assert md.coordinate_system == "global"
+        assert md.position["x"].value == 0 and md.position["y"].value == 0
+        assert [s.id for s in f.coordinate_systems] == ["global"]
+        assert f.coordinate_transformations == ()
+        check_invariants(f)
+
+
+def test_bdv_mosaic_levels(tmp_path):
+    """Every stored level is a mosaic of that level's tiles, the corners in that level's
+    pixels (45 / 2 rounded)."""
+    write_bdv(tmp_path, tiles=2)                             # level 1: x and y halved
+    with micro_reader.open(tmp_path / "dataset.xml", tiles="mosaic", resolutions="all") as f:
+        assert [im.index for im in f.images] == [{"series": 0, "resolution": 0},
+                                                 {"series": 0, "resolution": 1}]
+        level1 = f.images[1]
+        assert [(y, x) for _t, y, x in level1.tiles] == [(0, 0), (0, round(45 / 2))]
+        assert level1.shape[-2:] == (20, round(45 / 2) + 25)
+
+
+@pytest.mark.parametrize("why, transforms", [
+    ("apart along z", lambda tile: [("Translation to Regular Grid",
+                                     (1, 0, 0, 45.0 * tile, 0, 1, 0, 0, 0, 0, 1, 3.0 * tile)),
+                                    CALIBRATION]),
+    ("no position", lambda tile: [("Translation to Regular Grid", TURNED if tile else GRID),
+                                  CALIBRATION]),
+], ids=["z", "turned"])
+def test_bdv_mosaic_refused_when_tiles_cannot_be_placed(tmp_path, why, transforms):
+    """Tiles apart along z (the canvas is a y / x plane) or a tile without a position
+    (a turned view): refused, naming why, so a caller can read them separately."""
+    write_bdv(tmp_path, transforms=transforms)
+    with pytest.raises(UnsupportedFormatError, match=why):
         micro_reader.open(tmp_path / "dataset.xml", tiles="mosaic")
+    with micro_reader.open(tmp_path / "dataset.xml", tiles="separate") as f:
+        assert len(f.images) == 2
 
 
 def test_bdv_group_files(tmp_path):
