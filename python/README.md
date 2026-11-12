@@ -808,6 +808,28 @@ export MICRO_READER_DECODE_THREADS=4
 
 The native codec implementations are provided by the separate Rust package `micro-reader-codecs`, which is installed automatically.
 
+### Benchmarks
+
+Measured with micro-reader 0.4.3 on a laptop (Intel Core Ultra 7 255H, 16 cores, 31 GB RAM, NVMe SSD, Windows 11), on an otherwise idle machine, files in the OS file cache, default settings (16 decoding threads). Each number is the median of three runs, each in a fresh process. A 512 × 512 region is the median over 100 random regions at full resolution. Peak memory is the process's peak memory above its level after opening the file, during the read, including the returned array.
+
+| File | File size | Read | Time | Peak memory |
+| --- | ---: | --- | ---: | ---: |
+| Hamamatsu NDPI slide (JPEG) | 198 MB | 512 × 512 RGB region | 4.0 ms | |
+| | | 8192 × 8192 RGB region (192 MB) | 0.39 s | 377 MB |
+| Aperio SVS slide (JPEG) | 596 MB | 512 × 512 RGB region | 1.5 ms | |
+| | | 8192 × 8192 RGB region (192 MB) | 0.21 s | 380 MB |
+| Zeiss CZI slide scan (JPEG XR, 6,093 tiles) | 3.6 GB | 512 × 512 RGB region | 28 ms | |
+| | | 8192 × 8192 RGB region (192 MB) | 0.50 s | 376 MB |
+| Zeiss CZI fluorescence mosaic (5 × 9 tiles per well) | 738 MB | 512 × 512 region | 0.15 ms | |
+| | | one channel of a well: 2 t × 4 z of 3444 × 2944 (77 MB) | 0.02 s | 78 MB |
+| Micro-Manager OME-TIFF | 435 MB | 512 × 512 region | 0.49 ms | |
+| | | one channel: 28 t of 1608 × 1608 (138 MB) | 0.01 s | 139 MB |
+| Nikon ND2, 46 XY points | 395 MB | the whole file: 46 points × 31 t × 2 c (362 MB) | 0.10 s | 357 MB |
+| Imaris IMS (gzip chunks) | 452 MB | one channel: 312 z of 512 × 512 (78 MB) | 0.03 s | 153 MB |
+| CellVoyager CV8000 plate: 384 wells, 2,304 fields, 18,452 files | 35 GB | open | 0.67 s | |
+
+JPEG XR regions cost the most: the tiles of this scan are 1600 × 1200 and can only be decoded whole, so a small region costs one to four whole-tile decodes, which run in parallel. Numbers vary with hardware, storage and whether the file is already in the OS cache.
+
 ## Memory usage
 
 Memory usage is controlled by a configurable limit:

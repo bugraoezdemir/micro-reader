@@ -1,6 +1,33 @@
 # Changelog
 
-## 0.4.2 (unreleased), with micro-reader-codecs 0.0.3
+## 0.4.3 (2026-11-12), with micro-reader-codecs 0.0.4
+
+Requires micro-reader-codecs 0.0.4 (`>=0.0.4,<0.1`).
+
+### Faster
+
+- CZI: a small region over several compressed tiles (a viewer's 512 x 512 region of a
+  slide scan touches 1-4) decodes those tiles in parallel, then composes them; they were
+  decoded one after another. Random 512 x 512 regions of a Zeiss JPEG XR scan: 41 ms ->
+  21 ms. Reads larger than half the decode cache stay band by band.
+- Zeiss JPEG XR slide scans: a tile is decoded straight into micro-reader's buffer in the
+  B, G, R order the CZI stores, with no colour conversion and no copies afterwards (jxrlib
+  turned it into R, G, B and micro-reader turned it back). A 512 x 512 region inside a
+  1600 x 1200 tile: 39 ms -> 31 ms on one thread. Pixels unchanged
+  (every CZI of the real-data run compares as before).
+- micro-reader-codecs 0.0.4 builds jxrlib with `NDEBUG`, as CMake release builds (libCZI's,
+  imagecodecs') do: its bit reader checked assertions on every symbol it read. About 6 % less
+  CPU per JPEG XR tile.
+- micro-reader-codecs 0.0.4: `jpegxr_decode_into(data, out, bgr=True)` keeps 8-bit
+  B, G, R(, A) codestreams as stored; it returns the order written as a sixth value. With
+  micro-reader-codecs 0.0.3 micro-reader still works, swapping the channels itself.
+
+### Documentation
+
+- README: a benchmark table (Performance): region and large-read times and peak memory for
+  slides, CZI, Micro-Manager, ND2, Imaris and a 384-well plate.
+
+## 0.4.2 (2026-11-12), with micro-reader-codecs 0.0.3
 
 Requires micro-reader-codecs 0.0.3 (`>=0.0.3,<0.1`). imagecodecs (the `[codecs]` extra) is
 needed only for LERC, CCITT fax, float24 and a few rarer TIFF codecs now.

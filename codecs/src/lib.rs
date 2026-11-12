@@ -664,17 +664,20 @@ fn eer_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyAn
 /// A JPEG XR codestream -> `out` through jxrlib, in the layout imagecodecs'
 /// `jpegxr_decode` gives (its pixel-format table and jxrlib's converter): colour as
 /// R, G, B(, A); fixed point as float32.  `out` must hold exactly the decoded
-/// image.  Returns (width, height, samples, bytes per sample, kind): kind "uint",
-/// "float", "half" or "bool".
+/// image.  `bgr=True`: an 8-bit B, G, R(, A) codestream (Zeiss CZI tiles) comes out as
+/// stored, with no conversion pass.  Returns (width, height, samples, bytes per
+/// sample, kind, order): kind "uint", "float", "half" or "bool"; order "bgr" or "rgb"
+/// (the colour order written, "rgb" also for one sample).
 #[cfg(feature = "jxrlib")]
 #[pyfunction]
-fn jpegxr_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyAny>)
-    -> PyResult<(usize, usize, usize, usize, &'static str)> {
+#[pyo3(signature = (data, out, bgr = false))]
+fn jpegxr_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyAny>, bgr: bool)
+    -> PyResult<(usize, usize, usize, usize, &'static str, &'static str)> {
     with_buffers(py, data, out, |input, output| {
         // one pass: the shim checks the size against `out` before decoding
-        let (w, h, kind, bytes, samples) = cdecoders::jxr_decode(input, output)?;
+        let (w, h, kind, bytes, samples, is_bgr) = cdecoders::jxr_decode(input, output, bgr)?;
         let kind = match kind { 1 => "float", 2 => "half", 3 => "bool", _ => "uint" };
-        Ok((w, h, samples, bytes, kind))
+        Ok((w, h, samples, bytes, kind, if is_bgr { "bgr" } else { "rgb" }))
     })
 }
 

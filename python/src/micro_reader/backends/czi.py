@@ -544,15 +544,18 @@ class _CziImage(Image):
 
     def _image_codec(self, s: Subblock, data: bytes, tile) -> None:
         """JPEG, JPEG lossless, JPEG XR, JPEG XL: they give R, G, B; stored
-        into *tile* in the file's B, G, R order like every other codec."""
+        into *tile* in the file's B, G, R order like every other codec.  JPEG XR
+        decodes straight into *tile* in that order (Zeiss tiles store B, G, R: no
+        conversion and no copy; a 1600 x 1200 tile spent ~10 ms of ~40 on them)."""
+        if s.compression == JPEG_XR:
+            view = tile.reshape(s.height, s.width, self._samples)     # *tile* is contiguous
+            _codecs.jpegxr_decode_into(data, view, bgr=self._samples > 1)
+            return
         decoded = np.empty((s.height, s.width, self._samples), self._file_dtype)
         if s.compression in (JPEG, JPEG_LOSSLESS):
             width, height, samples, bits = _codecs.jpeg_decode_into(data, decoded)
-        elif s.compression == JPEG_XL:
+        else:                                            # JPEG_XL
             width, height, samples, bits = _codecs.jxl_decode_into(data, decoded)
-        else:                                            # JPEG_XR
-            _codecs.jpegxr_decode_into(data, decoded)
-            width, height, samples = s.width, s.height, self._samples
         if (width, height, samples) != (s.width, s.height, self._samples):
             raise CorruptFileError(
                 f"{self._czi.path!r}: subblock codestream is {width} x {height} x {samples}, "
@@ -781,6 +784,33 @@ class _CziImage(Image):
                 read += self._draw(s, piece, y0, xs, dst)
         return read
 
+    def _predecode(self, bands, xs) -> int:
+        """A read with fewer row bands than tiles to decode whole (a viewer's
+        512 x 512 region of a slide scan: one band, 1-4 JPEG XR tiles) would decode
+        them one after another inside its band: decode them on the pool first, into
+        the decode cache, and the bands only compose.  Only what the cache can keep
+        (half its limit), so larger reads stay band by band; the pixels decoded."""
+        if _pool.decode_threads() < 2:
+            return 0
+        from .. import _io
+        cache = self._czi.decode_cache
+        want, total = {}, 0
+        for tiles, b0, b1 in bands:
+            region = (b0, b1, xs.start, xs.stop)
+            for i in tiles.query(region):
+                s = tiles.subblocks[i]
+                if s.compression == UNCOMPRESSED or s.position in want:
+                    continue
+                nbytes = s.height * s.width * self._samples * self._file_dtype.itemsize
+                if _memory.should_stream(nbytes) or nbytes > cache.max_bytes // 4 \
+                        or not tiles.visible(i, region) or cache.get(s.position) is not None:
+                    continue
+                want[s.position] = s
+                total += nbytes
+        if len(want) <= len(bands) or total > _io.cache_limit() // 2:
+            return 0
+        return _pool.run([lambda s=s: self._decoded(s)[1] for s in want.values()])
+
     def _read_block(self, block):
         if self._closed:
             raise ValueError("this CZI image has been closed: its file was closed "
@@ -792,7 +822,7 @@ class _CziImage(Image):
                        + ((self._samples,) if ss is not None else ()), dtype=self.dtype)
         row_bytes = max(1, (xs.stop - xs.start) * self._samples * self._file_dtype.itemsize)
         per_task = max(1, RAW_TASK_BYTES // row_bytes)
-        tasks = []
+        tasks, bands = [], []
         for key in itertools.product(*(range(s.start, s.stop) for s in plane_spans)):
             tiles = self._planes.get(key)
             if tiles is None:
@@ -802,8 +832,10 @@ class _CziImage(Image):
             for b0 in range(ys.start, ys.stop, rows_per_task):
                 b1 = min(ys.stop, b0 + rows_per_task)
                 part = dst[b0 - ys.start:b1 - ys.start]
+                bands.append((tiles, b0, b1))
                 tasks.append(lambda a=(tiles, b0, b1, xs, part): self._draw_band(*a))
-        read = _pool.run(tasks)
+        read = self._predecode(bands, xs)
+        read += _pool.run(tasks)
         if ss is not None and (ss.start, ss.stop) != (0, self._samples):
             out = out[..., ss]
         return out, read
