@@ -169,7 +169,7 @@ def test_czi_mosaic_scene_has_its_stored_pyramid(tmp_path):
         np.testing.assert_array_equal(levels[1][0, 0, 0], half)       # both halves in place
         np.testing.assert_array_equal(levels[2][0, 0, 0], quarter)
         np.testing.assert_array_equal(levels[1][0, 0, 0, 5:20, 10:25], half[5:20, 10:25])
-        assert levels[1].origin == (50, 20)                      # the series corner x zoom
+        assert levels[1].origin == (20, 50)                      # the series corner x zoom
     with micro_reader.open(path, tiles="mosaic", resolutions="all") as f:
         assert f.indices == [{"series": 0, "resolution": k} for k in range(3)]
 

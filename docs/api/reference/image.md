@@ -30,7 +30,7 @@ The end of the printout shows the read unit (`any rectangle`, or `unit (1, 1, 64
 | `stats` | [`ReadStats`](#readstats) | What this image has read so far. |
 | `metadata` | [`Metadata`](metadata.md#metadata) | Pixel sizes, position, coordinate system, channels and index values, read on first access. |
 | `source` | `Image` | **Images made by `as_axes` / `squeeze` / `open(axes=...)` only, and RGB images of `open` (its default `samples="channels"`).** The native image. |
-| `origin` | `tuple[int, int]` | **CZI only:** `(x, y)` of the image's corner in the file's pixel coordinates. **Images made with `tiles="mosaic"` from other formats:** `(y, x)`, the canvas corner in the tiles' pixel grid. Note the order. |
+| `origin` | `tuple[int, int]` | **CZI images and images made with `tiles="mosaic"` only.** `(y, x)` of the image's corner, in the order of the image's axes. On CZI, in the file's own pixel coordinates (libCZI and ZEN write them x first). On mosaics from other formats, in the tiles' pixel grid: the tiles are placed from the canvas corner, so it is `(0, 0)`; the corner's stage position is `metadata.position`. (Before micro-reader 0.4.2 CZI images gave `(x, y)`.) |
 | `tiles` | `list[tuple[Image, int, int]]` | **Images made with `tiles="mosaic"` from other formats only.** `(tile, y, x)` for each tile and its corner on the canvas, in drawing order (later on top). |
 | `palette` | `numpy.ndarray` or `None` | **PNG / BMP only.** Colour palette `(n, 3 or 4)` `uint8`, when pixels are palette indices. |
 
@@ -88,10 +88,10 @@ image.read(y=slice(0, None, 2), x=slice(0, None, 2))  # every second pixel
 ### `read_region`
 
 ```python
-Image.read_region(x, y, width, height, **planes) -> numpy.ndarray     # CZI only
+Image.read_region(*, y, x, height, width, **planes) -> numpy.ndarray     # CZI only
 ```
 
-A rectangle in the file's own pixel coordinates (see `origin`), composed from the series' tiles. Parts outside the image are 0. `planes` selects the other axes like `read()`. Raises `ValueError` for a negative size.
+A rectangle in the file's own pixel coordinates (see `origin`), composed from the series' tiles. Parts outside the image are 0. `planes` selects the other axes like `read()`. Raises `ValueError` for a negative size. Keywords only: before micro-reader 0.4.2 it took `(x, y, width, height)` by position, so a positional call raises `TypeError` rather than reading with y and x swapped.
 
 ## Layout
 

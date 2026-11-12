@@ -43,7 +43,7 @@ def test_views_and_rotations_are_images_not_axes(tmp_path):
         for image in f.images:
             assert image.axes == "tczyx" and image.shape == (1, 2, 1, H, W)
             r, v = image.index["rotation"], image.index["view"]
-            assert image.origin == (10 * v, 5 * r)
+            assert image.origin == (5 * r, 10 * v)
             for c in range(2):
                 np.testing.assert_array_equal(
                     image[0, c, 0], data[(0, None, (("C", c), ("R", r), ("V", v)))])

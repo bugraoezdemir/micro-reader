@@ -76,14 +76,24 @@ def zstd_decompress_into(data, out: np.ndarray, *, native: bool | None = None) -
         raise CorruptFileError(f"zstd data decodes to {written} bytes, expected {len(view)}")
 
 
-def _imagecodecs(what: str):
+def _imagecodecs(what: str, native_from: str | None = None):
+    """imagecodecs, or an error naming the way out: *native_from*, the
+    micro-reader-codecs release whose native decoder reads it, when there is one."""
     try:
         import imagecodecs
     except ImportError as exc:
-        raise MicroReaderError(
-            f"{what} needs micro-reader's native module or the [codecs] extra (imagecodecs)"
-        ) from exc
+        fix = 'pip install "micro-reader[codecs]"'
+        if native_from:
+            fix = (f'pip install -U "micro-reader-codecs>={native_from}" (its own decoder), '
+                   f"or {fix}")
+        raise MicroReaderError(f"{what} needs a decoder that is not installed: {fix}") from exc
     return imagecodecs
+
+
+def has_libjpeg_turbo() -> bool:
+    """micro-reader-codecs links libjpeg-turbo (0.0.3 on): every JPEG micro-reader
+    decodes, NDPI's and 12-bit ones included, at its speed and with its pixels."""
+    return bool(getattr(_native, "HAS_LIBJPEG_TURBO", False))
 
 
 def _use_native(native, name: str) -> bool:
@@ -360,11 +370,14 @@ def jpeg_decode_into(data, out: np.ndarray, *, colour: str = "auto",
     samples]) little-endian, colour in R, G, B order.  Returns (width,
     height, samples, bits).  *colour*: "auto" (the JPEG's own markers),
     "ycbcr", or "rgb" (stored without a colour transform: TIFF Photometric
-    RGB).  Baseline and extended 8-bit JPEG decode to libjpeg-turbo's pixels
-    (imagecodecs, tifffile, Pillow), bit for bit; progressive JPEG may differ
-    from them by a few grey levels (allowed by the JPEG standard); lossless is
-    exact.  12-bit lossy JPEG goes to imagecodecs."""
-    if _use_native(native, "jpeg_decode_into") and not _is_12bit_lossy_jpeg(data):
+    RGB).  With micro-reader-codecs 0.0.3 on, libjpeg-turbo itself decodes
+    (the decoder of imagecodecs, tifffile and Pillow): its pixels and speed,
+    for 8-bit, 12-bit and lossless JPEG.  Before, baseline and extended 8-bit
+    JPEG decoded to libjpeg-turbo's pixels, bit for bit, progressive JPEG
+    could differ by a few grey levels, and 12-bit lossy JPEG went to
+    imagecodecs."""
+    if _use_native(native, "jpeg_decode_into") and (
+            has_libjpeg_turbo() or not _is_12bit_lossy_jpeg(data)):
         try:
             return _native.jpeg_decode_into(data, memoryview(out).cast("B"), colour)
         except ValueError as exc:
@@ -402,10 +415,17 @@ def jxl_decode_into(data, out: np.ndarray, *, native: bool | None = None):
             image.dtype.itemsize * 8)
 
 
-def jpegxr_decode_into(data, out: np.ndarray):
-    """A JPEG XR codestream -> *out* (colour R, G, B).  Through imagecodecs
-    until the native jxrlib binding is decided (it needs libclang to build)."""
-    codecs = _imagecodecs("JPEG XR data")
+def jpegxr_decode_into(data, out: np.ndarray, *, native: bool | None = None):
+    """A JPEG XR codestream -> *out* (colour R, G, B; fixed point as float32).
+    micro-reader-codecs 0.0.3 on decodes it with jxrlib, as imagecodecs does and
+    with the same pixel-format conversions; imagecodecs otherwise."""
+    if _use_native(native, "jpegxr_decode_into"):
+        try:
+            _native.jpegxr_decode_into(data, memoryview(out).cast("B"))
+            return
+        except ValueError as exc:
+            raise CorruptFileError(f"corrupt JPEG XR data: {exc}") from exc
+    codecs = _imagecodecs("JPEG XR data", native_from="0.0.3")
     try:
         image = codecs.jpegxr_decode(bytes(data))
     except Exception as exc:                            # noqa: BLE001

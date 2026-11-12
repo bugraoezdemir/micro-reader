@@ -1,6 +1,52 @@
 # Changelog
 
-## 0.4.1 (unreleased)
+## 0.4.2 (unreleased), with micro-reader-codecs 0.0.3
+
+Requires micro-reader-codecs 0.0.3 (`>=0.0.3,<0.1`). imagecodecs (the `[codecs]` extra) is
+needed only for LERC, CCITT fax, float24 and a few rarer TIFF codecs now.
+
+### Changed (breaking, in a patch release)
+
+micro-reader is alpha: this patch breaks two CZI calls, against the stack's rule that a
+breaking change takes a minor version. They are changed before more people use them, so that
+every coordinate pair follows the image's axes (`t c z y x`, NumPy order).
+
+- `image.origin` is `(y, x)`. CZI images and `f.canvas()` gave `(x, y)`, libCZI's order:
+  code that unpacks `x0, y0 = image.origin` now gets them swapped; write `y0, x0 = ...`.
+  Mosaics from other formats (`tiles="mosaic"` on Leica, FluoView `.omp2info`,
+  BigDataViewer) already gave `(y, x)`; their value is `(0, 0)`, as their tiles are placed
+  from the canvas corner (the corner's stage position is `metadata.position`).
+- `image.read_region` (CZI) takes keywords only: `read_region(y=, x=, height=, width=,
+  **planes)`. It took `(x, y, width, height)` by position; a positional call now raises
+  `TypeError` naming the change, rather than reading a rectangle with y and x swapped. Calls
+  that already used keywords work unchanged.
+
+### New
+
+- micro-reader-codecs links libjpeg-turbo 3.2.1, with its SIMD, and Microsoft's jxrlib: the
+  libraries imagecodecs uses, called the same way, so the pixels are imagecodecs' (tests/
+  test_c_decoders.py; real slides compared below) and so is the speed.
+  - **NDPI** slides read without imagecodecs (a plain `pip install micro-reader` refused them)
+    and natively, stripe by stripe: identical pixels to tifffile + imagecodecs on six NDPI
+    slides, at 0.89-1.42x their speed over two runs (as fast or faster on most).
+  - **JPEG XR** (Zeiss Axioscan / ZEN slide scans) reads without imagecodecs: identical pixels
+    to imagecodecs on five Zeiss scans (one of 1500 tiles); a tile decodes at 0.90-0.95x
+    imagecodecs' speed (jxrlib compiled as one unit, and on Windows with whole-program
+    optimisation, as imagecodecs' is), whole reads within run-to-run noise of it. The
+    message when no JPEG XR decoder is installed names both ways out.
+  - **Every other JPEG** decodes with libjpeg-turbo too: 12-bit lossy JPEG (it went to
+    imagecodecs), progressive JPEG (it could differ by a few grey levels) and lossless JPEG.
+    What libjpeg-turbo declines (4 components) or warns about (damaged data it would repair)
+    goes to the decoders as before.
+- Building micro-reader-codecs from source needs CMake, and NASM on x86 for the SIMD (without
+  NASM it builds with a warning and decodes JPEG several times slower).
+
+### Fixed
+
+- OIR: a region narrower than the frame was read with one read per row (260,000 reads for one
+  large region); rows close enough together are now read in one span (512 reads).
+
+## 0.4.1 (2026-11-10)
 
 ### New
 
