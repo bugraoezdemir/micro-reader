@@ -415,22 +415,36 @@ def jxl_decode_into(data, out: np.ndarray, *, native: bool | None = None):
             image.dtype.itemsize * 8)
 
 
-def jpegxr_decode_into(data, out: np.ndarray, *, native: bool | None = None):
+def jpegxr_decode_into(data, out: np.ndarray, *, bgr: bool = False,
+                       native: bool | None = None):
     """A JPEG XR codestream -> *out* (colour R, G, B; fixed point as float32).
     micro-reader-codecs 0.0.3 on decodes it with jxrlib, as imagecodecs does and
-    with the same pixel-format conversions; imagecodecs otherwise."""
+    with the same pixel-format conversions; imagecodecs otherwise.
+
+    *bgr*: colour comes out B, G, R(, A) instead (what a CZI tile stores).
+    micro-reader-codecs 0.0.4 on writes 8-bit B, G, R codestreams (Zeiss tiles) as
+    stored, skipping jxrlib's conversion pass; other sources are swapped in *out*."""
+    order = "rgb"
     if _use_native(native, "jpegxr_decode_into"):
+        flat = memoryview(out).cast("B")
         try:
-            _native.jpegxr_decode_into(data, memoryview(out).cast("B"))
-            return
+            try:
+                info = _native.jpegxr_decode_into(data, flat, bgr=bgr) if bgr else \
+                    _native.jpegxr_decode_into(data, flat)
+            except TypeError:                           # micro-reader-codecs 0.0.3: no bgr
+                info = _native.jpegxr_decode_into(data, flat)
         except ValueError as exc:
             raise CorruptFileError(f"corrupt JPEG XR data: {exc}") from exc
-    codecs = _imagecodecs("JPEG XR data", native_from="0.0.3")
-    try:
-        image = codecs.jpegxr_decode(bytes(data))
-    except Exception as exc:                            # noqa: BLE001
-        raise CorruptFileError(f"corrupt JPEG XR data: {exc}") from exc
-    _fill(out, image, "JPEG XR")
+        order = info[5] if len(info) > 5 else "rgb"
+    else:
+        codecs = _imagecodecs("JPEG XR data", native_from="0.0.3")
+        try:
+            image = codecs.jpegxr_decode(bytes(data))
+        except Exception as exc:                        # noqa: BLE001
+            raise CorruptFileError(f"corrupt JPEG XR data: {exc}") from exc
+        _fill(out, image, "JPEG XR")
+    if bgr and order != "bgr" and out.ndim >= 3 and out.shape[-1] in (3, 4):
+        out[..., [0, 2]] = out[..., [2, 0]]             # R, G, B -> B, G, R in place
 
 
 def eer_decode_into(data, out: np.ndarray, skipbits: int, horzbits: int, vertbits: int,

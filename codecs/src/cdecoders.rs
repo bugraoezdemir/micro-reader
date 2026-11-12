@@ -57,26 +57,28 @@ pub fn jpeg(_input: &[u8], _output: &mut [u8], _colour: i32) -> Jpeg {
 #[cfg(feature = "jxrlib")]
 extern "C" {
     fn mr_jxr_decode(data: *const c_uchar, len: usize, out: *mut c_uchar, out_len: usize,
-                     width: *mut c_int, height: *mut c_int, kind: *mut c_int,
-                     bytes: *mut c_int, samples: *mut c_int,
+                     keep_bgr: c_int, width: *mut c_int, height: *mut c_int, kind: *mut c_int,
+                     bytes: *mut c_int, samples: *mut c_int, bgr: *mut c_int,
                      errbuf: *mut c_char, errlen: usize) -> c_int;
 }
 
 /// A JPEG XR codestream into *output*, which must hold exactly the decoded image.
-/// Returns (width, height, kind, bytes per sample, samples): kind 0 unsigned, 1
+/// Returns (width, height, kind, bytes per sample, samples, bgr): kind 0 unsigned, 1
 /// float, 2 half float, 3 bool (the shim's `mr_jxr_info` reads the same without
-/// decoding).
+/// decoding).  *keep_bgr*: 8-bit B, G, R(, A) codestreams come out as stored (no
+/// conversion pass); *bgr* says whether the output is B, G, R order.
 #[cfg(feature = "jxrlib")]
-pub fn jxr_decode(input: &[u8], output: &mut [u8])
-    -> Result<(usize, usize, i32, usize, usize), String> {
-    let (mut w, mut h, mut k, mut b, mut s) = (0, 0, 0, 0, 0);
+pub fn jxr_decode(input: &[u8], output: &mut [u8], keep_bgr: bool)
+    -> Result<(usize, usize, i32, usize, usize, bool), String> {
+    let (mut w, mut h, mut k, mut b, mut s, mut bgr) = (0, 0, 0, 0, 0, 0);
     let mut err = [0 as c_char; 256];
     let code = unsafe {
         mr_jxr_decode(input.as_ptr(), input.len(), output.as_mut_ptr(), output.len(),
-                      &mut w, &mut h, &mut k, &mut b, &mut s, err.as_mut_ptr(), err.len())
+                      keep_bgr as c_int, &mut w, &mut h, &mut k, &mut b, &mut s, &mut bgr,
+                      err.as_mut_ptr(), err.len())
     };
     if code != 0 {
         return Err(format!("jpegxr: {}", text(&err)));
     }
-    Ok((w as usize, h as usize, k, b as usize, s as usize))
+    Ok((w as usize, h as usize, k, b as usize, s as usize, bgr != 0))
 }

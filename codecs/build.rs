@@ -128,6 +128,9 @@ fn jxrlib() {
         .include(root.join("jxrgluelib"))
         .define("__ANSI__", None)
         .define("DISABLE_PERF_MEASUREMENT", None)
+        // as a CMake Release build (libCZI's, imagecodecs'): jxrlib's bit reader asserts
+        // on every symbol it reads (strcodec.h) unless NDEBUG is set; cc does not set it
+        .define("NDEBUG", None)
         .warnings(false)
         .opt_level(3);
     for flag in [

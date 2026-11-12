@@ -400,6 +400,35 @@ def test_read_region_in_file_coordinates(tmp_path, name):
                         series.read_region(y=y, x=x, height=h, width=w, t=0, c=0, z=0, s=1), ref[..., 1])
 
 
+def test_small_region_decodes_its_tiles_in_parallel_once(tmp_path, monkeypatch):
+    """A region in one row band over several compressed tiles: the tiles are decoded on
+    the pool first (each once), then composed; same pixels as a serial read."""
+    from micro_reader.backends import czi as czi_backend
+    path, expected, _ = _write(tmp_path, "zstd1_mosaic")
+    region = (slice(None), slice(0, 1), slice(None), slice(5, 45), slice(10, 140))
+    old = micro_reader.decode_threads()
+    try:
+        micro_reader.set_decode_threads(1)
+        with _native(path, tiles="mosaic") as img:
+            serial = img.images[0][region]
+        decoded, threads = [], set()
+        real = czi_backend._CziImage._decode_subblock
+
+        def counting(self, s):
+            decoded.append(s.position)
+            threads.add(threading.get_ident())
+            return real(self, s)
+        monkeypatch.setattr(czi_backend._CziImage, "_decode_subblock", counting)
+        micro_reader.set_decode_threads(4)
+        with _native(path, tiles="mosaic") as img:
+            np.testing.assert_array_equal(img.images[0][region], serial)
+    finally:
+        micro_reader.set_decode_threads(old)
+    np.testing.assert_array_equal(serial, expected[0][region])
+    assert len(decoded) == len(set(decoded)) > 1                  # every tile once
+    assert threading.get_ident() not in threads                   # on the pool
+
+
 def test_read_region_refuses_positions(tmp_path):
     """read_region took (x, y, width, height) by position before 0.4.2; a positional
     or incomplete call is refused instead of reading with y and x swapped."""

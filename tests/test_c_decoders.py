@@ -72,6 +72,34 @@ def test_jpegxr_bgr_is_returned_rgb():
     np.testing.assert_array_equal(got, imagecodecs.jpegxr_decode(data))
 
 
+@pytest.mark.parametrize("native", [pytest.param(True, marks=needs_jxrlib), False])
+@pytest.mark.parametrize("shape", [(24, 40, 3), (24, 40)])
+def test_jpegxr_bgr_gives_stored_order(native, shape):
+    """bgr=True (CZI tiles): colour comes out B, G, R, natively as stored or swapped
+    after imagecodecs; grey is unchanged."""
+    image = _image(shape, np.uint8)
+    data = imagecodecs.jpegxr_encode(image, level=1.0)
+    rgb = imagecodecs.jpegxr_decode(data)
+    got = np.empty_like(rgb)
+    _codecs.jpegxr_decode_into(data, got, bgr=True, native=native)
+    np.testing.assert_array_equal(got, rgb[..., ::-1] if rgb.ndim == 3 else rgb)
+
+
+@needs_jxrlib
+def test_jpegxr_bgr_with_codecs_0_0_3(monkeypatch):
+    """micro-reader-codecs 0.0.3 has no bgr keyword: R, G, B is swapped afterwards."""
+    image = _image((24, 40, 3), np.uint8)
+    data = imagecodecs.jpegxr_encode(image, level=1.0)
+    real = _codecs._native.jpegxr_decode_into
+
+    def old(data, out):                                  # the 0.0.3 signature and return
+        return real(data, out)[:5]
+    monkeypatch.setattr(_codecs._native, "jpegxr_decode_into", old)
+    got = np.empty_like(image)
+    _codecs.jpegxr_decode_into(data, got, bgr=True, native=True)
+    np.testing.assert_array_equal(got, imagecodecs.jpegxr_decode(data)[..., ::-1])
+
+
 @needs_jxrlib
 def test_jpegxr_wrong_size_and_garbage_are_corrupt():
     data = imagecodecs.jpegxr_encode(_image((16, 16), np.uint8), level=1.0)

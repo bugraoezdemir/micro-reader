@@ -3,7 +3,9 @@
  * Follows imagecodecs' jpegxr_decode (imagecodecs/_jpegxr.pyx, BSD-3) step by step so
  * the pixels are the same: the decoder from bytes, the output pixel format chosen from
  * the stored one by the same table (fp2int=False), jxrlib's format converter, and the
- * same channel fix-ups afterwards.  Colour images come out R, G, B(, A).
+ * same channel fix-ups afterwards.  Colour images come out R, G, B(, A), or, when the
+ * caller asks for B, G, R order (keep_bgr) and the codestream stores 8-bit B, G, R(, A)
+ * as Zeiss CZI tiles do, as stored: no conversion pass and no copy after decoding.
  *
  * mr_jxr_info() reads the size and output layout without decoding, so the caller can
  * size the buffer; mr_jxr_decode() decodes into it.
@@ -26,16 +28,25 @@ typedef struct {
     int samples;     /* samples per pixel in the converter's output */
     int alpha;       /* uAlphaMode */
     int strip;       /* 0 none, 1 drop last, 2 drop last + BGR -> RGB, 3 BGRA -> RGBA */
+    int bgr;         /* 1: colour comes out B, G, R(, A) */
 } mr_layout;
 
 /* imagecodecs' jxr_decode_guid with fp2int=False: the output format for a stored
- * format (changed in place) and its layout. */
-static ERR layout_for(PKPixelFormatGUID* pf, mr_layout* o)
+ * format (changed in place) and its layout.  keep_bgr: 8-bit B, G, R(, A) stays as
+ * stored instead of going through the converter to R, G, B(, A). */
+static ERR layout_for(PKPixelFormatGUID* pf, mr_layout* o, int keep_bgr)
 {
 #define IS(g) IsEqualGUID(pf, &GUID_PKPixelFormat##g)
 #define TO(g) (*pf = GUID_PKPixelFormat##g)
 #define OUT(k, b, s, a, st) do { o->kind = k; o->bytes = b; o->samples = s; \
-        o->alpha = a; o->strip = st; return WMP_errSuccess; } while (0)
+        o->alpha = a; o->strip = st; o->bgr = 0; return WMP_errSuccess; } while (0)
+#define OUT_BGR(s, a, st) do { o->kind = MR_UINT; o->bytes = 1; o->samples = s; \
+        o->alpha = a; o->strip = st; o->bgr = 1; return WMP_errSuccess; } while (0)
+    if (keep_bgr) {
+        if (IS(24bppBGR)) OUT_BGR(3, 0, 0);
+        if (IS(32bppBGR)) OUT_BGR(4, 0, 1);      /* drop the padding byte */
+        if (IS(32bppBGRA)) OUT_BGR(4, 2, 0);
+    }
     if (IS(BlackWhite)) { TO(8bppGray); OUT(MR_BOOL, 1, 1, 0, 0); }
     /* uint8 */
     if (IS(8bppGray)) OUT(MR_UINT, 1, 1, 0, 0);
@@ -106,6 +117,7 @@ static ERR layout_for(PKPixelFormatGUID* pf, mr_layout* o)
 #undef IS
 #undef TO
 #undef OUT
+#undef OUT_BGR
     return WMP_errUnsupportedFormat;
 }
 
@@ -146,7 +158,7 @@ int mr_jxr_info(const unsigned char* data, size_t len, int* width, int* height,
     if (err) { message(errbuf, errlen, "reading the size", err); goto done; }
     err = decoder->GetPixelFormat(decoder, &pf);
     if (err) { message(errbuf, errlen, "reading the pixel format", err); goto done; }
-    err = layout_for(&pf, &lay);
+    err = layout_for(&pf, &lay, 0);
     if (err) { message(errbuf, errlen, "an unsupported pixel format", err); goto done; }
     *width = (int)w; *height = (int)h; *kind = lay.kind; *bytes = lay.bytes;
     *samples = lay.strip == 1 || lay.strip == 2 ? lay.samples - 1 : lay.samples;
@@ -156,10 +168,11 @@ done:
 }
 
 /* Decode into out (out_len bytes, exactly height x width x samples x bytes after
- * strip), giving the same layout as mr_jxr_info.  0 on success. */
+ * strip), giving the same layout as mr_jxr_info.  keep_bgr: 8-bit B, G, R(, A) as
+ * stored; *bgr says which order came out.  0 on success. */
 int mr_jxr_decode(const unsigned char* data, size_t len, unsigned char* out, size_t out_len,
-                  int* width, int* height, int* kind, int* bytes, int* samples,
-                  char* errbuf, size_t errlen)
+                  int keep_bgr, int* width, int* height, int* kind, int* bytes, int* samples,
+                  int* bgr, char* errbuf, size_t errlen)
 {
     PKImageDecode* decoder = NULL;
     PKFormatConverter* converter = NULL;
@@ -175,8 +188,9 @@ int mr_jxr_decode(const unsigned char* data, size_t len, unsigned char* out, siz
     if (err) { message(errbuf, errlen, "reading the size", err); goto done; }
     err = decoder->GetPixelFormat(decoder, &pf);
     if (err) { message(errbuf, errlen, "reading the pixel format", err); goto done; }
-    err = layout_for(&pf, &lay);
+    err = layout_for(&pf, &lay, keep_bgr);
     if (err) { message(errbuf, errlen, "an unsupported pixel format", err); goto done; }
+    *bgr = lay.bgr;
     decoder->WMP.wmiSCP.uAlphaMode = (U8)lay.alpha;
     err = PKCodecFactory_CreateFormatConverter(&converter);
     if (err) { message(errbuf, errlen, "creating the format converter", err); goto done; }
