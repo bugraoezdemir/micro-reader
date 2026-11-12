@@ -12,6 +12,7 @@
 
 use std::io::Cursor;
 
+mod cdecoders;
 mod jpeg;
 mod stream;
 
@@ -147,8 +148,11 @@ fn lzw_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyAn
 /// *colour*: "auto" (from the JFIF / Adobe markers, as JPEG files say),
 /// "ycbcr" or "rgb" (no transform: what TIFF's Photometric RGB means).
 ///
-/// Baseline and extended sequential JPEG (8-bit, 1 or 3 components) decode to
-/// libjpeg-turbo's pixels (`jpeg.rs`); other kinds go to jpeg-decoder.
+/// libjpeg-turbo itself decodes first (with its SIMD; 8-bit, 12-bit and lossless, 1
+/// or 3 components; `cdecoders.rs`), 12-bit samples as 16 bits.  What it declines (4
+/// components), warns about (damaged data it would repair) or refuses goes on as
+/// before: baseline and extended sequential JPEG to micro-reader's own port of
+/// libjpeg-turbo's decoder (`jpeg.rs`), other kinds to jpeg-decoder.
 #[pyfunction]
 #[pyo3(signature = (data, out, colour = "auto"))]
 fn jpeg_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyAny>, colour: &str)
@@ -159,18 +163,24 @@ fn jpeg_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyA
         "rgb" => (Some(jpeg_decoder::ColorTransform::RGB), jpeg::Colour::Rgb),
         other => return Err(PyValueError::new_err(format!("jpeg: unknown colour {other:?}"))),
     };
+    let code = match colour { "ycbcr" => 1, "rgb" => 2, _ => 0 };
     with_buffers(py, data, out, move |input, output| {
+        let turbo = match cdecoders::jpeg(input, output, code) {
+            cdecoders::Jpeg::Decoded(w, h, n, bits) => return Ok((w, h, n, bits)),
+            cdecoders::Jpeg::Failed(e) => format!("; libjpeg-turbo: {e}"),
+            cdecoders::Jpeg::Declined => String::new(),
+        };
         // progressive, lossless, ...: jpeg-decoder below
         let why = match jpeg::decode_into(input, output, own) {
             Ok((w, h, n)) => return Ok((w, h, n, 8)),
-            Err(jpeg::JpegError::Corrupt(e)) => return Err(format!("jpeg: {e}")),
+            Err(jpeg::JpegError::Corrupt(e)) => return Err(format!("jpeg: {e}{turbo}")),
             Err(jpeg::JpegError::Unsupported(why)) => why,
         };
         let mut decoder = jpeg_decoder::Decoder::new(input);
         if let Some(transform) = transform {
             decoder.set_color_transform(transform);
         }
-        let pixels = decoder.decode().map_err(|e| format!("jpeg: {e} ({why})"))?;
+        let pixels = decoder.decode().map_err(|e| format!("jpeg: {e} ({why}){turbo}"))?;
         let info = decoder.info().ok_or("jpeg: no image information")?;
         let (samples, bits) = match info.pixel_format {
             jpeg_decoder::PixelFormat::L8 => (1, 8),
@@ -651,6 +661,23 @@ fn eer_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyAn
     })
 }
 
+/// A JPEG XR codestream -> `out` through jxrlib, in the layout imagecodecs'
+/// `jpegxr_decode` gives (its pixel-format table and jxrlib's converter): colour as
+/// R, G, B(, A); fixed point as float32.  `out` must hold exactly the decoded
+/// image.  Returns (width, height, samples, bytes per sample, kind): kind "uint",
+/// "float", "half" or "bool".
+#[cfg(feature = "jxrlib")]
+#[pyfunction]
+fn jpegxr_decode_into(py: Python<'_>, data: &Bound<'_, PyAny>, out: &Bound<'_, PyAny>)
+    -> PyResult<(usize, usize, usize, usize, &'static str)> {
+    with_buffers(py, data, out, |input, output| {
+        // one pass: the shim checks the size against `out` before decoding
+        let (w, h, kind, bytes, samples) = cdecoders::jxr_decode(input, output)?;
+        let kind = match kind { 1 => "float", 2 => "half", 3 => "bool", _ => "uint" };
+        Ok((w, h, samples, bytes, kind))
+    })
+}
+
 /// Version of the zstd library compiled in.
 #[pyfunction]
 fn zstd_version() -> String {
@@ -677,6 +704,11 @@ fn micro_reader_codecs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(unpack_bits_into, m)?)?;
     m.add_function(wrap_pyfunction!(eer_decode_into, m)?)?;
     m.add_function(wrap_pyfunction!(zstd_version, m)?)?;
+    #[cfg(feature = "jxrlib")]
+    m.add_function(wrap_pyfunction!(jpegxr_decode_into, m)?)?;
+    // which C decoders this build links (micro-reader picks its routes by these)
+    m.add("HAS_LIBJPEG_TURBO", cdecoders::HAS_LIBJPEG_TURBO)?;
+    m.add("HAS_JXRLIB", cdecoders::HAS_JXRLIB)?;
     m.add_class::<stream::StreamDecoder>()?;
     m.add_class::<stream::BlockIndex>()?;
     Ok(())

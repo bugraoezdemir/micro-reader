@@ -142,7 +142,11 @@ def own_codec(key):
             return None
         codec = IMAGE_CODECS[c]
         if codec == "jpeg" and getattr(key, "jpegheader", None):
-            return None                                  # NDPI: header outside the segments
+            # NDPI: header outside the segments; _decode_segment joins it to each
+            # stripe.  Native when micro-reader-codecs links libjpeg-turbo (0.0.3 on):
+            # its speed and pixels, no imagecodecs.  Before that tifffile + imagecodecs
+            # (micro-reader's own JPEG decoder was 1.5-1.9x slower per stripe)
+            return "jpeg" if _codecs.has_libjpeg_turbo() else None
         if codec != "jpeg" and key.is_subsampled:
             return None
         return codec
@@ -1055,7 +1059,13 @@ class _TiffImage(Image):
             _codecs.eer_decode_into(data, seg.reshape(shape[:2]), *eer_parameters(self._key))
             return seg[None]
         if codec == "jpeg":
-            if jpegtables:                        # abbreviated stream: tables from JPEGTables
+            header = getattr(self._key, "jpegheader", None)
+            if header:
+                # NDPI: tifffile cuts the one big JPEG at its restart markers (McuStarts)
+                # into tiles of one restart interval; each is the shared header, its size
+                # patched to the tile (tifffile.ndpi_jpeg_tile), + its bytes + EOI
+                data = b"".join((header, data, b"\xff\xd9"))
+            elif jpegtables:                      # abbreviated stream: tables from JPEGTables
                 data = bytes(jpegtables[:-2]) + bytes(data[2:])
             got = _codecs.jpeg_decode_into(data, seg, colour=self._jpeg_colour)
         else:

@@ -221,7 +221,7 @@ def first_pixel_position(image, centre: dict, s, sizes: dict) -> dict:
     the whole file, so the offset between the two frames found at *s* holds
     for the image's corner too."""
     out = {}
-    origin = dict(zip("xy", image.origin))
+    origin = dict(zip("yx", image.origin))
     extent = {"x": s.width, "y": s.height}
     start = {"x": s.x, "y": s.y}
     for axis, q in centre.items():

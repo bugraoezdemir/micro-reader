@@ -28,8 +28,9 @@ It has no Python dependencies.
 | `lzw_decode_into`           | LZW, TIFF variant                         | `weezl`                               |
 | `zlib_decompress_into`      | zlib / deflate                            | `libdeflater` (libdeflate)            |
 | `packbits_decode_into`      | PackBits                                  | own                                   |
-| `jpeg_decode_into`          | JPEG: baseline and extended (same pixels as libjpeg-turbo) | own, following libjpeg-turbo |
-|                             | JPEG: progressive and lossless            | `jpeg-decoder`                        |
+| `jpeg_decode_into`          | JPEG: baseline, extended, progressive, arithmetic; 8- and 12-bit; lossless (2-16 bit); NDPI's stripes | libjpeg-turbo 3.2.1 with its SIMD (C, vendored) |
+|                             | JPEG libjpeg-turbo declines or warns about (4 components, damaged data) | own (following libjpeg-turbo), then `jpeg-decoder` |
+| `jpegxr_decode_into`        | JPEG XR (Zeiss slide scans), colour as R, G, B; as imagecodecs decodes it | jxrlib (Microsoft, C, vendored) |
 | `jxl_decode_into`           | JPEG XL                                   | `jxl-oxide`                           |
 | `jpeg2k_decode_into`        | JPEG 2000 (J2K, JP2), also YCbCr with subsampled colour (e.g. Aperio slides) | `jpeg2k` (OpenJPEG) |
 | `png_decode_into`           | PNG                                       | `png`                                 |
@@ -45,9 +46,11 @@ Some compressed blocks are too large to decode as a whole. These decoders read o
 * `StreamDecoder` decodes one compressed block of a file as a stream and keeps only the bytes you ask for. It supports zlib, deflate, LZW, zstd, PackBits, PNG rows and uncompressed data. Each read continues where the last one stopped.
 * `BlockIndex` keeps checkpoints of a deflate block. Several `StreamDecoder`s can share one, so jumping back in the block resumes from the nearest checkpoint instead of the start.
 
+libjpeg-turbo and jxrlib are the libraries imagecodecs uses, called the same way, so the pixels are imagecodecs' (tests/test_c_decoders.py) and so is the speed: on six NDPI slides 0.89-1.42x tifffile + imagecodecs; on five Zeiss JPEG XR scans a tile decodes at 0.90-0.95x imagecodecs, whole reads within noise of it (2026-11-10).
+
 ## Not included yet
 
-JPEG XR is not included, because the `jpegxr` crate needs libclang to build. Until then, micro-reader decodes JPEG XR through imagecodecs:
+LERC, CCITT fax, float24 and a few rarer TIFF codecs still go through imagecodecs:
 
 ```bash
 pip install "micro-reader[codecs]"
@@ -55,11 +58,13 @@ pip install "micro-reader[codecs]"
 
 ## Building
 
-The Rust toolchain is pinned in `rust-toolchain.toml`. To build and install into the active virtual environment:
+The Rust toolchain is pinned in `rust-toolchain.toml`. Building also needs CMake and, on x86, NASM, for libjpeg-turbo's SIMD (`build.rs`; ARM's NEON needs no assembler). To build and install into the active virtual environment:
 
 ```bash
 maturin develop --release
 ```
+
+Without NASM the build still works, with plain C JPEG decoding and a warning; `MICRO_READER_REQUIRE_SIMD=1` (the wheel builds) makes it an error. `NASM=<path>` names the assembler when it is not on `PATH`. `--no-default-features` leaves out both C libraries (features `libjpeg-turbo`, `jxrlib`): micro-reader then uses its own JPEG decoder and imagecodecs for JPEG XR.
 
 ## Tests
 
@@ -69,6 +74,7 @@ The tests live in the repository's `tests/` folder:
 * `test_czi_codecs.py`
 * `test_tiff_codecs.py`
 * `test_jpeg_exact.py`
+* `test_c_decoders.py`
 * `test_memory_limit.py`
 
 They compare these decoders with independent reference decoders, bit for bit.
@@ -77,7 +83,7 @@ They compare these decoders with independent reference decoders, bit for bit.
 
 MIT
 
-The bundled crates and C libraries (libzstd, libdeflate, OpenJPEG) are MIT, Apache-2.0, BSD or Zlib licensed. The JPEG decoder follows libjpeg-turbo (IJG and BSD licences): this software is based in part on the work of the Independent JPEG Group. All notices ship in every wheel as `THIRD_PARTY_LICENSES.txt`.
+The bundled crates and C libraries (libzstd, libdeflate, OpenJPEG, libjpeg-turbo, jxrlib) are MIT, Apache-2.0, BSD or Zlib licensed. libjpeg-turbo, and micro-reader's own JPEG decoder that follows it, carry the IJG and BSD licences: this software is based in part on the work of the Independent JPEG Group. All notices ship in every wheel as `THIRD_PARTY_LICENSES.txt`.
 
 Whenever `Cargo.lock` changes, regenerate it with:
 

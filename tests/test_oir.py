@@ -12,6 +12,7 @@ import pytest
 
 import micro_reader
 from micro_reader import UnsupportedFormatError
+from micro_reader.backends import oir as oir_backend
 
 from _oir_writer import write_oir
 
@@ -94,7 +95,9 @@ def decode_threads(request):
 
 
 @pytest.mark.parametrize("name", list(CASES))
-def test_matches_known_data(tmp_path, name, decode_threads):
+def test_matches_known_data(tmp_path, name, decode_threads, monkeypatch):
+    # the exact path: no skipped columns are read (test_row_spans: merged rows)
+    monkeypatch.setattr(oir_backend, "SEPARATE_READ_BYTES", 0)
     path, expected = _write(tmp_path, name)
     with micro_reader.open(path) as img:
         series = img.images[0]
@@ -104,6 +107,28 @@ def test_matches_known_data(tmp_path, name, decode_threads):
             np.testing.assert_array_equal(series[key], expected[key], err_msg=f"{name} {key}")
         # exact reads: never more than asked (missing planes read nothing)
         assert series.stats.over_read <= 1.0
+
+
+@pytest.mark.parametrize("name", ["row_aligned_blocks", "unaligned_blocks", "uint8", "float32",
+                                  "missing_plane", "truncated_plane", "companion_file"])
+def test_row_spans(tmp_path, name, decode_threads, monkeypatch):
+    """Blocks narrower than the frame come from one read per row span (the skipped
+    columns read along, counted as over-read), not one read per row."""
+    path, expected = _write(tmp_path, name)
+    calls = []
+    real = oir_backend._OirImage._read_range
+    monkeypatch.setattr(oir_backend._OirImage, "_read_range",
+                        lambda self, *a: calls.append(1) or real(self, *a))
+    with micro_reader.open(path) as img:
+        series = img.images[0]
+        for key in _keys(expected.shape) + [(Ellipsis, slice(5, 30), slice(3, 40)),
+                                            (0, 1, 2, slice(None), slice(52, 53))]:
+            np.testing.assert_array_equal(series[key], expected[key], err_msg=f"{name} {key}")
+        series.stats.reset()
+        calls.clear()
+        series[0, 0, 0, 2:30, 10:20]
+        assert len(calls) == 1                           # one span, not 28 rows
+        assert series.stats.over_read == pytest.approx((27 * 53 + 10) / (28 * 10))
 
 
 @pytest.mark.skipif(oirfile is None, reason="oirfile not available (set OIRFILE_SRC)")

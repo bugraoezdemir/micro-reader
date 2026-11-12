@@ -97,7 +97,7 @@ Not supported yet, and refused with `UnsupportedFormatError`: Imaris 3 files (`.
 
 **Whole-slide files.** Images are in the file's order, which is not the same in every format: in a VSI the label and overview come first, then the scans. The main scan of an SVS, NDPI, BIF or QPTIFF comes first, then the other pictures the file stores, as further series and in the order Bio-Formats lists them: `label`, `macro` (overview), and for some formats `thumbnail` (QPTIFF) or `probability` (BIF tissue map). In a Leica SCN, the overview of the whole slide is called `macro` (a fluorescence overview next to it, `macro fluorescence`). Ventana BIF tiles overlap. VENTANA DP 200 scans are composed the way Roche's description of the format places them; iScan Coreo scans as OpenSlide shows them, except that each tile starts at the nearest whole pixel. Areas outside the scanned regions read as 0.
 
-**Codecs.** Built in: LZW, Deflate, PackBits, LZMA, zstd, JPEG, JPEG 2000, WebP, JPEG XL, PNG and EER. With `pip install "micro-reader[codecs]"`: JPEG XR, LERC and others. Only the strips or tiles under a region are decoded.
+**Codecs.** Built in: LZW, Deflate, PackBits, LZMA, zstd, JPEG (8- and 12-bit, lossless, NDPI's; libjpeg-turbo), JPEG XR (jxrlib), JPEG 2000, WebP, JPEG XL, PNG and EER. With `pip install "micro-reader[codecs]"`: LERC, CCITT fax and others. Only the strips or tiles under a region are decoded.
 
 ## CZI
 
@@ -109,20 +109,20 @@ CZI images have two extras.
 
 ### `image.origin` and `image.read_region()`
 
-`image.origin` is the `(x, y)` of the image's corner in the file's own pixel coordinates (what libCZI calls the bounding box). Use it with coordinates from the CZI's XML or from other CZI tools:
+`image.origin` is the `(y, x)` of the image's corner in the file's own pixel coordinates (what libCZI calls the bounding box; libCZI and ZEN write it x first). Use it with coordinates from the CZI's XML or from other CZI tools:
 
 ```python
 f = micro_reader.open("S=2_2x2_CH=1.czi", tiles="mosaic")
 im = f.images[0]
-im.origin                    # (134757, 174757)
+im.origin                    # (174757, 134757): y, x
 
 # a 100 x 50 rectangle in file coordinates, starting 10 px outside the series
-r = im.read_region(134747, 174747, 100, 50, c=0)
+r = im.read_region(y=174747, x=134747, height=50, width=100, c=0)
 r.shape                      # (1, 1, 50, 100): t z y x, c dropped as in read()
 ```
 
 ```python
-image.read_region(x, y, width, height, **planes) -> numpy.ndarray
+image.read_region(*, y, x, height, width, **planes) -> numpy.ndarray
 ```
 
 `planes` selects the other axes as in `read()`. Parts of the rectangle outside the series are 0, as libCZI returns them.
@@ -134,7 +134,7 @@ image.read_region(x, y, width, height, **planes) -> numpy.ndarray
 ```python
 cv = f.canvas()
 cv.shape     # (1, 1, 1, 486, 90486): two series far apart on the slide
-cv.origin    # (134757, 174757)
+cv.origin    # (174757, 134757)
 cv.read(c=0, x=slice(0, 486)).shape
 ```
 

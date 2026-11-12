@@ -139,7 +139,7 @@ def test_matches_known_data(tmp_path, name, decode_threads):
         assert len(img.images) == len(expected)
         for series, sid in zip(img.images, sorted(expected)):
             ref = expected[sid]
-            assert series.origin == origins[sid]
+            assert series.origin == origins[sid][::-1]          # origins are written (x, y)
             assert series.shape == ref.shape and series.dtype == ref.dtype
             for key in _keys(ref.shape):
                 np.testing.assert_array_equal(series[key], ref[key], err_msg=f"{name} {key}")
@@ -174,10 +174,10 @@ def test_tiles_are_returned_one_by_one(tmp_path):
         hidden = 0
         for tile in tiles:
             for c in range(tile.shape[1]):
-                own = written[(c, tile.origin)]
+                own = written[(c, tile.origin[::-1])]   # the writer's corners are (x, y)
                 np.testing.assert_array_equal(tile[0, c, 0], own)
-                ox, oy = composite.origin
-                y, x = tile.origin[1] - oy, tile.origin[0] - ox
+                oy, ox = composite.origin
+                y, x = tile.origin[0] - oy, tile.origin[1] - ox
                 in_composite = composite[0, c, 0, y:y + 40, x:x + 56]
                 hidden += not np.array_equal(in_composite, own)
         assert hidden > 0            # overlaps really covered parts of earlier tiles
@@ -291,7 +291,7 @@ def test_overlaps_are_read_once(tmp_path, monkeypatch):
     covered = np.zeros(expected[0].shape[-2:], bool)
     with _native(path, tiles="mosaic") as img:
         series = img.images[0]
-        ox, oy = series.origin
+        oy, ox = series.origin
         for s in img._level0:
             covered[s.y - oy:s.y - oy + s.height, s.x - ox:s.x - ox + s.width] = True
         for key in _keys(covered.shape, n=30, seed=9):
@@ -335,7 +335,7 @@ def test_canvas_matches_pylibczirw(tmp_path, name):
     with _native(path, tiles="mosaic") as img, pyczi.open_czi(path) as czi:
         canvas = img.canvas()
         box = czi.total_bounding_rectangle_no_pyramid
-        assert canvas.origin == (box.x, box.y)
+        assert canvas.origin == (box.y, box.x)
         assert canvas.shape[-2:] == (box.h, box.w)
         for c in range(canvas.shape[1]):
             ref = czi.read(roi=(box.x, box.y, box.w, box.h), plane={"T": 0, "C": c, "Z": 0})
@@ -380,7 +380,7 @@ def test_read_region_in_file_coordinates(tmp_path, name):
     with _native(path, tiles="mosaic") as img, pyczi.open_czi(path) as czi:
         for i, series in enumerate(img.images):
             sid = series.index["series"]
-            ox, oy = series.origin
+            oy, ox = series.origin
             ny, nx = series.shape[3], series.shape[4]
             rois = [(ox - 7, oy - 5, nx + 20, ny + 9), (ox + nx + 3, oy, 10, 10),
                     (ox, oy, nx, ny), (ox + 3, oy + 2, 0, 5)]
@@ -388,7 +388,7 @@ def test_read_region_in_file_coordinates(tmp_path, name):
                 rois.append((ox + int(rng.integers(-30, nx)), oy + int(rng.integers(-30, ny)),
                              int(rng.integers(1, 60)), int(rng.integers(1, 60))))
             for x, y, w, h in rois:
-                mine = series.read_region(x, y, w, h, t=0, c=0, z=0)
+                mine = series.read_region(y=y, x=x, height=h, width=w, t=0, c=0, z=0)
                 if w == 0:
                     assert mine.shape[:2] == (h, 0)
                     continue
@@ -397,7 +397,22 @@ def test_read_region_in_file_coordinates(tmp_path, name):
                 np.testing.assert_array_equal(mine, ref, err_msg=f"{name} {(x, y, w, h)}")
                 if series.axes.endswith("s"):
                     np.testing.assert_array_equal(
-                        series.read_region(x, y, w, h, t=0, c=0, z=0, s=1), ref[..., 1])
+                        series.read_region(y=y, x=x, height=h, width=w, t=0, c=0, z=0, s=1), ref[..., 1])
+
+
+def test_read_region_refuses_positions(tmp_path):
+    """read_region took (x, y, width, height) by position before 0.4.2; a positional
+    or incomplete call is refused instead of reading with y and x swapped."""
+    path = str(tmp_path / "m.czi")
+    write_czi(path, _mosaic(overlap=10))
+    with _native(path, tiles="mosaic") as img:
+        series = img.images[0]
+        oy, ox = series.origin
+        with pytest.raises(TypeError, match="keywords only"):
+            series.read_region(ox, oy, 8, 4, c=0)
+        with pytest.raises(TypeError, match="keywords only"):
+            series.read_region(y=oy, x=ox, width=8, c=0)
+        assert series.read_region(y=oy, x=ox, height=4, width=8, c=0).shape[-2:] == (4, 8)
 
 
 # -- damage and recovery --------------------------------------------------------------

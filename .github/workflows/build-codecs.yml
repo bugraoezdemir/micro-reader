@@ -1,5 +1,9 @@
 # Build micro-reader-codecs: one abi3 wheel per platform (Python >= 3.11) and
 # the sdist.  Called by ci.yml (every push) and release.yml (codecs-v* tags).
+#
+# The codecs link two C libraries from codecs/vendor (codecs/build.rs): libjpeg-turbo,
+# built with CMake and its SIMD (x86 needs NASM; ARM's NEON is C), and jxrlib.
+# MICRO_READER_REQUIRE_SIMD=1 makes a wheel without SIMD a failed build, not a slow one.
 name: Build codecs
 
 on:
@@ -7,6 +11,10 @@ on:
 
 permissions:
   contents: read
+
+env:
+  MICRO_READER_REQUIRE_SIMD: "1"
+  NASM_VERSION: "2.16.03"
 
 jobs:
   wheels:
@@ -23,12 +31,38 @@ jobs:
           - { name: windows-x64, runner: windows-latest, target: x64 }
     steps:
       - uses: actions/checkout@v4
+      # NASM for libjpeg-turbo's x86 SIMD (Linux x86_64 builds it inside the
+      # manylinux container below; ARM targets need none)
+      - name: NASM (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: NASM (macOS, for the x86_64 wheel)
+        if: runner.os == 'macOS' && matrix.platform.target == 'x86_64'
+        run: brew install nasm
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: codecs
           target: ${{ matrix.platform.target }}
           manylinux: auto          # ignored outside Linux
           args: --release --out dist
+          # the manylinux container: its own NASM (the distribution's is too old for
+          # AVX2) and CMake; the SIMD requirement passed in
+          docker-options: -e MICRO_READER_REQUIRE_SIMD=1
+          before-script-linux: |
+            set -e
+            if ! command -v cmake >/dev/null 2>&1; then
+              python3 -m pip install cmake || pip3 install cmake
+            fi
+            if [ "$(uname -m)" = "x86_64" ] && ! command -v nasm >/dev/null 2>&1; then
+              curl -fsSL "https://www.nasm.us/pub/nasm/releasebuilds/${NASM_VERSION:-2.16.03}/nasm-${NASM_VERSION:-2.16.03}.tar.xz" -o /tmp/nasm.tar.xz
+              tar -xJf /tmp/nasm.tar.xz -C /tmp
+              (cd /tmp/nasm-${NASM_VERSION:-2.16.03} && ./configure --prefix=/usr/local >/dev/null && make -j"$(nproc)" >/dev/null && make install >/dev/null)
+            fi
+            cmake --version
+            if [ "$(uname -m)" = "x86_64" ]; then nasm -v; fi
       - uses: actions/upload-artifact@v4
         with:
           name: codecs-wheel-${{ matrix.platform.name }}

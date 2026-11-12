@@ -395,7 +395,7 @@ class _CziImage(Image):
             y0 = min(s.y for s in subblocks)
             x1 = max(s.x + s.width for s in subblocks)
             y1 = max(s.y + s.height for s in subblocks)
-        self.origin = (x0, y0)                     # series box in image pixel coordinates
+        self._xy = (x0, y0)                        # series box corner, file pixel coordinates (x, y)
         # plane -> subblocks in drawing order: series, mosaic index, directory
         # order (libCZI's order; the series only matters on the whole-file canvas)
         by_plane: dict = {}
@@ -406,7 +406,7 @@ class _CziImage(Image):
                         s.plane.get(d, czi._dim_starts.get(d, 0)) - czi._dim_starts.get(d, 0)
                         for d in axes)
             by_plane.setdefault(key, []).append(s)
-        self._planes = {key: _PlaneTiles(tiles, self.origin) for key, tiles in by_plane.items()}
+        self._planes = {key: _PlaneTiles(tiles, self._xy) for key, tiles in by_plane.items()}
         shape = [len(ids) if d == "C" and ids is not None else czi._dim_sizes.get(d, 1)
                  for d in axes] + [y1 - y0, x1 - x0]
         letters = "".join(d.lower() for d in axes) + "yx"
@@ -564,7 +564,7 @@ class _CziImage(Image):
     def _draw(self, s: Subblock, piece, band_y0, xs, dst) -> int:
         """Draw *piece* (y0, y1, x0, x1 in series coordinates, inside subblock
         *s* and inside the band) onto *dst* (the band: rows, cols[, samples])."""
-        ox, oy = self.origin
+        ox, oy = self._xy
         sy0, sx0 = s.y - oy, s.x - ox                       # tile's place in the series
         y0, y1, x0, x1 = piece
         item = self._file_dtype.itemsize * self._samples
@@ -643,7 +643,7 @@ class _CziImage(Image):
         """*piece* of subblock *s* from its rows alone, decoded as a stream in
         pieces of rows, each held within the memory budget."""
         codec, offset, length = source
-        ox, oy = self.origin
+        ox, oy = self._xy
         sy0, sx0 = s.y - oy, s.x - ox
         y0, y1, x0, x1 = piece
         row = s.width * self._samples
@@ -668,7 +668,7 @@ class _CziImage(Image):
         covering it) or of a JPEG subblock with restart markers (cut out of
         it, ``_jpeg_restarts``), in bands of rows within the budget; None
         for a JPEG that cannot be cut."""
-        ox, oy = self.origin
+        ox, oy = self._xy
         sy0, sx0 = s.y - oy, s.x - ox
         y0, y1, x0, x1 = piece
         base, size = self._data_offset(s), s.data_size
@@ -733,7 +733,7 @@ class _CziImage(Image):
     def _draw_span(self, s: Subblock, pieces, band_y0, xs, dst) -> int:
         """Uncompressed *pieces* of subblock *s* from ONE contiguous read: from
         the first piece pixel to the last, the bytes between them included."""
-        ox, oy = self.origin
+        ox, oy = self._xy
         sy0, sx0 = s.y - oy, s.x - ox
         by0, by1 = min(p[0] for p in pieces), max(p[1] for p in pieces)
         bx0, bx1 = min(p[2] for p in pieces), max(p[3] for p in pieces)
@@ -808,14 +808,28 @@ class _CziImage(Image):
             out = out[..., ss]
         return out, read
 
-    def read_region(self, x: int, y: int, width: int, height: int, **planes) -> np.ndarray:
+    @property
+    def origin(self) -> tuple:
+        """``(y, x)`` of the series' corner in the file's own pixel coordinates
+        (libCZI's bounding box; libCZI writes it x first)."""
+        x, y = self._xy
+        return (y, x)
+
+    def read_region(self, *args, y: int = None, x: int = None, height: int = None,
+                    width: int = None, **planes) -> np.ndarray:
         """A rectangle in the file's own pixel coordinates (libCZI's ``roi``,
         e.g. from ``origin`` or the XML metadata), composed from this series'
         tiles; parts outside the series' box are background (0), as libCZI
-        returns them.  *planes* select the other axes like ``read``."""
+        returns them.  *planes* select the other axes like ``read``.  Keywords
+        only: before 0.4.2 it took ``(x, y, width, height)`` by position, so a
+        positional call is refused rather than read with y and x swapped."""
+        if args or None in (y, x, height, width):
+            raise TypeError("read_region takes keywords only: read_region(y=, x=, height=, "
+                            "width=, **planes) (micro-reader 0.4.2; it took (x, y, width, "
+                            "height) by position before)")
         if width < 0 or height < 0:
             raise ValueError(f"negative region size {width} x {height}")
-        ox, oy = self.origin
+        ox, oy = self._xy
         ny, nx = self.shape[self.axes.index("y")], self.shape[self.axes.index("x")]
         y0, y1 = min(max(y - oy, 0), ny), min(max(y + height - oy, 0), ny)
         x0, x1 = min(max(x - ox, 0), nx), min(max(x + width - ox, 0), nx)
@@ -1171,7 +1185,7 @@ class _CziFile(File):
         mine = [e for e in pyramid if self._key_of(e) == values]
         if not mine:
             return []
-        x0, y0 = image.origin
+        x0, y0 = image._xy
         ny, nx = image.shape[image.axes.index("y")], image.shape[image.axes.index("x")]
         by_zoom: dict = {}
         for e in mine:

@@ -66,7 +66,7 @@ It has no global state beyond three process-wide settings (memory, cache, thread
 ```bash
 pip install micro-reader
 pip install "micro-reader[hdf5]"     # Imaris (.ims), ilastik, BigDataViewer, Luxendo, Fiji HDF5: adds h5py
-pip install "micro-reader[codecs]"   # JPEG XR, LERC and other rare codecs
+pip install "micro-reader[codecs]"   # LERC, CCITT fax and other rare TIFF codecs
 pip install "micro-reader[all]"      # both
 ```
 

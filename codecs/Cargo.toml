@@ -1,6 +1,6 @@
 [package]
 name = "micro-reader-codecs"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -20,7 +20,6 @@ zstd = { version = "0.14", default-features = false }
 # Apache / BSD
 weezl = "0.2"                 # LZW (TIFF variant), pure Rust
 jpeg-decoder = { version = "0.3", default-features = false }   # JPEG incl. lossless, pure Rust
-# jpegxr = "0.3"              # Microsoft jxrlib (BSD) wrapper -- needs libclang to build; pending decision
 jxl-oxide = "0.12"            # JPEG XL, pure Rust
 lz4_flex = { version = "0.14", default-features = false, features = ["safe-decode", "std"] }
 # TIFF's codecs (compression audit, 2026-10-01)
@@ -34,6 +33,18 @@ image-webp = "0.2"            # WebP lossless + lossy, pure Rust
 # JPEG 2000 through OpenJPEG (BSD-2; the decoder imagecodecs uses), C built with
 # cc from pre-generated bindings: no libclang needed
 jpeg2k = { version = "0.10", default-features = false, features = ["openjpeg-sys"] }   # single-threaded: micro-reader's pool decodes tiles in parallel
+
+[features]
+# C decoders built from vendor/ by build.rs (default on): libjpeg-turbo with its SIMD
+# (JPEG at libjpeg-turbo's speed and pixels) and Microsoft's jxrlib (JPEG XR, Zeiss
+# slide scans).  Without them micro-reader uses its other decoders.
+default = ["libjpeg-turbo", "jxrlib"]
+libjpeg-turbo = []
+jxrlib = []
+
+[build-dependencies]
+cc = "1"
+cmake = "0.1"
 
 [profile.release]
 lto = true

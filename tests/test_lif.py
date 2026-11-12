@@ -11,6 +11,7 @@ import pytest
 
 import micro_reader
 from micro_reader import CorruptFileError, UnsupportedFormatError
+from micro_reader._mosaic import Mosaic
 
 from _lif_writer import folder, image, write_lif
 
@@ -187,6 +188,19 @@ def test_tiles_compose_a_mosaic_at_their_stage_positions(tmp_path):
         np.testing.assert_array_equal(canvas, expected)
         assert round(mosaic.metadata.position["x"].value) == 0
         assert mosaic.metadata.pixel_sizes["x"].to("micrometer").value == pytest.approx(12.5)
+        assert mosaic.origin == (0, 0)
+
+
+def test_mosaic_origin_is_y_then_x(tmp_path):
+    """Image.origin is (y, x) on mosaics, as on every image."""
+    data = _ints((1, 1, 1, 2, 8, 9))
+    path = str(tmp_path / "pair.lif")
+    write_lif(path, [image("pair", data, "tczmyx", tiles=[(0, 0, 0.0, 0.0), (1, 0, 1e-4, 0.0)])])
+    with _native(path) as f:
+        a, b = f.images
+        mosaic = Mosaic(0, [(a, 3, 7), (b, 5, 20)], "pair", {"series": 0})
+        assert mosaic.origin == (3, 7)
+        assert mosaic.shape[-2:] == (10, 22)
 
 
 def test_a_mosaic_of_unplaced_tiles_is_refused(tmp_path):

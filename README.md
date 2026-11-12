@@ -19,8 +19,8 @@ pip install micro-reader
 Optional support:
 
 ```bash
-pip install "micro-reader[ims]"      # Imaris (.ims)
-pip install "micro-reader[codecs]"   # additional codecs
+pip install "micro-reader[hdf5]"     # Imaris (.ims), ilastik, BigDataViewer, Luxendo, Fiji HDF5
+pip install "micro-reader[codecs]"   # LERC, CCITT fax and other rare TIFF codecs
 ```
 
 ## Quick start
@@ -603,7 +603,7 @@ Supported codecs include:
 * PNG
 * EER
 
-Additional codecs such as JPEG XR and LERC are available with:
+JPEG (NDPI's included) and JPEG XR decode with libjpeg-turbo and jxrlib, built into micro-reader-codecs: the decoders imagecodecs uses, with its pixels and speed. LERC, CCITT fax, float24 and a few rarer codecs need imagecodecs:
 
 ```bash
 pip install "micro-reader[codecs]"
@@ -650,7 +650,7 @@ CZI files support:
 CZI-specific operations include:
 
 ```python
-image.read_region(x, y, w, h)
+image.read_region(y=y, x=x, height=h, width=w)
 ```
 
 and:
@@ -659,7 +659,7 @@ and:
 f.canvas()
 ```
 
-`image.origin` gives the image corner in the file's pixel coordinates.
+`image.origin` gives the image corner `(y, x)` in the file's pixel coordinates.
 
 Damaged subblock directories can be recovered with a `DamagedFileWarning`. Details are available through:
 

@@ -429,11 +429,11 @@ Coordinates from the CZI's XML, or from ZEN, are in the file's own pixel coordin
 ```python
 with micro_reader.open("slide.czi", tiles="mosaic") as f:
     for im in f.images:
-        x0, y0 = im.origin
+        y0, x0 = im.origin
         ny, nx = im.shape[-2:]
         print(im.index, "covers x", x0, "-", x0 + nx, "y", y0, "-", y0 + ny)
 
-    roi = f.images[0].read_region(x=134800, y=174800, width=512, height=512, c=0)
+    roi = f.images[0].read_region(y=174800, x=134800, height=512, width=512, c=0)
 ```
 
 `f.canvas()` covers all series at once, with the same coordinates.

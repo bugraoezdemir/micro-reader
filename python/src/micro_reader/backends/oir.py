@@ -69,6 +69,7 @@ from .._io import ThreadHandles
 NAME = "oir"
 MAGIC = b"OLYMPUSRAWFORMAT"
 RAW_TASK_BYTES = 8 << 20          # planes are read in row pieces of this size
+SEPARATE_READ_BYTES = 32 << 10    # bytes worth skipping rather than issuing one more read
 BLOCK_METADATA, BLOCK_FRAMEPROPERTIES, BLOCK_UID, BLOCK_PIXEL = 0, 1, 3, 4
 UID_PATTERN = re.compile(
     r"(?:l(\d+))?(?:z(\d+))?(?:t(\d+))?(?:_(\d+)_(\d+))?_([0-9a-f-]+)_(\d+)$")
@@ -477,7 +478,9 @@ class _OirImage(Image):
         return end - start
 
     def _read_rows(self, plane, y0, y1, xs, dst) -> int:
-        """Rows y0:y1, columns xs of a plane into *dst* (rows, columns)."""
+        """Rows y0:y1, columns xs of a plane into *dst* (rows, columns).
+        Returns the values read (more than *dst* holds when skipped columns
+        were read along)."""
         blocks, starts = plane
         item, row = self._file_dtype.itemsize, self._row_bytes
         direct = NATIVE_LITTLE or item == 1
@@ -489,6 +492,17 @@ class _OirImage(Image):
                 self._read_range(blocks, starts, y0 * row, memoryview(buf).cast("B"))
                 dst[...] = buf
             return dst.size
+        rows, width = y1 - y0, (xs.stop - xs.start) * item
+        if rows > 1 and row - width <= SEPARATE_READ_BYTES:
+            # a few skipped bytes per row cost less than one more read per row (a
+            # 512-column block of a 3554-column frame was 512 reads): the span from
+            # the first row's columns to the last row's, in one read (as CZI, LIF, MRC)
+            span = (rows - 1) * row + width
+            flat = np.empty(rows * row, np.uint8)
+            self._read_range(blocks, starts, y0 * row + xs.start * item,
+                             memoryview(flat)[:span])
+            dst[...] = flat.reshape(rows, row)[:, :width].view(self._file_dtype)
+            return span // item
         buf = None if direct else np.empty(xs.stop - xs.start, self._file_dtype)
         for i, y in enumerate(range(y0, y1)):
             target = dst[i] if direct else buf

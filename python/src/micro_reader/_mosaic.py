@@ -19,7 +19,7 @@ class Mosaic(Image):
     """*tiles*: ``[(image, y, x)]`` in drawing order (later on top), with each
     tile's corner in canvas pixels.  The tiles share axes, pixel type and
     every size but ``y`` / ``x``.  The canvas starts at the smallest corner
-    (``origin``: that corner, in the tiles' pixel grid)."""
+    (``origin``: that corner as ``(y, x)`` in the tiles' pixel grid)."""
 
     def __init__(self, position: int, tiles: list, name: str, index: dict, fill=0):
         first = tiles[0][0]
@@ -41,7 +41,7 @@ class Mosaic(Image):
         super().__init__(position, first.axes, shape, first.dtype, name=name, index=index)
         self._yi, self._xi = yi, xi
         self._tiles = [(t, y - y0, x - x0) for t, y, x in tiles]
-        #: the canvas corner in the tiles' pixel grid
+        #: the canvas corner in the tiles' pixel grid, (y, x) as on every image
         self.origin = (y0, x0)
         self._fill = fill
         self._closed = False
