@@ -1,0 +1,32 @@
+[package]
+name = "micro-reader-core"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+publish = false
+repository = "https://github.com/bugraoezdemir/micro-reader"
+description = "Native read engine for micro-reader (Python module micro_reader_core)"
+
+[lib]
+name = "micro_reader_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+# abi3: one wheel per platform for every Python >= 3.11, as micro-reader-codecs
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py311"] }
+# the decoders, linked as a Rust library without their Python module (decision MR-8);
+# its C decoders follow this crate's features below
+micro-reader-codecs = { path = "../codecs", default-features = false }
+# the engine's threads (MIT / Apache-2.0)
+rayon = "1.10"
+
+[features]
+# the C decoders of micro-reader-codecs (libjpeg-turbo with SIMD, jxrlib), on by
+# default as there; `--no-default-features` builds without them
+default = ["libjpeg-turbo", "jxrlib"]
+libjpeg-turbo = ["micro-reader-codecs/libjpeg-turbo"]
+jxrlib = ["micro-reader-codecs/jxrlib"]
+
+[profile.release]
+lto = true
+codegen-units = 1

@@ -58,7 +58,7 @@ import warnings
 
 import numpy as np
 
-from .. import _codecs, _jpeg_restarts, _memory, _parts, _pool, _stream
+from .. import _codecs, _engine, _jpeg_restarts, _memory, _parts, _pool, _stream
 from . import _tiff_variants
 from .._base import INDEX_NAMES, File, Image
 from .._errors import (CorruptFileError, MicroReaderError, MissingImagesWarning, OpenInstead,
@@ -103,6 +103,9 @@ def eer_parameters(key) -> tuple:
 _BYTE_DECODERS = {"lzw": _codecs.lzw_decode_into, "zlib": _codecs.zlib_decompress_into,
                   "packbits": _codecs.packbits_decode_into,
                   "lzma": _codecs.lzma_decompress_into}
+#: what the read engine decodes (``_engine``); LZMA stays Python's
+ENGINE_CODECS = {"none", "lzw", "zlib", "packbits", "zstd", "jpeg", "jpeg2k", "webp", "jxl",
+                 "png", "eer"}
 _IMAGE_DECODERS = {"jpeg2k": _codecs.jpeg2k_decode_into, "webp": _codecs.webp_decode_into,
                    "jxl": _codecs.jxl_decode_into, "png": _codecs.png_decode_into}
 
@@ -642,7 +645,7 @@ class _TiffImage(Image):
         """Read *block* over all axes of the series."""
         out = np.empty(tuple(s.stop - s.start for s in block), dtype=self.dtype)
         # every page's uncompressed pieces and compressed segments, on all cores
-        return out, _pool.run(self._tasks(*self._plan_series(block, out)))
+        return out, _engine.run_plans([(self, self._plan_series(block, out))], out)
 
     def _plan_series(self, block, out) -> tuple:
         """(raws, decodes) that fill *out* (shaped like *block*, over all axes
@@ -670,6 +673,69 @@ class _TiffImage(Image):
         return itertools.chain(
             (lambda job=job: self._read_rect(job[0].get(), *job[1:]) for job in raws),
             self._decode_tasks(decodes))
+
+    def _engine_codec(self):
+        """The read engine's spec of this image's segments (``_engine``), or
+        None when the engine cannot decode them (codecs it lacks, packed
+        depths, bit-reversed bytes, tifffile's decoder)."""
+        try:
+            return self._engine_spec
+        except AttributeError:
+            pass
+        key, item = self._key, self._file_dtype.itemsize
+        big = self._file_dtype.byteorder == ">" or (
+            self._file_dtype.byteorder == "=" and not np.little_endian)
+        spec = None
+        if self._raw:
+            spec = _engine.codec("raw", item, self._contig, big_endian=big,
+                                 gap=SEPARATE_READ_BYTES)
+        elif self._codec in ENGINE_CODECS and key.fillorder == 1 and (
+                self._codec not in BYTE_CODECS.values() or key.bitspersample == 8 * item):
+            if self._codec in BYTE_CODECS.values():
+                spec = _engine.codec(self._codec, item, self._contig,
+                                     predictor=int(self._predictor), big_endian=big)
+            elif self._codec == "jpeg":
+                spec = _engine.codec("jpeg", item, self._contig, colour=self._jpeg_colour,
+                                     jpeg_header=bool(getattr(key, "jpegheader", None)))
+            elif self._codec == "eer":
+                spec = _engine.codec("eer", item, 1, eer=eer_parameters(key))
+            else:
+                spec = _engine.codec(self._codec, item, self._contig)
+        self._engine_spec = spec
+        return spec
+
+    def _engine_split(self, batch, raws, decodes) -> tuple:
+        """Hand the pieces of a plan (``_plan_series``) the read engine can do
+        to *batch*; return the rest, as a plan for ``_tasks``: segments too
+        large to decode whole (streamed or decoded in parts) and anything the
+        engine cannot decode."""
+        spec = self._engine_codec()
+        if spec is None:
+            return raws, decodes
+        for handles, offset, stride, rows, cols, cs, dst in raws:
+            batch.add(handles, offset, 0, spec, None, (rows[1], stride), rows, cols,
+                      (cs.start, cs.stop), dst)
+        left = []
+        header = getattr(self._key, "jpegheader", None) if self._codec == "jpeg" else None
+        for job in decodes:
+            p, i, offset, count, jpegtables, dst, part = job
+            shape = self._segment_shape(i)
+            nbytes = shape[0] * shape[1] * shape[2] * self._file_dtype.itemsize
+            if _memory.should_stream(nbytes):
+                left.append(job)
+                continue
+            batch.max_segment = max(batch.max_segment, nbytes)
+            table = header or (jpegtables if self._codec == "jpeg" else None)
+            targets = dst.targets if isinstance(dst, _Scatter) else [(dst, None, None)]
+            for target, rows, cols in targets:
+                ys, xs = part[1], part[2]
+                if rows is not None:              # one cell of a segment several need
+                    ys = slice(ys.start + rows.start, ys.start + rows.stop)
+                    xs = slice(xs.start + cols.start, xs.start + cols.stop)
+                batch.add(self._handles, offset, count, spec, table, shape[:2],
+                          (ys.start, ys.stop), (xs.start, xs.stop),
+                          (part[3].start, part[3].stop), target)
+        return [], left
 
     def _plan_page(self, p, ss, ys, xs, cs, dest, raws, decodes) -> None:
         """What page *p* contributes: empty parts are filled here; uncompressed
@@ -1433,6 +1499,44 @@ def open_pages(path: str) -> _TiffFile:
         return pages_file(tif, path)
 
 
+def _imagej_stopped_early(tif, series: list) -> list:
+    """The ImageJ series of a file holding fewer planes than its metadata names (an
+    acquisition stopped early: ScanImage, 3 of 24 frames).
+
+    tifffile 2026.11.12 and later drop such a series and list the pages as one generic
+    series, so its planes would read as separate images without their axes; earlier
+    versions kept the shape the metadata names.  micro-reader rebuilds that shape, so
+    the file reads the same with any tifffile: the missing planes as zeros, with a
+    MissingImagesWarning (``_SeriesImage``).  Only ImageJ's own plane order (czt) with
+    one sample per pixel or RGB is rebuilt; anything else stays as tifffile lists it.
+    """
+    if not tif.is_imagej or len(series) != 1 or series[0].kind != "generic":
+        return series
+    meta = tif.imagej_metadata or {}
+    if str(meta.get("order", "czt")).lower() not in ("czt", "default"):
+        return series
+    try:
+        frames, slices, channels, images = (int(meta.get(k, 1)) for k in
+                                            ("frames", "slices", "channels", "images"))
+    except (TypeError, ValueError):
+        return series
+    pages = list(series[0].pages)
+    page = pages[0] if pages else None
+    if page is None or min(frames, slices, channels) < 1 or page.shaped[0] > 1:
+        return series
+    if channels > 1 and images == frames * slices and page.shaped[4] == channels:
+        channels = 1                                    # RGB declared as channels
+    lead = (frames, slices, channels)
+    if int(np.prod(lead, dtype=np.int64)) <= len(pages):
+        return series                                   # not a stopped acquisition
+    # squeezed as tifffile lists its series (size-1 axes dropped, Y and X kept)
+    dims = [(n, a) for n, a in zip(lead + tuple(page.shape), "TZC" + page.axes)
+            if n > 1 or a in "YX"]
+    shape, axes = tuple(n for n, _ in dims), "".join(a for _, a in dims)
+    return [type(series[0])(pages, shape, page.dtype, axes, parent=tif,       # TiffPageSeries
+                            name=series[0].name, kind="imagej")]
+
+
 def plain_pages(tif) -> bool:
     """Whether tifffile already reads *tif* as plain pages (an OME ``BinaryOnly``
     stub has no image of its own, so tifffile lists its pages as they are)."""
@@ -1551,7 +1655,7 @@ def _open(tif, path, tiles, resolutions, rename, companion, multifile, plates=Fa
                 f"{path!r}: PerkinElmer Opera Flex file (a TIFF with a FlexXML tag): the flex "
                 "backend reads it as a plate when it is named .flex (micro_reader.open(path, "
                 "backend='flex'))")
-        series = list(tif.series)
+        series = _imagej_stopped_early(tif, list(tif.series))
         if tif.is_lsm:
             # Zeiss LSM stores a small RGB preview of every plane (reduced
             # pages); Bio-Formats does not list them, and neither does

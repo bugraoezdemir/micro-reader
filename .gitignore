@@ -10,6 +10,7 @@ dist/
 
 # Rust / maturin
 codecs/target/
+core/target/
 
 # editors and OS
 .vscode/
