@@ -1499,6 +1499,44 @@ def open_pages(path: str) -> _TiffFile:
         return pages_file(tif, path)
 
 
+def _imagej_stopped_early(tif, series: list) -> list:
+    """The ImageJ series of a file holding fewer planes than its metadata names (an
+    acquisition stopped early: ScanImage, 3 of 24 frames).
+
+    tifffile 2026.11.12 and later drop such a series and list the pages as one generic
+    series, so its planes would read as separate images without their axes; earlier
+    versions kept the shape the metadata names.  micro-reader rebuilds that shape, so
+    the file reads the same with any tifffile: the missing planes as zeros, with a
+    MissingImagesWarning (``_SeriesImage``).  Only ImageJ's own plane order (czt) with
+    one sample per pixel or RGB is rebuilt; anything else stays as tifffile lists it.
+    """
+    if not tif.is_imagej or len(series) != 1 or series[0].kind != "generic":
+        return series
+    meta = tif.imagej_metadata or {}
+    if str(meta.get("order", "czt")).lower() not in ("czt", "default"):
+        return series
+    try:
+        frames, slices, channels, images = (int(meta.get(k, 1)) for k in
+                                            ("frames", "slices", "channels", "images"))
+    except (TypeError, ValueError):
+        return series
+    pages = list(series[0].pages)
+    page = pages[0] if pages else None
+    if page is None or min(frames, slices, channels) < 1 or page.shaped[0] > 1:
+        return series
+    if channels > 1 and images == frames * slices and page.shaped[4] == channels:
+        channels = 1                                    # RGB declared as channels
+    lead = (frames, slices, channels)
+    if int(np.prod(lead, dtype=np.int64)) <= len(pages):
+        return series                                   # not a stopped acquisition
+    # squeezed as tifffile lists its series (size-1 axes dropped, Y and X kept)
+    dims = [(n, a) for n, a in zip(lead + tuple(page.shape), "TZC" + page.axes)
+            if n > 1 or a in "YX"]
+    shape, axes = tuple(n for n, _ in dims), "".join(a for _, a in dims)
+    return [type(series[0])(pages, shape, page.dtype, axes, parent=tif,       # TiffPageSeries
+                            name=series[0].name, kind="imagej")]
+
+
 def plain_pages(tif) -> bool:
     """Whether tifffile already reads *tif* as plain pages (an OME ``BinaryOnly``
     stub has no image of its own, so tifffile lists its pages as they are)."""
@@ -1617,7 +1655,7 @@ def _open(tif, path, tiles, resolutions, rename, companion, multifile, plates=Fa
                 f"{path!r}: PerkinElmer Opera Flex file (a TIFF with a FlexXML tag): the flex "
                 "backend reads it as a plate when it is named .flex (micro_reader.open(path, "
                 "backend='flex'))")
-        series = list(tif.series)
+        series = _imagej_stopped_early(tif, list(tif.series))
         if tif.is_lsm:
             # Zeiss LSM stores a small RGB preview of every plane (reduced
             # pages); Bio-Formats does not list them, and neither does
