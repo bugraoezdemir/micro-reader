@@ -3,10 +3,12 @@
 # (release.yml calls this workflow; nothing is published unless it passes).
 # Plain pushes do not run them; workflow_dispatch runs them by hand.
 #
-# What runs: build the codecs wheels, then test micro-reader against exactly
-# those wheels on every OS and supported Python, once more on the reference
-# decoders (no native module), once on the oldest declared dependencies, and
-# check the codecs' third-party licence notices are current.
+# What runs: build the codecs wheels and the read engine's (micro-reader-core,
+# not yet a dependency of micro-reader: its tests skip without it), then test
+# micro-reader against exactly those wheels on every OS and supported Python,
+# once more on the reference decoders (no native module), once on the oldest
+# declared dependencies, and check the codecs' third-party licence notices are
+# current.
 name: CI
 
 on:
@@ -27,6 +29,11 @@ jobs:
   codecs:
     uses: ./.github/workflows/build-codecs.yml
 
+  core:
+    uses: ./.github/workflows/build-codecs.yml
+    with:
+      crate: core
+
   licences:
     name: licence notices current
     runs-on: ubuntu-latest
@@ -41,7 +48,7 @@ jobs:
 
   test:
     name: test ${{ matrix.os }} py${{ matrix.python }}
-    needs: codecs
+    needs: [codecs, core]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -55,13 +62,14 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: actions/download-artifact@v4
         with:
-          pattern: codecs-wheel-*
+          pattern: "*-wheel-*"
           merge-multiple: true
           path: wheels
-      - name: install micro-reader with the codecs wheel just built
+      - name: install micro-reader with the codecs and core wheels just built
         run: |
           python -m pip install --upgrade pip
           python -m pip install --find-links wheels -e "python[test]"
+          python -m pip install --no-index --find-links wheels micro-reader-core
       - name: tests (native decoders)
         run: python -m pytest -q
       - name: tests (reference decoders)
@@ -93,7 +101,7 @@ jobs:
 
   package:
     name: packages build and install
-    needs: codecs
+    needs: [codecs, core]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -102,7 +110,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
-          pattern: codecs-wheel-*
+          pattern: "*-wheel-*"
           merge-multiple: true
           path: wheels
       - name: build micro-reader's sdist and wheel, check their metadata
@@ -114,3 +122,7 @@ jobs:
         run: |
           python -m pip install --find-links wheels dist/*.whl
           cd /tmp && python -c "import micro_reader, micro_reader_codecs; print(micro_reader.__file__)"
+      - name: the core wheel installs and imports
+        run: |
+          python -m pip install --no-index --find-links wheels micro-reader-core
+          cd /tmp && python -c "import micro_reader_core as m; print(m.__version__, m.CODECS_VERSION)"

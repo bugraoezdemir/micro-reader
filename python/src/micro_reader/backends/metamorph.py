@@ -387,7 +387,7 @@ class _NDImage(PlaneImage):
             raise UnsupportedFormatError(
                 f"{self.name!r} is ragged and its parts do not share a z grid: read its "
                 f"parts (image.parts)")
-        from .. import _pool
+        from .. import _engine
         (t0, t1), (c0, c1), (z0, z1) = ((s.start, s.stop) for s in block[:3])
         ys, xs = block[3], block[4]
         out = np.empty((t1 - t0, c1 - c0, z1 - z0, ys.stop - ys.start, xs.stop - xs.start),
@@ -413,8 +413,7 @@ class _NDImage(PlaneImage):
                         else:
                             plan = image._plan_series((slice(k, k + 1), ys, xs), dest[None])
                         plans.append((image, plan))
-            return out, _pool.run(itertools.chain.from_iterable(
-                image._tasks(*plan) for image, plan in plans))
+            return out, _engine.run_plans(plans, out)
         finally:
             for entry in entries:
                 self._members.release(entry)

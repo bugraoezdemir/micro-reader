@@ -1,0 +1,5 @@
+# Pinned for reproducible native builds (PLAN.md, "Rust toolchain").
+# rustup picks this up automatically inside this folder.  
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

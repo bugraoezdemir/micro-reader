@@ -21,6 +21,8 @@ class ThreadHandles:
         self._local = threading.local()
         self._lock = threading.Lock()
         self._all: list = []
+        #: (engine, file number) of this file in the read engine (``_engine``)
+        self._engine = None
 
     def get(self):
         fh = getattr(self._local, "fh", None)
@@ -39,11 +41,31 @@ class ThreadHandles:
                                    "(truncated file?)")
         return data
 
+    def engine_file(self, engine) -> int:
+        """This file's number in the read engine *engine*, opened there on first
+        use (and again after :meth:`close`)."""
+        with self._lock:
+            if self._engine is None or self._engine[0] is not engine:
+                self._engine = (engine, engine.open(self.path))
+            return self._engine[1]
+
     def close(self) -> None:
         with self._lock:
             handles, self._all = self._all, []
+            engine, self._engine = self._engine, None
         for fh in handles:
             fh.close()
+        if engine is not None:
+            engine[0].close(engine[1])
+
+    def __del__(self):
+        # the engine's handle is not garbage-collected with this object
+        engine = getattr(self, "_engine", None)
+        if engine is not None:
+            try:
+                engine[0].close(engine[1])
+            except Exception:                       # noqa: BLE001 - interpreter exit
+                pass
 
 
 #: what all decoded-block caches of a process may hold together, by default
@@ -84,9 +106,11 @@ def set_cache_limit(limit) -> None:
 
 
 def cached_bytes() -> int:
-    """What the decoded-block caches of this process hold now, in bytes."""
+    """What the decoded-block caches of this process hold now, in bytes (the
+    read engine's included)."""
+    from ._engine import cached_bytes as engine_bytes
     with _shared_lock:
-        return _shared_bytes
+        return _shared_bytes + engine_bytes()
 
 
 def _evict_shared(limit: int) -> None:

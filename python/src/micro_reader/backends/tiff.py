@@ -58,7 +58,7 @@ import warnings
 
 import numpy as np
 
-from .. import _codecs, _jpeg_restarts, _memory, _parts, _pool, _stream
+from .. import _codecs, _engine, _jpeg_restarts, _memory, _parts, _pool, _stream
 from . import _tiff_variants
 from .._base import INDEX_NAMES, File, Image
 from .._errors import (CorruptFileError, MicroReaderError, MissingImagesWarning, OpenInstead,
@@ -103,6 +103,9 @@ def eer_parameters(key) -> tuple:
 _BYTE_DECODERS = {"lzw": _codecs.lzw_decode_into, "zlib": _codecs.zlib_decompress_into,
                   "packbits": _codecs.packbits_decode_into,
                   "lzma": _codecs.lzma_decompress_into}
+#: what the read engine decodes (``_engine``); LZMA stays Python's
+ENGINE_CODECS = {"none", "lzw", "zlib", "packbits", "zstd", "jpeg", "jpeg2k", "webp", "jxl",
+                 "png", "eer"}
 _IMAGE_DECODERS = {"jpeg2k": _codecs.jpeg2k_decode_into, "webp": _codecs.webp_decode_into,
                    "jxl": _codecs.jxl_decode_into, "png": _codecs.png_decode_into}
 
@@ -642,7 +645,7 @@ class _TiffImage(Image):
         """Read *block* over all axes of the series."""
         out = np.empty(tuple(s.stop - s.start for s in block), dtype=self.dtype)
         # every page's uncompressed pieces and compressed segments, on all cores
-        return out, _pool.run(self._tasks(*self._plan_series(block, out)))
+        return out, _engine.run_plans([(self, self._plan_series(block, out))], out)
 
     def _plan_series(self, block, out) -> tuple:
         """(raws, decodes) that fill *out* (shaped like *block*, over all axes
@@ -670,6 +673,69 @@ class _TiffImage(Image):
         return itertools.chain(
             (lambda job=job: self._read_rect(job[0].get(), *job[1:]) for job in raws),
             self._decode_tasks(decodes))
+
+    def _engine_codec(self):
+        """The read engine's spec of this image's segments (``_engine``), or
+        None when the engine cannot decode them (codecs it lacks, packed
+        depths, bit-reversed bytes, tifffile's decoder)."""
+        try:
+            return self._engine_spec
+        except AttributeError:
+            pass
+        key, item = self._key, self._file_dtype.itemsize
+        big = self._file_dtype.byteorder == ">" or (
+            self._file_dtype.byteorder == "=" and not np.little_endian)
+        spec = None
+        if self._raw:
+            spec = _engine.codec("raw", item, self._contig, big_endian=big,
+                                 gap=SEPARATE_READ_BYTES)
+        elif self._codec in ENGINE_CODECS and key.fillorder == 1 and (
+                self._codec not in BYTE_CODECS.values() or key.bitspersample == 8 * item):
+            if self._codec in BYTE_CODECS.values():
+                spec = _engine.codec(self._codec, item, self._contig,
+                                     predictor=int(self._predictor), big_endian=big)
+            elif self._codec == "jpeg":
+                spec = _engine.codec("jpeg", item, self._contig, colour=self._jpeg_colour,
+                                     jpeg_header=bool(getattr(key, "jpegheader", None)))
+            elif self._codec == "eer":
+                spec = _engine.codec("eer", item, 1, eer=eer_parameters(key))
+            else:
+                spec = _engine.codec(self._codec, item, self._contig)
+        self._engine_spec = spec
+        return spec
+
+    def _engine_split(self, batch, raws, decodes) -> tuple:
+        """Hand the pieces of a plan (``_plan_series``) the read engine can do
+        to *batch*; return the rest, as a plan for ``_tasks``: segments too
+        large to decode whole (streamed or decoded in parts) and anything the
+        engine cannot decode."""
+        spec = self._engine_codec()
+        if spec is None:
+            return raws, decodes
+        for handles, offset, stride, rows, cols, cs, dst in raws:
+            batch.add(handles, offset, 0, spec, None, (rows[1], stride), rows, cols,
+                      (cs.start, cs.stop), dst)
+        left = []
+        header = getattr(self._key, "jpegheader", None) if self._codec == "jpeg" else None
+        for job in decodes:
+            p, i, offset, count, jpegtables, dst, part = job
+            shape = self._segment_shape(i)
+            nbytes = shape[0] * shape[1] * shape[2] * self._file_dtype.itemsize
+            if _memory.should_stream(nbytes):
+                left.append(job)
+                continue
+            batch.max_segment = max(batch.max_segment, nbytes)
+            table = header or (jpegtables if self._codec == "jpeg" else None)
+            targets = dst.targets if isinstance(dst, _Scatter) else [(dst, None, None)]
+            for target, rows, cols in targets:
+                ys, xs = part[1], part[2]
+                if rows is not None:              # one cell of a segment several need
+                    ys = slice(ys.start + rows.start, ys.start + rows.stop)
+                    xs = slice(xs.start + cols.start, xs.start + cols.stop)
+                batch.add(self._handles, offset, count, spec, table, shape[:2],
+                          (ys.start, ys.stop), (xs.start, xs.stop),
+                          (part[3].start, part[3].stop), target)
+        return [], left
 
     def _plan_page(self, p, ss, ys, xs, cs, dest, raws, decodes) -> None:
         """What page *p* contributes: empty parts are filled here; uncompressed

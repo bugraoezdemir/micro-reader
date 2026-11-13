@@ -9,11 +9,13 @@ description = "Native image decoders for micro-reader (Python module micro_reade
 
 [lib]
 name = "micro_reader_codecs"
-crate-type = ["cdylib"]
+# cdylib: the Python module (maturin); rlib: micro-reader-core links the decoders
+# (src/decode.rs) as a Rust library, without the "python" feature (decision MR-8)
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # abi3: one wheel per platform for every Python >= 3.11 (micro-reader PLAN.md, "Native code")
-pyo3 = { version = "0.29", features = ["extension-module", "abi3-py311"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py311"], optional = true }
 # the official zstd C library behind a Rust wrapper (decided 2026-09-30)
 zstd = { version = "0.14", default-features = false }
 # every codec an accepted format can contain (rule, 2026-09-30); all MIT /
@@ -38,7 +40,12 @@ jpeg2k = { version = "0.10", default-features = false, features = ["openjpeg-sys
 # C decoders built from vendor/ by build.rs (default on): libjpeg-turbo with its SIMD
 # (JPEG at libjpeg-turbo's speed and pixels) and Microsoft's jxrlib (JPEG XR, Zeiss
 # slide scans).  Without them micro-reader uses its other decoders.
-default = ["libjpeg-turbo", "jxrlib"]
+#
+# "python": the Python module micro_reader_codecs (src/python.rs, src/stream.rs).
+# micro-reader-core depends on this crate with default-features = false and the C
+# decoders only.
+default = ["python", "libjpeg-turbo", "jxrlib"]
+python = ["dep:pyo3"]
 libjpeg-turbo = []
 jxrlib = []
 

@@ -20,7 +20,6 @@ separate 2-D files (Harmony, MetaXpress, ...), listed by an index file.
   its parts."""
 from __future__ import annotations
 
-import itertools
 import os
 import threading
 import warnings
@@ -224,7 +223,7 @@ class PlaneImage(Image):
         planned straight into *out* first, then all of them run in one batch on
         the decode pool, as a multi-page TIFF's pages do (no copy per plane, the
         pool busy across planes). The members stay acquired until it is done."""
-        from . import _pool
+        from . import _engine
         entries, plans = [], []
         try:
             for t in range(*ts):
@@ -246,8 +245,7 @@ class PlaneImage(Image):
                             plan = image._plan_series((slice(k, k + 1), ys, xs) + extra,
                                                       dest[None])
                         plans.append((image, plan))
-            return _pool.run(itertools.chain.from_iterable(
-                image._tasks(*plan) for image, plan in plans))
+            return _engine.run_plans(plans, out)
         finally:
             for entry in entries:
                 self._members.release(entry)
