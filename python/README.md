@@ -250,6 +250,10 @@ Actual performance depends on hardware and storage.
 
 Bug reports, requests for additional formats and sample files are welcome on [GitHub](https://github.com/bugraoezdemir/micro-reader/issues).
 
+### Development note
+
+The project has been developed with substantial AI assistance. Its functionality is continuously tested against real datasets, but some issues or edge cases may remain undiscovered. 
+
 ## License
 
 `micro-reader` and `micro-reader-codecs` are MIT licensed. The codec wheels include third-party libraries. Their notices are available in [`codecs/THIRD_PARTY_LICENSES.txt`](https://github.com/bugraoezdemir/micro-reader/blob/main/codecs/THIRD_PARTY_LICENSES.txt).
