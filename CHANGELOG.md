@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.5 (2026-11-16)
+
+Requires micro-reader-codecs 0.0.4 (`>=0.0.4,<0.1`), unchanged from 0.4.3.
+
+### Fixed
+
+- TIFF: a Predictor tag on uncompressed data is ignored, as libtiff ignores it. micro-reader
+  applied it when a tifffile older than 2026.11.12 was installed and ignored it with
+  2026.11.12 or later, so the pixels of such a file depended on the tifffile version. They
+  are now the stored values with any tifffile. Olympus OIF planes follow the same rule.
+- TIFF: a PlanarConfiguration other than 1 or 2 (TIFF defines no other value) raises
+  `UnsupportedFormatError` when the file is opened. Such a file used to open and then fail
+  with an `IndexError` on the first read.
+## 0.4.4 (2026-11-14)
+
+Requires micro-reader-codecs 0.0.4 (`>=0.0.4,<0.1`), unchanged from 0.4.3.
+
+### Fixed
+
+- TIFF: with tifffile 2026.11.12 or later, an ImageJ stack whose acquisition stopped early
+  (the metadata names more planes than the file holds, e.g. a ScanImage stack with 3 of 24
+  frames) opened as separate one-plane images, without its z, channel and time axes and
+  without a warning. tifffile now drops such a series and lists the bare pages. micro-reader
+  rebuilds the series its metadata names, so the file reads the same with any tifffile: one
+  image with the planes it holds, the missing ones read as zeros, with a
+  `MissingImagesWarning`. Only ImageJ's own plane order with greyscale or RGB pages is
+  rebuilt; any other layout stays as tifffile lists it.
+
 ## 0.4.3 (2026-11-12), with micro-reader-codecs 0.0.4
 
 Requires micro-reader-codecs 0.0.4 (`>=0.0.4,<0.1`).

@@ -441,3 +441,35 @@ def test_uncompressed_single_strip_merged_span(tmp_path):
         series = img.images[0]
         np.testing.assert_array_equal(series[:, 100:164], big[:, 100:164])
         assert series.stats.pixels_read == 64 * 64              # rows read separately
+
+
+def _retag(path, old, new):
+    """Rename tag *old* of page 0 to *new*: tifffile will not write some tags."""
+    with tifffile.TiffFile(path) as tif:
+        offset, order = tif.pages[0].tags[old].offset, tif.byteorder
+    with open(path, "r+b") as fh:
+        fh.seek(offset)
+        fh.write(new.to_bytes(2, "little" if order == "<" else "big"))
+
+
+@pytest.mark.parametrize("dtype,predictor,layout", [
+    ("u2", 2, {"rowsperstrip": 16}), ("i1", 2, {"tile": (32, 32)}),
+    ("f4", 3, {"rowsperstrip": 16}), ("f4", 3, {"tile": (32, 32)})])
+def test_a_predictor_on_uncompressed_data_is_ignored(tmp_path, dtype, predictor, layout):
+    """As in libtiff and tifffile from 2026.11.12; older tifffile applied it, and
+    micro-reader with it.  The pixels must not depend on the tifffile installed."""
+    data = _data((64, 80), dtype)
+    path = str(tmp_path / "pred.tif")
+    tifffile.imwrite(path, data, extratags=[(32001, 3, 1, predictor, True)], **layout)
+    _retag(path, 32001, 317)                                  # Predictor
+    with _native(path, axes=None) as f:
+        np.testing.assert_array_equal(f.images[0][...], data)
+
+
+def test_an_undefined_planar_configuration_is_refused(tmp_path):
+    path = str(tmp_path / "planar3.tif")
+    tifffile.imwrite(path, _data((64, 80, 3), "u1"), photometric="rgb", rowsperstrip=16)
+    with tifffile.TiffFile(path, mode="r+b") as tif:
+        tif.pages[0].tags[284].overwrite(3)
+    with pytest.raises(UnsupportedFormatError, match="PlanarConfiguration 3"):
+        _native(path)

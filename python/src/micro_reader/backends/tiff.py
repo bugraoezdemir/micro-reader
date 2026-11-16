@@ -110,23 +110,30 @@ _IMAGE_DECODERS = {"jpeg2k": _codecs.jpeg2k_decode_into, "webp": _codecs.webp_de
                    "jxl": _codecs.jxl_decode_into, "png": _codecs.png_decode_into}
 
 
+def predictor(page) -> int:
+    """The predictor that applies to *page*'s segments.  Uncompressed data has
+    none, whatever its Predictor tag says, as in libtiff and in tifffile from
+    2026.11.12 (which reports 1 there; older versions applied the tag)."""
+    return 1 if page.compression == 1 else int(page.predictor)
+
+
 def own_codec(key):
     """micro-reader's decoder for tifffile keyframe *key*'s segments, or
     None when tifffile's decoder must do it."""
     dtype = np.dtype(key.dtype)
     if dtype.kind == "c" or not isinstance(key.bitspersample, int):
         return None                                      # complex; RGB565-style depths
-    c, predictor = key.compression, key.predictor
+    c, pred = key.compression, predictor(key)
     if c in BYTE_CODECS:
-        if key.is_subsampled or predictor not in (1, 2, 3):
+        if key.is_subsampled or pred not in (1, 2, 3):
             return None
         if key.bitspersample != 8 * dtype.itemsize:
             # packed unsigned depths (1-bit masks, 2 / 4 / 10 / 12 / 14 / 24 bit):
             # unpacked here; signed and float24 stay tifffile's, and TIFF
             # predictors are only defined for whole-byte samples
-            if dtype.kind not in "ub" or predictor != 1 or key.bitspersample > 32:
+            if dtype.kind not in "ub" or pred != 1 or key.bitspersample > 32:
                 return None
-        if (predictor == 2 and dtype.kind not in "iu") or (predictor == 3 and dtype.kind != "f"):
+        if (pred == 2 and dtype.kind not in "iu") or (pred == 3 and dtype.kind != "f"):
             return None
         return BYTE_CODECS[c]
     if key.fillorder != 1:
@@ -138,7 +145,7 @@ def own_codec(key):
                 and key.samplesperpixel == 1 and dtype.kind in "bu" and dtype.itemsize in (1, 2, 4):
             return "eer"
         return None
-    if c in IMAGE_CODECS and predictor == 1 and key.planarconfig == 1:
+    if c in IMAGE_CODECS and pred == 1 and key.planarconfig == 1:
         # the codestream carries its own precision (e.g. 12-bit JPEG in uint16);
         # the decoders give 8- or 16-bit samples
         if dtype.kind != "u" or dtype.itemsize > 2:
@@ -160,7 +167,7 @@ def _layout(page) -> tuple:
     """How a page stores its pixels -- what decoding it as another page assumes:
     compression, predictor, tiles or strips, sample type and arrangement."""
     tiled = bool(page.is_tiled)
-    return (int(page.compression), int(page.predictor), tiled,
+    return (int(page.compression), predictor(page), tiled,
             (page.tilelength, page.tilewidth) if tiled else page.rowsperstrip,
             str(page.dtype), page.samplesperpixel, int(page.planarconfig), page.bitspersample,
             int(page.fillorder))
@@ -438,6 +445,10 @@ class _TiffImage(Image):
             raise UnsupportedFormatError(
                 f"{where}: data type not supported (SampleFormat {key.sampleformat}, "
                 f"{key.bitspersample}-bit)")
+        if key.samplesperpixel > 1 and int(key.planarconfig) not in (1, 2):
+            # TIFF defines 1 (samples interleaved) and 2 (one plane per sample)
+            raise UnsupportedFormatError(
+                f"{where}: PlanarConfiguration {int(key.planarconfig)} not supported")
         if key.shaped[1] != 1:
             raise UnsupportedFormatError(f"{where}: volumetric pages (ImageDepth)")
         page_axes, page_shape = key.axes, tuple(key.shape)
@@ -474,7 +485,7 @@ class _TiffImage(Image):
         self._page_pos = _PAGE_AXES[page_axes]
         self._sep, _, self._length, self._width, self._contig = key.shaped
         self._file_dtype = np.dtype(key.dtype).newbyteorder(tif.byteorder)
-        self._raw = (key.compression == 1 and key.predictor == 1 and key.fillorder == 1
+        self._raw = (key.compression == 1 and key.fillorder == 1
                      and not key.is_subsampled and key.sampleformat != 5
                      and key.bitspersample == 8 * self._file_dtype.itemsize)
         self._as_normalised = _AS_NORMALISED[page_axes]
@@ -538,7 +549,7 @@ class _TiffImage(Image):
         self._closed = False
         #: micro-reader's own decoder for the segments; None: tifffile's
         self._codec = None if self._raw else own_codec(key)
-        self._predictor = key.predictor
+        self._predictor = predictor(key)
         self._jpeg_colour = jpeg_colour(key)
         if not self._raw and self._codec is None:
             self._decode = key.decode          # tifffile builds its decode function once

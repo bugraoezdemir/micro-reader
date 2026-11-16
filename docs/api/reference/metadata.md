@@ -15,22 +15,22 @@ class micro_reader.Metadata:
     stage_position: dict = {}    # axis -> Quantity, unverified
 ```
 
-One image's metadata, from `Image.metadata`. Anything the file does not say is absent from the dicts, or `None` in a `Channel`.
+The metadata of one image, from `Image.metadata`. Anything the file does not say is absent from the dicts, or `None` in a `Channel`.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `pixel_sizes` | `dict[str, Quantity]` | Keys from `x`, `y`, `z`, `t`. Space: the size of a pixel. `t`: the time between frames. Scaled per [resolution level](../guide/pyramids.md#pixel-sizes-per-level). |
-| `position` | `dict[str, Quantity]` | Position of the centre of the first pixel, in the coordinate system `coordinate_system`. Keys from `x`, `y`, `z`. Empty when the file gives none. |
-| `coordinate_system` | `str` or `None` | The `id` of the [coordinate system](coordinates.md#coordinatesystem) `position` is in: one of `File.coordinate_systems`. Set exactly when `position` is not empty; `None` for an image without a position. Constructing a `Metadata` with a coordinate system and an empty position raises `ValueError`. |
-| `channels` | `tuple[Channel, ...]` | One per index of the native `c` axis; one entry when there is no `c` axis. |
-| `index_values` | `dict[str, Quantity]` | The physical value of this image's indices that have one: `{"emission": Quantity(510.0, "nanometer")}`, `{"lifetime": Quantity(2.5, "nanosecond")}`. |
-| `stage_position` | `dict[str, Quantity]` | Stage coordinates the file records for this image, as recorded, where the file's convention (which point of the field, the stage's directions against the image axes) is not verified. They are not a `position`: no coordinate system, and not to be used to place images against each other. Keys from `x`, `y`, `z`. Filled by MetaMorph and Micro-Manager files. |
+| `pixel_sizes` | `dict[str, Quantity]` | The keys come from `x`, `y`, `z` and `t`. For the space axes, the value is the size of a pixel. For `t`, it is the time between frames. The values are scaled per [resolution level](../guide/pyramids.md#pixel-sizes-per-level). |
+| `position` | `dict[str, Quantity]` | The position of the centre of the first pixel, in the coordinate system `coordinate_system`. The keys come from `x`, `y` and `z`. It is empty when the file gives none. |
+| `coordinate_system` | `str` or `None` | The `id` of the [coordinate system](coordinates.md#coordinatesystem) that `position` is in. It is one of `File.coordinate_systems`. It is set exactly when `position` is not empty, and it is `None` for an image without a position. Constructing a `Metadata` with a coordinate system and an empty position raises `ValueError`. |
+| `channels` | `tuple[Channel, ...]` | One channel for each index of the native `c` axis, or one entry when there is no `c` axis. |
+| `index_values` | `dict[str, Quantity]` or `dict[str, tuple[Quantity, ...]]` | The physical value of those indices of this image that have one, for example `{"excitation": Quantity(488.0, "nanometer")}` or `{"lifetime": Quantity(2.5, "nanosecond")}`. For a lambda scan opened with an `l` axis (`axes=None`), `"emission"` holds a tuple with the wavelength of each band along `l`. |
+| `stage_position` | `dict[str, Quantity]` | The stage coordinates that the file records for this image, as recorded. The convention of the file is not verified, which means it is unknown which point of the field they refer to and how the directions of the stage relate to the image axes. They are not a `position`. They have no coordinate system, and they should not be used to place images against each other. The keys come from `x`, `y` and `z`. MetaMorph and Micro-Manager files fill them. |
 
 | Method | Description |
 | --- | --- |
-| `scaled(factors) -> Metadata` | A copy with each pixel size multiplied by `factors[axis]` (a `dict` of axis to `float`). Used for resolution levels. |
-| `unplaced() -> Metadata` | A copy without a position: `position` empty and `coordinate_system` `None`; the rest kept. |
-| `Metadata.unknown(n_channels=1) -> Metadata` | Class method: empty metadata with `n_channels` empty channels. |
+| `scaled(factors) -> Metadata` | Returns a copy with each pixel size multiplied by `factors[axis]`, where `factors` is a `dict` of axis to `float`. It is used for resolution levels. |
+| `unplaced() -> Metadata` | Returns a copy without a position. `position` is empty and `coordinate_system` is `None`, and the rest is kept. |
+| `Metadata.unknown(n_channels=1) -> Metadata` | Class method that returns empty metadata with `n_channels` empty channels. |
 
 ## Channel
 
@@ -45,10 +45,10 @@ class micro_reader.Channel:
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `name` | `str` or `None` | Channel name as the file gives it: dye, filter or channel label. For RGB samples folded into channels (the default of [`open`](functions.md#open)): `"<name> R"`, `"G"`, `"B"` (`"A"`). |
-| `color` | `str` or `None` | Display colour, upper-case `'#RRGGBB'`. Red, green, blue for folded RGB samples (white for `A`). |
-| `emission_wavelength` | `Quantity` or `None` | Emission wavelength, or the centre of the emission band. |
-| `excitation_wavelength` | `Quantity` or `None` | Excitation (laser or filter) wavelength. |
+| `name` | `str` or `None` | The channel name as the file gives it, which is a dye, a filter or a channel label. For RGB samples folded into channels, which is the default of [`open`](functions.md#open), the names are `"<name> R"`, `"G"`, `"B"` and `"A"`. |
+| `color` | `str` or `None` | The display colour as upper-case `'#RRGGBB'`. For folded RGB samples it is red, green and blue, and white for `A`. |
+| `emission_wavelength` | `Quantity` or `None` | The emission wavelength, or the centre of the emission band. |
+| `excitation_wavelength` | `Quantity` or `None` | The excitation wavelength of the laser or filter. |
 
 ## Quantity
 
@@ -58,7 +58,7 @@ class micro_reader.Quantity(NamedTuple):
     unit: str
 ```
 
-A number with an OME-Zarr (UDUNITS-2) unit name such as `"micrometer"`, `"nanometer"`, `"second"` or `"millisecond"`. As a named tuple it compares, hashes and unpacks like a tuple:
+A number with an OME-Zarr (UDUNITS-2) unit name such as `"micrometer"`, `"nanometer"`, `"second"` or `"millisecond"`. Because it is a named tuple, it compares, hashes and unpacks like a tuple:
 
 ```python
 q = micro_reader.Quantity(0.5, "micrometer")
@@ -72,17 +72,18 @@ q == (0.5, "micrometer")      # True
 Quantity.to(unit) -> Quantity
 ```
 
-This quantity in another unit. Returns `self` when `unit` is already the unit.
+Returns this quantity in another unit. It returns `self` when `unit` is already the unit.
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `unit` | `str` | An OME-Zarr space or time unit name. |
+| `unit` | `str` | An OME-Zarr space or time unit name, or a short spelling that files use, such as `"um"`, `"nm"`, `"ms"` or `"s"`. |
 
-Raises `KeyError` for an unknown unit name. It does not check that both units are of the same kind: `Quantity(1, "nanometer").to("second")` returns a number without error, and the number is meaningless. Convert lengths to lengths and times to times.
+It raises `ValueError` for a unit name it does not know, and for a conversion between a length and a time, such as `Quantity(1, "nanometer").to("second")`. The message says which.
 
 ```python
 micro_reader.Quantity(510.0, "nanometer").to("micrometer")    # Quantity(0.51, 'micrometer')
 micro_reader.Quantity(40715.0, "millisecond").to("second")    # Quantity(40.715, 'second')
+micro_reader.Quantity(60000, "ms").to("s")                    # Quantity(60.0, 'second')
 ```
 
 ### Unit names
@@ -92,4 +93,4 @@ micro_reader.Quantity(40715.0, "millisecond").to("second")    # Quantity(40.715,
 | Space | `angstrom`, `attometer`, `centimeter`, `decimeter`, `exameter`, `femtometer`, `foot`, `gigameter`, `hectometer`, `inch`, `kilometer`, `megameter`, `meter`, `micrometer`, `mile`, `millimeter`, `nanometer`, `parsec`, `petameter`, `picometer`, `terameter`, `yard`, `yoctometer`, `yottameter`, `zeptometer`, `zettameter` |
 | Time | `attosecond`, `centisecond`, `day`, `decisecond`, `exasecond`, `femtosecond`, `gigasecond`, `hectosecond`, `hour`, `kilosecond`, `megasecond`, `microsecond`, `millisecond`, `minute`, `nanosecond`, `petasecond`, `picosecond`, `second`, `terasecond`, `yoctosecond`, `yottasecond`, `zeptosecond`, `zettasecond` |
 
-Values from files keep the file's unit, except lengths in units larger than a millimetre, which are given in micrometres.
+Values from files keep the unit of the file. The exception is lengths in units larger than a millimetre, which are given in micrometres.
