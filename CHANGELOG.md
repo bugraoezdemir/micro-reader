@@ -2,8 +2,10 @@
 
 ## Unreleased (0.5.0)
 
-micro-reader-core, the native read engine, is new and not on PyPI yet. Without it,
-micro-reader reads as before.
+Requires micro-reader-core 0.0.1 (new, `>=0.0.1,<0.1`), the native read engine, and
+micro-reader-codecs `>=0.0.4,<0.1`; micro-reader-codecs 0.0.5 is released with it (the same
+decoders, now also usable as a Rust library by micro-reader-core). Both are installed
+automatically. `MICRO_READER_ENGINE=0` reads on the Python path instead, as before.
 
 ### New
 

@@ -18,4 +18,5 @@ library. Its wheels are abi3: one per platform for every Python from 3.11.
 Building from source needs a Rust toolchain, a C compiler, CMake, and NASM on x86 (for
 libjpeg-turbo's SIMD), as micro-reader-codecs does.
 
-MIT licence.
+MIT licence. The wheels include third-party libraries, whose notices are in
+[THIRD_PARTY_LICENSES.txt](https://github.com/bugraoezdemir/micro-reader/blob/main/core/THIRD_PARTY_LICENSES.txt).

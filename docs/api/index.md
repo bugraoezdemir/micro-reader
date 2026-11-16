@@ -94,4 +94,4 @@ pip install "micro-reader[all]"      # both extras
 
 `micro-reader` requires Python 3.11 or newer.
 
-Native decoders are provided by the separate compiled package `micro-reader-codecs`, which is installed automatically.
+Native decoders and the native read engine are provided by the separate compiled packages `micro-reader-codecs` and `micro-reader-core`, which are installed automatically.

@@ -9,9 +9,9 @@ description = "Native (Rust) read engine for micro-reader: positioned reads, dec
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-# TODO before the first upload: THIRD_PARTY_LICENSES.txt for everything linked
-# (micro-reader-codecs' decoders and C libraries included), as codecs/ has
-license-files = ["LICENSE"]
+# THIRD_PARTY_LICENSES.txt: everything linked, the codecs crate's decoders and C
+# libraries included (codecs/scripts/third_party_licenses.py ../core)
+license-files = ["LICENSE", "THIRD_PARTY_LICENSES.txt"]
 authors = [{ name = "Bugra Oezdemir", email = "bugraa.ozdemir@gmail.com" }]
 keywords = ["microscopy", "image reading", "native", "rust"]
 classifiers = [

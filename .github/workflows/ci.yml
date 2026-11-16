@@ -3,12 +3,11 @@
 # (release.yml calls this workflow; nothing is published unless it passes).
 # Plain pushes do not run them; workflow_dispatch runs them by hand.
 #
-# What runs: build the codecs wheels and the read engine's (micro-reader-core,
-# not yet a dependency of micro-reader: its tests skip without it), then test
-# micro-reader against exactly those wheels on every OS and supported Python,
-# once more on the reference decoders (no native module), once on the oldest
-# declared dependencies, and check the codecs' third-party licence notices are
-# current.
+# What runs: build the codecs wheels and the read engine's (micro-reader-core;
+# micro-reader requires both), then test micro-reader against exactly those wheels
+# on every OS and supported Python, once more without native code (the Python path
+# on the reference decoders), once on the oldest declared dependencies, and check
+# the third-party licence notices of both native packages are current.
 name: CI
 
 on:
@@ -39,12 +38,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: regenerate THIRD_PARTY_LICENSES.txt and compare
+      - name: regenerate THIRD_PARTY_LICENSES.txt (codecs and core) and compare
         working-directory: codecs
         run: |
           cargo fetch --locked
+          (cd ../core && cargo fetch --locked)
           python3 scripts/third_party_licenses.py
-          git diff --exit-code THIRD_PARTY_LICENSES.txt
+          python3 scripts/third_party_licenses.py ../core
+          git diff --exit-code THIRD_PARTY_LICENSES.txt ../core/THIRD_PARTY_LICENSES.txt
 
   test:
     name: test ${{ matrix.os }} py${{ matrix.python }}
@@ -69,7 +70,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --find-links wheels -e "python[test]"
-          python -m pip install --no-index --find-links wheels micro-reader-core
+          # exactly the wheels of this run, even where PyPI has the same versions
+          python -m pip install --no-index --find-links wheels --force-reinstall --no-deps micro-reader-codecs micro-reader-core
       # the read engine and the native decoders; then no native code at all: the
       # Python path with the reference decoders (test_engine.py compares the engine
       # with the Python path on the native decoders)
@@ -82,7 +84,7 @@ jobs:
 
   oldest:
     name: test oldest declared dependencies
-    needs: codecs
+    needs: [codecs, core]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -91,7 +93,7 @@ jobs:
           python-version: "3.11"
       - uses: actions/download-artifact@v4
         with:
-          pattern: codecs-wheel-*
+          pattern: "*-wheel-*"
           merge-multiple: true
           path: wheels
       - name: install the floors (numpy, tifffile, h5py)
@@ -121,11 +123,7 @@ jobs:
           python -m pip install --upgrade pip build twine
           python -m build python --outdir dist
           python -m twine check --strict dist/* wheels/*
-      - name: the built wheel installs and imports (not the source tree)
+      - name: the built wheel installs and imports with its native packages (not the source tree)
         run: |
           python -m pip install --find-links wheels dist/*.whl
-          cd /tmp && python -c "import micro_reader, micro_reader_codecs; print(micro_reader.__file__)"
-      - name: the core wheel installs and imports
-        run: |
-          python -m pip install --no-index --find-links wheels micro-reader-core
-          cd /tmp && python -c "import micro_reader_core as m; print(m.__version__, m.CODECS_VERSION)"
+          cd /tmp && python -c "import micro_reader, micro_reader_codecs, micro_reader_core as m; from micro_reader import _engine; assert _engine.enabled(); print(micro_reader.__file__, m.__version__, m.CODECS_VERSION)"
