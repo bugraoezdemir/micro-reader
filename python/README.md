@@ -1,29 +1,38 @@
 # micro-reader
 
-**Memory-bounded pixel reader for microscopy images.**
+**Fast, memory-bounded reading of image regions from large microscopy files.**
 
-`micro-reader` reads regions of large microscopy files without loading the entire image into memory. It provides a common interface across TIFF, CZI, ND2, Leica, OIR, OIB / OIF, Olympus VSI, Imaris, DeltaVision, MRC, KLB, common raster formats, OME companion file sets, and high-content screening plates (Harmony, Columbus, MetaXpress, ImageXpress HCS.ai, IN Cell, CellVoyager, CQ1, Opera Flex, scanR, Cellomics).
+`micro-reader` is a Python library for reading regions of interest from microscopy images. It lets you access a small part of a large image without loading the entire image into memory, enabling streaming of image regions from arbitrary microscopy datasets. 
 
-> **Status: alpha (0.x)**
+The library supports a wide range of microscopy formats through a common interface. It reads only the data needed for each request, works with the file's stored resolution levels, and uses parallel decoding to make region access fast.
+
+[Documentation](https://bugraoezdemir.github.io/micro-reader/) · [PyPI](https://pypi.org/project/micro-reader/) · [Changelog](https://github.com/bugraoezdemir/micro-reader/blob/main/CHANGELOG.md)
+
+> **Alpha release (0.x)**
 >
-> The API may still change.
+> The API may change between releases. Pin the version you use in your projects.
 
 ## Installation
-
-For the main formats:
 
 ```bash
 pip install micro-reader
 ```
 
-Optional support:
+Requires Python 3.11 or newer. The native image decoders are provided by `micro-reader-codecs`, which is installed automatically. Prebuilt wheels are available for Linux (x86-64 and ARM), macOS (Intel and Apple silicon) and Windows (x86-64).
+
+Some formats and less common TIFF compression methods require optional dependencies:
 
 ```bash
-pip install "micro-reader[hdf5]"     # Imaris (.ims), ilastik, BigDataViewer, Luxendo, Fiji HDF5
-pip install "micro-reader[codecs]"   # LERC, CCITT fax and other rare TIFF codecs
+pip install "micro-reader[hdf5]"     # HDF5-based formats
+pip install "micro-reader[codecs]"   # additional TIFF codecs
+pip install "micro-reader[all]"      # both
 ```
 
+The HDF5 extra supports Imaris (`.ims`), ilastik, BigDataViewer, Luxendo and Fiji HDF5 files. The codecs extra adds support for less common TIFF compression methods, including LERC, CCITT fax and float24.
+
 ## Quick start
+
+Open a microscopy file, choose an image and read the region you need:
 
 ```python
 import micro_reader
@@ -31,905 +40,220 @@ import micro_reader
 with micro_reader.open("image.czi") as f:
     image = f.images[0]
 
-    print(image.axes)
-    print(image.shape)
-    print(image.dtype)
+    print(image.axes, image.shape, image.dtype)
+    # tczyx (1, 3, 40, 5120, 6144) uint16
 
-    # Read only the region you need
-    block = image.read(
-        c=1,
-        z=10,
+    # Read a 2000 × 2048 region from channel 1, plane 10
+    region = image.read(
+        c=1, z=10,
         y=slice(0, 2048),
         x=slice(1000, 3000),
     )
+
+    print(region.shape)
+    # (1, 2048, 2000): t is kept, c and z are dropped
 ```
 
 You can also use NumPy-style indexing:
 
 ```python
-block = image[0, 1, 10, 0:2048, 1000:3000]
+region = image[0, 1, 10, 0:2048, 1000:3000]
 ```
 
-Reads return native-endian NumPy arrays.
+The returned array contains only the requested region. The memory required for the read therefore depends on the region and the underlying storage blocks, and is independent of the total size of the image.
 
-For each image, you can inspect how much data had to be read internally:
+Images use the axes `t c z y x`. Other dimensions, such as series, tiles, views, wells and fields, are represented as separate images and identified by their indices. Use `f.select()` to find images by these indices:
 
 ```python
-print(image.stats.over_read)
+image = f.select(series=1, tile=3)[0]
 ```
 
-## How it works
+## Reading regions from large images
 
-`micro-reader` uses three concepts:
+Microscopy files often contain images that are too large to load into memory comfortably. Whole-slide scans, large mosaics and high-resolution volumetric images are common examples.
 
-* **File**: the opened microscopy file
-* **Image**: one image or frame that can be read as an array
-* **Index**: identifies images that are separated by dimensions such as series, tile, view, or emission wavelength
+`micro-reader` is designed to access these datasets by region. When you request a rectangular area, it reads and decodes the data needed to produce that area, rather than loading the complete image first.
 
-The key distinction is:
+For compressed files, the amount of data that must be decoded depends on how the image is stored. Some formats allow individual regions or rows to be decoded independently. Others store pixels in larger blocks that must be decoded together. `micro-reader` handles these differences and reports how much data was actually read through `image.stats`.
 
-> **`t`, `c`, `z`, `y`, and `x` are array axes. Other dimensions are represented as image indices.**
+### Example: a whole-slide CZI
 
-This lets different microscopy formats use the same interface even when their internal structures are very different.
-
-The basic model is:
-
-```text
-File
-└── Image
-    ├── axes
-    ├── shape
-    ├── dtype
-    ├── index
-    ├── metadata
-    └── read(...)
-```
-
-## Files and images
-
-Every file is opened as a `micro_reader.File`:
+This 3.6 GB Zeiss CZI slide scan contains 6,093 JPEG XR-compressed tiles. Open it as a mosaic to access each scan region as one image:
 
 ```python
-f = micro_reader.open("image.czi")
+f = micro_reader.open("22_0670_6D_11_MUS_3.czi", tiles="mosaic")
+
+for image in f.images:
+    print(image.name, image.shape)
+
+# ScanRegion0    (1, 3, 1, 79995, 60633)
+# ScanRegion1    (1, 3, 1, 76768, 56314)
+# ScanRegion2    (1, 3, 1, 71377, 56337)
+# label          (1, 3, 1, 545, 689)
+# slide preview  (1, 3, 1, 717, 1568)
 ```
 
-You can inspect which reader and format variant were detected:
-
-```python
-f.backend
-f.format
-```
-
-For example:
-
-```text
-f.backend  -> "czi"
-f.format   -> "czi"
-```
-
-A file contains one or more `Image` objects:
+Read a small RGB region from one of the scan areas:
 
 ```python
 image = f.images[0]
+
+region = image[0, :, 0, 40000:42048, 30000:32048]
+region.shape
+# (3, 2048, 2048)
 ```
 
-Each image has an index describing where it came from:
+The file also contains a resolution pyramid, which can be used to read smaller versions of the image without calculating them from the full-resolution data:
 
 ```python
-image.index
-# {"series": 0, "tile": 3, "view": 0}
+len(image.resolutions)
+# 8
+
+overview = image.resolutions[-1].read()
 ```
 
-You can inspect all indices in the file:
+With `tiles="mosaic"`, tiles are placed at their recorded positions on a common canvas. They are not registered or blended. By default, tiles remain separate images with their own stage positions, which is useful when you want to perform registration or stitching yourself.
+
+### Example: a high-content screening plate
+
+The same interface can be used with plate-based acquisitions:
 
 ```python
-f.indices
-f.index_range
-```
+f = micro_reader.open("1053601756.wpi")  # Yokogawa CV8000 plate
 
-And select images by index:
-
-```python
-f.select(series=1, view=0)
-```
-
-This returns the images matching the requested indices. For example, if a file contains several series, tiles, and views, selecting `series=1, view=0` returns the tiles belonging to that series and view.
-
-### Image names
-
-`image.name` follows one rule for every format, and is the same whichever file of a dataset you open:
-
-1. A plate's image is named by its well and field: `"well B2 field 0"` (the field counted from 0, as in `select(field=0)`; the plate's name in front when the file holds several plates).
-2. Otherwise the name the format gives the image: a Leica element's name, an OME `Image Name`, an Imaris image name, a slide's associated image by its role in lower case (`label`, `macro`, `thumbnail`). A slide's main scan, which its format does not name, takes the name of its file.
-3. Otherwise, in a file of several images, a label the file records for each one (a CZI scene name, an ND2 point name, a Micro-Manager or MetaMorph position label), or else the index values that tell them apart: `"series 2"`, `"series 1, tile 3"`.
-4. Otherwise (one image) the name of the dataset's main file without its extension: the index file of a set, the main file of a multi-file format, a Luxendo experiment's folder.
-
-Two images left with one name get the index values that differ between them appended, for example `"scan, series 2"`. Resolution levels carry their image's name.
-
-### Available index dimensions
-
-`micro-reader` uses these index names when a format provides the corresponding dimensions:
-
-```text
-plate
-acquisition
-well
-field
-series
-tile
-rotation
-view
-illumination
-phase
-block
-emission
-excitation
-lifetime
-sequence
-part
-resolution
-```
-
-Only dimensions actually present in a file appear in an image's index.
-
-### Files made of several files
-
-Some formats always come as several files: an OIR file with its continuation files (`name_00001`), a Micro-Manager stack split over `..._MMStack_Pos0.ome.tif`, `..._MMStack_Pos0_1.ome.tif`, an NDTiff folder, an Olympus OIF with its `.oif.files` folder, an Olympus VSI with its `_name_` folder, a DeltaVision image with its softWoRx `.log`, a plate's side files (Harmony `Assaylayout/` and `FFC_Profile/`, CellVoyager settings files, MetaXpress `_thumb` previews). Opening any of these files opens the whole image:
-
-```python
-f = micro_reader.open("cells_R3D.dv.log")
-f.path     # the main file: "cells_R3D.dv"
-f.opened   # what was opened: "cells_R3D.dv.log"
-```
-
-You can also open the folder. A folder opens the image it belongs to (an NDTiff dataset folder, a Harmony or CellVoyager measurement folder, a folder of Opera `.flex` files, a Luxendo experiment), or the one image it holds. A folder that holds no image itself, such as a downloaded sample folder with the export one or two levels down, opens the one dataset found in its sub-folders. An Opera Flex plate has no index file: any of its `.flex` files opens the whole folder as the plate (`multifile=False` reads only that file). A folder of one NIS-Elements well-plate run opens as that plate (with `plates=False`, its files are several images). A folder with several images or datasets raises an error that lists them; an OME-Zarr store is refused with a pointer to `ome_zarr_pyramid`, which reads it.
-
-To sort many files at once, for example everything under a folder you want to convert, `group_files` says which files make one image:
-
-```python
-g = micro_reader.group_files("experiment/")
-for group in g.groups:
-    group.main      # the file to open: "slide.vsi", "plate/Index.idx.xml"
-    group.parts     # the other files of a multi-file image
-    group.members   # for a plate or companion index: the files its images come from
-g.singles           # every other file, as given
-```
-
-A file that a plate or companion index names is listed only in that index's group. When the main file of a multi-file image is missing, its group has `main=None`. It groups as `open()` reads, plates included (`plates=True`, the default): a folder of ND2 files from one NIS-Elements well-plate run is one group; `plates=False` groups as `open(..., plates=False)` reads.
-
-## Axes
-
-An image array uses these axes:
-
-```text
-t c z y x
-```
-
-and optionally:
-
-```text
-s
-```
-
-for RGB samples.
-
-For example:
-
-```python
-image.axes
-# "tczyx"
-
-image.shape
-# (1, 3, 40, 5120, 6144)
-```
-
-Other dimensions, such as illumination, excitation, tile, etc., are represented as image indices rather than array axes, as discussed above.
-
-### Lambda scans
-
-A lambda (spectral) scan is one image in every format. Its bands lie along `c`, a detector's bands next to each other in wavelength order, and each channel has its `emission_wavelength` and its wavelength in its name (`"HyD S 1 420 nm"`).
-
-```python
-f = micro_reader.open("scan.lif")
-f.images[0].axes                                  # 'tczyx'
-[c.emission_wavelength for c in f.images[0].metadata.channels]
-
-f = micro_reader.open("scan.lif", axes="native")
-f.images[0].axes                                  # 'tlczyx': a real lambda axis
-f.images[0].metadata.index_values["emission"]      # its wavelengths
-```
-
-Asking for axes that name `l`, such as `axes="tlczyx"`, also gives the axis. An LSM stores its bands as channels, so it has no `l` axis; its channels carry their wavelengths. Excitation scans stay an image index.
-
-`open` gives every image in this canonical order by default, whatever order the file stores: axes the file lacks are added with size 1 (a 2-D TIFF is `(1, 1, 1, Y, X)`) and the others are reordered. Reading costs the same either way.
-
-### Changing axis order
-
-To keep the order the file stores (ICS `ctzyx`, Micro-Manager OME-TIFF `tzcyx`, a 2-D TIFF `yx`):
-
-```python
-f = micro_reader.open("image.ics", axes="native")
-```
-
-You can also request a specific axis order:
-
-```python
-image = f.images[0].as_axes("tczyx")
-```
-
-or when opening the file:
-
-```python
-f = micro_reader.open("image.tif", axes="zyx")
-```
-
-`axes="canonical"` (the default) is `t c z y x`, followed by `s` when RGB samples are kept (`samples="keep"`).
-
-### Removing singleton axes
-
-You can remove singleton axes with:
-
-```python
-plane = image.squeeze()
-```
-
-or:
-
-```python
-plane = image.squeeze("tz")
-```
-
-Only axes with size 1 can be removed. `y` and `x` are never removed.
-
-### RGB samples
-
-`micro_reader.open` turns RGB samples into channels: an RGB image has 3 channels, named "<name> R", "G" and "B" and coloured red, green and blue (a file without a channel name gives three unnamed channels in those colours). An image that has channels already gets c × s of them: "<name> R" ... for each.
-
-To keep RGB samples as their own `s` axis, the way the file stores them:
-
-```python
-f = micro_reader.open(
-    "image.tif",
-    samples="keep",
-)
-```
-
-`image.source` is then not needed: with the default, it is the image as stored, with its `s` axis. `image.as_axes(...)` keeps `s` unless asked for `samples="channels"`.
-
-
-## Ambiguous dimensions
-
-Some formats do not say what a dimension represents.
-
-For example, a plain multi-page TIFF may contain 80 pages without saying whether those pages are `z`, `t`, or something else.
-
-`micro-reader` represents such pages using the `sequence` index:
-
-```python
-f = micro_reader.open("stack.tif")
-
-print(f.index_range)
-# {"series": 1, "sequence": 80}
-
-print(len(f.images))
-# 80
-
-print(f.images[0].index)
-# {"series": 0, "sequence": 0}
-
-print(f.images[0].axes, f.images[0].shape)
-# tczyx (1, 1, 1, 16, 16)    (axes="canonical", the default; axes=None gives yx)
-```
-
-If you know that the pages represent `z`, you can tell the reader:
-
-```python
-f = micro_reader.open(
-    "stack.tif",
-    rename={"sequence": "z"},
-)
-```
-
-The result is a single image with the 80 pages along `z`.
-
-```python
-print(f.images[0].axes, f.images[0].shape)
-# tczyx (1, 1, 80, 16, 16)   (axes=None gives zyx)
-```
-
-
-## Resolution levels
-
-Pyramidal files can contain multiple resolution levels:
-
-```text
-resolution 0  → full resolution
-resolution 1  → lower resolution
-resolution 2  → even lower resolution
-```
-
-By default, `f.images` contains only the full-resolution images:
-
-```python
-f = micro_reader.open(
-    path,
-    resolutions="base",  # the default, can be left out
-)
-```
-
-Each image of a pyramidal file carries its resolution level in its index. In this mode, every image in `f.images` is level 0:
-
-```python
-print(f.index_range)
-# {"series": 4, "resolution": 1}
-
-print(f.images[0].index)
-# {"series": 0, "resolution": 0}
-```
-
-`index_range` shows `"resolution": 1` because only the full-resolution level is in `f.images`.
-
-Lower-resolution versions are available through the image via `image.resolutions`:
-
-```python
-image_series0 = f.images[0]
-
-image_series0.is_pyramidal
-# True
-
-img_series0_level2 = image_series0.resolutions[2]  # a lower-resolution image
-
-img_series0_level2.index
-# {"series": 0, "resolution": 2}
-```
-
-If you prefer to expose every resolution level as an image directly under the `File` object:
-
-```python
-f = micro_reader.open(
-    path,
-    resolutions="all",  # instead of "base"
-)
-
-print(f.index_range)
-# {"series": 4, "resolution": 6}
-
-img_series0_level2 = f.select(series=0, resolution=2)[0]
-```
-
-Supported pyramids include:
-
-* **Imaris**: all stored levels
-* **TIFF**: OME-TIFF and whole-slide pyramids (SVS, NDPI, SCN, BIF, QPTIFF, Philips)
-* **CZI**: stored pyramids of whole series
-
-Other formats expose a single resolution level.
-
-CZI pyramids belong to whole series. Separately opened CZI mosaic tiles therefore do not have their own resolution levels.
-
-## Mosaic tiles
-
-Mosaic tiles are separate images by default, each with its own position.
-
-For CZI files and FluoView tiling sets (`.omp2info`), you can instead get one image per series, its tiles placed on one canvas:
-
-```python
-f = micro_reader.open(
-    path,
-    tiles="mosaic",
-)
-```
-
-CZI tiles are placed by the file's own stitching information, FluoView tiles by the tiling set's grid (where tiles overlap, the later tile is on top; areas without a tile read as 0). Other formats with tiles raise an error for `tiles="mosaic"`.
-
-A format that has tiles it cannot place refuses `tiles="mosaic"` with an error. A file without tiles has nothing to place and opens as usual: Micro-Manager and MetaMorph stage positions are series, not tiles.
-
-`tiles="stitched"`, the name before 0.1.0, still works and warns.
-
-## Plates
-
-High-content screening plates are opened through their index file, for example `Index.idx.xml` for Harmony. Each field is one image, indexed by `plate`, `acquisition`, `well` and `field`.
-
-The plate layout is available through:
-
-```python
 plate = f.plates[0]
-plate.wells[0].name
-# "B2"
-plate.row_names, plate.column_names     # ('A', 'B', ...), ('1', '2', ...)
-part = plate.rows[2:5].columns[3:7]     # a part of the plate: still a plate
+plate.name
+# '1053601756'
+
+len(plate.wells), len(f.images)
+# (384, 2304)
+
+fields = f.select(plate_name=plate.name, well_name="B2")
+# The six fields acquired in well B2 of this plate
+# Each field is an Image object and has its API
+
+[ch.name for ch in fields[0].metadata.channels]
+# ['Hoechst', 'Concanavalin', 'SYTO',
+#  'WGA_Phalloidin', 'MitoTracker', 'TL']
+
+# Read a field like any other Image object
+nuclei = fields[0].read(c=0)
 ```
 
-Every level knows what it is and what holds it: `.kind` is `"file"`, `"plate"`, `"well"`
-or `"field"`, and `.parent` is the level above. Accessors go down only: a file holds
-`.plates`, a plate `.wells`, a well `.fields`, a field `.images`. `plate.rows` and
-`plate.columns` slice a plate by position, name or a list of them, as `f.select(row=...,
-column=...)` does; rows and columns are a well's address, not a level.
+> **Important!**
+>
+> `select()` matches every index in the File object by default. Without `plate_name` (or the plate's position, `plate`), a well name selects that well in every plate the file holds. It is therefore good practice to name every index you want to search within.
+>
+> Each plate's name is in `f.plates[i].name`, and `print(f)` lists the plates with their names. A plate whose file records no name has the name `""`; select it by position instead, for example `plate=0`.
 
-Images can be reached through the wells, or selected by well:
+See [Getting started](https://bugraoezdemir.github.io/micro-reader/getting-started/) for a step-by-step introduction.
+
+## Memory-bounded image reading
+
+A region read does not require the complete image to fit in memory. `micro-reader` reads the strips, tiles, subblocks or chunks that overlap the requested region.
+
+It can also decode large compressed blocks in smaller parts when the compression method allows it. This includes Deflate, LZW, zstd, JPEG 2000 and JPEG with restart markers. For compression methods that require a complete block to be decoded, the block size determines the minimum amount of data that must be processed.
+
+All decoding is subject to a process-wide memory limit. This helps keep memory use under control when reading large images or processing several regions concurrently:
 
 ```python
-image = plate.wells[0].fields[0].image
-f.select(well=plate.well_index("B2"))       # by its place in plate.wells
-f.select(well_name="B2")                    # by name
-f.select(row_name="B", column=range(1, 4))  # rows and columns: names, or 0-based numbers
-f.select(well=["B2", "C5"], field=[0, 1])   # a list, tuple, range or set: any of them
-f.select(row=slice(2, None))                # a slice of positions: row C onward
+micro_reader.set_memory_limit("2GB")
 ```
 
-A plate's places have a position and a name, a keyword each: `plate` / `plate_name`,
-`acquisition` / `acquisition_name`, `well` / `well_name`, `row` / `row_name`, `column` /
-`column_name` (the columns of ome-zarr-pyramid's table). A name given to a position keyword
-is its name (`well="B2"` is `well_name="B2"`).
+The library also provides read statistics, including the number of pixels returned and the number of pixels that had to be read or decoded. These help identify cases where the file's storage layout makes a region read more expensive than expected.
 
-`f.outline()` shows the plates, wells and fields of a file.
+See [Memory and threads](https://bugraoezdemir.github.io/micro-reader/guide/performance/) for details.
 
-A plate in a generic format (a CZI, an ND2, an OME-TIFF or a companion with wells) is read as a plate too. `plates=False` reads it by its series instead:
+## Fast image decoding
 
-```python
-f = micro_reader.open("plate.czi")
-```
+`micro-reader` uses native decoding libraries provided by `micro-reader-codecs`. These include libjpeg-turbo, jxrlib, OpenJPEG, libdeflate and zstd.
 
-Missing plane files are read as zeros, with a `MissingImagesWarning`. A field without any of its files is left out.
+Decoding is parallelised across CPU cores, and native decoding releases Python's global interpreter lock. A single read can therefore make use of multiple cores. Decoded blocks are also cached, so nearby region requests can reuse data that has already been decoded.
 
-A plane file whose size or pixel type differs from what the index describes raises an error when it is read. To find such files before reading anything, check them all at once:
-
-```python
-f.check_members()   # opens every plane file once; returns how many were checked
-```
-
-When the channels of a field have different z sampling, `image.parts` gives one image per group of channels that share it.
-
-## Metadata
-
-Pixel and channel metadata are available through:
-
-```python
-meta = image.metadata
-```
-
-For example:
-
-```python
-meta.pixel_sizes
-meta.position
-meta.channels
-meta.index_values
-```
-
-A typical result might look like:
-
-```python
-meta.pixel_sizes
-# {
-#     "x": Quantity(0.065, "micrometer"),
-#     "z": Quantity(...),
-#     "t": Quantity(2.5, "second"),
-# }
-
-meta.position
-# {
-#     "x": Quantity(1250.0, "micrometer"),
-#     "y": ...
-# }
-
-meta.channels[0]
-# Channel(
-#     name="DAPI",
-#     color="#00A0FF",
-#     emission_wavelength=Quantity(461.0, "nanometer"),
-# )
-```
-
-### Metadata principles
-
-`micro-reader` follows a few important rules:
-
-* Units use OME-Zarr-compatible names such as `micrometer`, `nanometer`, and `millisecond`.
-* Each value keeps the unit the file records (lengths above a millimetre become micrometres), so two formats can give the same quantity in different units, for example a time step in milliseconds (ND2, OIR) or in seconds (CZI, LIF). Convert to compare: `image.metadata.pixel_sizes["t"].to("s")`, `.to("um")`. Converting a length to a time, or to an unknown unit, raises `ValueError`.
-* Missing metadata is left as `None` or absent.
-* Pixel sizes are never invented as `1.0`.
-* Colours are not invented when the file does not provide them.
-* Each resolution level has its own pixel sizes.
-
-### Image position
-
-`image.metadata.position` gives the position of the centre of the first pixel in stage coordinates.
-
-Where possible, format-specific coordinate conventions are converted to this common representation.
-
-The position is omitted when it cannot be determined reliably. Micro-Manager's separate files and MetaMorph record where the stage was without saying which point of the field that is: their value is in `image.metadata.stage_position`, as recorded, not in `position`.
+The benchmarks below show typical reading times for several microscopy formats.
 
 ## Supported formats
 
-| Format               | Notes                                                 |
-| -------------------- | ----------------------------------------------------- |
-| **TIFF / BigTIFF**   | TIFF, OME-TIFF, ImageJ, LSM, STK, Micro-Manager, whole-slide TIFFs |
-| **OME companion**    | `.companion.ome` sets of OME-TIFF files               |
-| **CZI**              | Zeiss CZI, including mosaic tiles (separate or on one canvas) |
-| **ND2**              | Nikon ND2, including legacy JPEG 2000 ND2             |
-| **Leica**            | LIF, LOF, LIFEXT, XLIF, XLEF, XLCF                    |
-| **OIR**              | Olympus / Evident FluoView, including tiling sets (`.omp2info`) |
-| **OIB / OIF**        | Olympus FluoView FV1000 / FV1200 / FV3000             |
-| **VSI**              | Olympus / Evident cellSens and VS120 / VS200 slide scanners |
-| **NDPIS**            | Hamamatsu NanoZoomer fluorescence sets (one NDPI per channel) |
-| **Imaris**           | `.ims`, with the `[hdf5]` extra                       |
-| **HDF5**             | ilastik, BigDataViewer / BigStitcher, Luxendo experiments and `.lux.h5`, Fiji HDF5, with the `[hdf5]` extra |
-| **ICS / IDS**        | Image Cytometry Standard 1.0 and 2.0 (SVI Huygens and others) |
-| **MetaMorph**        | `.nd` acquisitions and their TIFF / STK files         |
-| **Micro-Manager 1.4**| image-per-file acquisitions (`metadata.txt` + one TIFF per plane) |
-| **DeltaVision**      | `.dv`, `.r3d` (softWoRx, OMX, Priism)                 |
-| **MRC**              | Common MRC modes and extended headers                 |
-| **KLB**              | Every time point and channel, bzip2 and zlib blocks   |
-| **Plates (HCS)**     | Harmony, Columbus exports, MetaXpress, ImageXpress HCS.ai (`.jdce`), IN Cell, CellVoyager, Opera Flex, scanR and Cellomics (`.C01`) plates; also (by default; `plates=False` reads them by series) CZI plates, OME companion and OME-TIFF plates (Yokogawa CQ1), ND2 files whose XY points are named after wells, and folders of ND2 files from one NIS-Elements well-plate run |
-| **JPEG / PNG / BMP** | Common raster image formats                           |
-
-All formats use the same `File`, `Image`, axes, indexing, metadata, and reading interface wherever possible.
-
-Format-specific behaviour is described below.
-
-### TIFF
-
-Supported TIFF formats include:
-
-* TIFF
-* BigTIFF
-* OME-TIFF
-* ImageJ
-* Zeiss LSM
-* MetaMorph STK
-* Micro-Manager stacks (MMStack and NDTiff), also when one acquisition is spread over several files
-* Whole-slide TIFFs: Aperio SVS, Hamamatsu NDPI, Leica SCN, Ventana / Roche BIF (VENTANA DP 200, iScan Coreo), PerkinElmer / Akoya QPTIFF and Philips
-
-Micro-Manager stage positions are series. NDTiff channel names and pixel sizes come from the dataset's index and frame metadata.
-
-A whole-slide file gives the slide first, then the other pictures it stores as further series, as Bio-Formats lists them: `label` and `macro` (overview), and for some formats `thumbnail` (QPTIFF) or `probability` (BIF tissue map). Pixel sizes, positions and channel names come from each vendor's own metadata.
-
-Ventana BIF scans store overlapping tiles. VENTANA DP 200 scans are composed as Roche's description of the format places them. iScan Coreo scans, which that description does not cover, are composed as OpenSlide shows them, with one difference: each tile starts at the nearest whole pixel and keeps its stored pixels, where OpenSlide interpolates to a sub-pixel position. Areas outside the scanned regions read as 0. Layouts that were not checked on real files (other EncodeInfo versions, several focal planes, overlapping scan areas) raise an error.
-
-Compressed TIFF data is decoded only for the strips or tiles needed by the requested region.
-
-Supported codecs include:
-
-* LZW
-* Deflate
-* PackBits
-* LZMA
-* zstd
-* JPEG
-* JPEG 2000
-* WebP
-* JPEG XL
-* PNG
-* EER
-
-JPEG (NDPI's included) and JPEG XR decode with libjpeg-turbo and jxrlib, built into micro-reader-codecs: the decoders imagecodecs uses, with its pixels and speed. LERC, CCITT fax, float24 and a few rarer codecs need imagecodecs:
-
-```bash
-pip install "micro-reader[codecs]"
-```
-
-### OME companion files
-
-An OME companion file (`.companion.ome`) describes images stored in separate TIFF files. Opening the companion reads all those images and groups them together as one `t c z y x` image:
-
-```python
-f = micro_reader.open("data.companion.ome")
-```
-
-Opening one of the TIFF files of the set also reads the whole set, as if the companion had been opened: `f.path` is then the companion, and the companion's metadata is used. To read only that file, with its pixel sizes, channels and position taken from the companion:
-
-```python
-f = micro_reader.open("data_t001.ome.tif", multifile=False)
-```
-
-If the companion is missing or does not list the file, opening the whole set raises an error that names `multifile=False`. With `multifile=False` the file is then read without pixel sizes, with a `CompanionWarning`. A TIFF whose metadata lives in another OME-TIFF (instead of a `.companion.ome`) works the same way, with that OME-TIFF in the companion's place.
-
-A companion that describes a plate (`Plate` / `Well` / `WellSample`) reads as one, as a CZI plate does: `f.plates` lists its plates and wells, and its images are indexed by plate, acquisition, well and field. RGB images in a companion have a sample axis (`t c z y x s`), as RGB OME-TIFFs do.
-
-Some OME-TIFF sets keep the full OME-XML in their TIFF files instead of a companion. Opening one of those files also reads the whole set, and `multifile=False` reads only the planes stored in that file, with the set's metadata.
-
-Any file of a plate works the same way: opening one plane file opens the plate, and `multifile=False` reads that file alone. Files that belong to the instrument and not to the plate's data, such as CellVoyager shading and dark-current images, open as themselves.
-
-Leica's settings files (`FrameProperties`, `IOManagerConfiguation`) open their experiment. A `.xml` beside a `.lif` opens the `.lif`, and so does a `.lifext`; `multifile=False` reads the `.lifext` itself.
-
-Micro-Manager stacks always open whole, also with `multifile=False`: they split their files by size, so one file does not hold a complete part of the image.
-
-### CZI
-
-CZI files support:
-
-* mosaic tiles
-* series
-* views
-* rotations
-* RGB
-* large files
-* stored series pyramids
-
-CZI-specific operations include:
-
-```python
-image.read_region(y=y, x=x, height=h, width=w)
-```
-
-and:
-
-```python
-f.canvas()
-```
-
-`image.origin` gives the image corner `(y, x)` in the file's pixel coordinates.
-
-Damaged subblock directories can be recovered with a `DamagedFileWarning`. Details are available through:
-
-```python
-f.damage
-```
-
-### ND2
-
-Nikon ND2 support includes:
-
-* ND2 version 3+
-* legacy JPEG 2000 ND2 versions 1 and 2
-* one image per XY position
-* `t c z y x` axes
-* RGB samples
-
-### Leica
-
-Supported Leica formats include:
-
-* LIF
-* LOF
-* LIFEXT
-* XLIF
-* XLEF
-* XLCF
-
-Leica files can contain nested analysis results, tiles, rotations, and emission/excitation scans.
-
-These are represented using the common image/index model.
-
-### OIR
-
-Olympus / Evident FluoView OIR files are supported, including companion files and spectral scans.
-
-A multi-area tiling set is opened through its index, `.omp2info`, or its folder: one image per tile, each at the stage position the index gives it (the tiles' own files record none), or one canvas per group with `tiles="mosaic"`. Positions follow the protocol's grid, not a registration. The grid step was derived from one sample, as the backend documents.
-
-### Olympus OIB and OIF
-
-Older FluoView files come in two forms with the same content: an OIB is one file, an OIF is a `.oif` settings file plus a `.oif.files` folder with one TIFF per plane. Both open as one `t c z y x` image, with pixel sizes, z and time steps, channel names, colours and wavelengths. Opening any file in the `.oif.files` folder opens the OIF.
-
-### Olympus VSI
-
-A cellSens VSI is a `.vsi` file plus a `_<name>_` folder that holds the pixels (`stack1/frame_t.ets`, `stack10000/frame_t.ets`, ...). The images are listed as Bio-Formats lists them: one per scanned area, named as in cellSens, with the slide label (`label`) and overview (`overview`) when the scanner took them, and the slide photo (`macro`) last. Each scanned area keeps its resolution levels.
-
-Images are `t c z y x` (`t c z y x s` for brightfield RGB scans), with pixel sizes, z and time steps, and each channel's name, colour and emission wavelength. Stage positions are not read.
-
-Opening the `_<name>_` folder, a `stack` folder or a file in it opens the `.vsi`. An `.ets` file whose `.vsi` is missing is read alone, with a warning, when it is a plain 2-D image; its size is then rounded up to whole tiles.
-
-### Imaris
-
-Install Imaris support with:
-
-```bash
-pip install "micro-reader[hdf5]"
-```
-
-(`[ims]` is the extra's former name and still works.)
-
-Imaris resolution level 0 is exposed at the actual image size, with Imaris chunk padding removed.
-
-Chunked compression is decoded in parallel.
-
-### HDF5: ilastik, BigDataViewer, Luxendo, Fiji
-
-These need the `[hdf5]` extra as well.
-
-* **ilastik**: every dataset with ilastik's `axistags` (its exports, its input files, steinbock's `img`) is one image, in the dataset's own axis order. Pixel sizes are read where ilastik recorded units (`axis_units`, since 2025-09).
-* **BigDataViewer / BigStitcher**: the XML with its HDF5 file (also partitioned). One image per tile, angle and illumination, channels on `c` and time points on `t`, with the stored resolution levels. Opening the HDF5 file opens its XML.
-* **Luxendo / Bruker light-sheet**: an experiment folder (`raw/` with one folder of `.lux.h5` stacks per channel) opens as one image per stack and camera, with all time points and channels. Opening any part opens the whole experiment: the folder, a `.lux.h5`, or the `imaris.ims` / `bdv.xml` next to `raw/`. Files those link files name but `raw/` lacks read as zeros, with a warning. `multifile=False` reads one `.lux.h5` (or `.ims`) alone.
-* **Fiji HDF5** (the Vibez plugin): datasets with `element_size_um`; `t<n>/channel<n>` datasets make one `t c z y x` image.
-
-### ICS / IDS
-
-ICS 1.0 (an `.ics` header with an `.ids` pixel file; opening either opens the image) and ICS 2.0 (one file), as written by SVI Huygens and others. Gzip-compressed pixels are read without decompressing the whole file. Images that store rows bottom-up (`coordinates cartesian`) are returned top-down, as Bio-Formats does.
-
-### MetaMorph .nd
-
-A MetaMorph multi-dimensional acquisition: an `.nd` file and the TIFF / STK files named after it. One image per stage position (`series`), `t c z y x`, channels named by the wavelengths. Opening the `.nd` file, any of its files or its folder opens the whole set. The stage coordinates the files record are kept as `Metadata.stage_position`, not as a position: which point of the field they mark is not recorded.
-
-### Micro-Manager 1.4
-
-Image-per-file acquisitions (Micro-Manager 1.4 and the 2.0 betas): a folder per stage position with a `metadata.txt` and one TIFF per plane. One image per stage position, `t c z y x`, with channel names and colours, pixel sizes and the z step. Opening any file or folder of the acquisition opens the whole acquisition.
-
-### Hamamatsu NDPIS
-
-An `.ndpis` set lists one NDPI file per fluorescence channel. Opened, it is one slide image with one channel per file, at every stored resolution level; channels are named by their filter set. Each NDPI file still opens alone as an ordinary slide.
-
-### DeltaVision
-
-DeltaVision files (`.dv`, `.r3d`, `.r3d_d3d`, also deconvolved and projected ones) are recognised by their content, whatever their extension. The image keeps the file's own order of time, waves and z (for example `ctzyx`).
-
-Pixel sizes, and each channel's emission and excitation wavelengths, are read from the file. Channel names come from the softWoRx acquisition log next to it (`<file>.log`); a deconvolved or projected file takes the names from the log of the raw file it was made from. Stage positions are not read.
-
-### MRC
-
-Supported MRC modes include:
-
-```text
-0, 1, 2, 4, 6, 12
-```
-
-Both byte orders and extended headers are supported.
-
-### JPEG, PNG and BMP
-
-Supported features include:
-
-* PNG colour types and bit depths
-* interlaced PNG
-* BMP palettes, RLE and bit fields
-* OS/2 BMP headers
-* baseline, progressive and lossless JPEG
-
-Raster images are normally decoded as a whole on the first read.
-
-For images larger than 256 MB:
-
-* non-interlaced PNGs are read by rows
-* JPEGs with restart markers are read in bands of rows
-
-For paletted images, pixel values remain indices and the palette is available through:
-
-```python
-image.palette
-```
-
-## Performance
-
-Compressed data is decoded using a shared thread pool.
-
-By default, the decoder uses one thread per CPU.
-
-You can change this with:
-
-```python
-micro_reader.set_decode_threads(4)
-```
-
-or:
-
-```bash
-export MICRO_READER_DECODE_THREADS=4
-```
-
-The native codec implementations are provided by the separate Rust package `micro-reader-codecs`, which is installed automatically.
-
-### Benchmarks
-
-Measured with micro-reader 0.4.3 on a laptop (Intel Core Ultra 7 255H, 16 cores, 31 GB RAM, NVMe SSD, Windows 11), on an otherwise idle machine, files in the OS file cache, default settings (16 decoding threads). Each number is the median of three runs, each in a fresh process. A 512 × 512 region is the median over 100 random regions at full resolution. Peak memory is the process's peak memory above its level after opening the file, during the read, including the returned array.
+| Format | Supported variants |
+| --- | --- |
+| **TIFF / BigTIFF** | TIFF, OME-TIFF, ImageJ, Zeiss LSM, MetaMorph STK, Micro-Manager, ScanImage and whole-slide TIFFs (Aperio SVS, Hamamatsu NDPI, Leica SCN, Ventana BIF, Akoya QPTIFF, Philips) |
+| **OME companion files** | `.companion.ome` sets of OME-TIFF files |
+| **Zeiss CZI** | Mosaic tiles, stored resolution pyramids and JPEG XR slide scans |
+| **Nikon ND2** | Including legacy JPEG 2000 files |
+| **Leica** | LIF, LOF, LIFEXT, XLIF, XLEF, XLCF |
+| **Olympus / Evident** | OIR, OIB, OIF and VSI slide scans |
+| **Hamamatsu NDPIS** | Fluorescence sets with one NDPI file per channel |
+| **Imaris** | `.ims`, requires the `[hdf5]` extra |
+| **Other HDF5** | ilastik, BigDataViewer / BigStitcher, Luxendo and Fiji HDF5, requires the `[hdf5]` extra |
+| **ICS / IDS** | ICS 1.0 and 2.0 |
+| **MetaMorph** | `.nd` acquisitions |
+| **Micro-Manager 1.4** | Image-per-file acquisitions |
+| **DeltaVision** | `.dv`, `.r3d` |
+| **MRC** | Common MRC modes |
+| **KLB** | Keller Lab Block files |
+| **JPEG / PNG / BMP** | Common raster image formats |
+| **Screening plates** | Harmony, Columbus, MetaXpress, ImageXpress HCS.ai, IN Cell, CellVoyager, Opera Flex, scanR and Cellomics; also CZI, ND2, OME companion and OME-TIFF files recorded on Yokogawa CQ1 plates |
+
+The [Formats](https://bugraoezdemir.github.io/micro-reader/formats/) page describes format-specific features and metadata support.
+
+The following formats are not yet supported: DICOM whole-slide images, 3DHISTECH MRXS, Hamamatsu VMS, Zeiss ZVI, Becker & Hickl SDT, PicoQuant PTU, Imaris 3 files stored as TIFF, and ICS 1.0 files with Unix-compressed pixels.
+
+## Benchmarks
+
+The following measurements were made with micro-reader 0.4.4 on a laptop with an Intel Core Ultra 7 255H (16 cores), 31 GB RAM and an NVMe SSD, running Windows 11.
+
+The default settings were used (16 decoding threads). Each measurement is the median of three runs in fresh processes. The 512 × 512 measurements are the median over 100 randomly selected regions at full resolution.
+
+All times are for reading from disk. The operating system's file cache, the copy of recently read file data that the operating system keeps in memory, was emptied before every run and again before every large read. Reading the same data a second time is faster.
+
+Peak memory recorded during the read includes the returned array. "≈ read region's size" marks reads whose peak memory is almost entirely the returned array itself.
 
 | File | File size | Read | Time | Peak memory |
 | --- | ---: | --- | ---: | ---: |
-| Hamamatsu NDPI slide (JPEG) | 198 MB | 512 × 512 RGB region | 4.0 ms | |
-| | | 8192 × 8192 RGB region (192 MB) | 0.39 s | 377 MB |
+| Hamamatsu NDPI slide (JPEG, 101,376 × 188,160) | 6.9 GB | 512 × 512 RGB region | 4.6 ms | |
+| | | 8192 × 8192 RGB region (192 MB) | 0.33 s | 378 MB |
+| Ventana BIF slide (JPEG, 93,951 × 105,813) | 3.9 GB | 512 × 512 RGB region | 8.5 ms | |
+| | | 8192 × 8192 RGB region (192 MB) | 0.21 s | 384 MB |
+| Zeiss CZI slide scan (JPEG XR, 6,093 tiles) | 3.6 GB | 512 × 512 RGB region | 31 ms | |
+| | | 8192 × 8192 RGB region (192 MB) | 0.52 s | 383 MB |
 | Aperio SVS slide (JPEG) | 596 MB | 512 × 512 RGB region | 1.5 ms | |
-| | | 8192 × 8192 RGB region (192 MB) | 0.21 s | 380 MB |
-| Zeiss CZI slide scan (JPEG XR, 6,093 tiles) | 3.6 GB | 512 × 512 RGB region | 28 ms | |
-| | | 8192 × 8192 RGB region (192 MB) | 0.50 s | 376 MB |
-| Zeiss CZI fluorescence mosaic (5 × 9 tiles per well) | 738 MB | 512 × 512 region | 0.15 ms | |
-| | | one channel of a well: 2 t × 4 z of 3444 × 2944 (77 MB) | 0.02 s | 78 MB |
-| Micro-Manager OME-TIFF | 435 MB | 512 × 512 region | 0.49 ms | |
-| | | one channel: 28 t of 1608 × 1608 (138 MB) | 0.01 s | 139 MB |
-| Nikon ND2, 46 XY points | 395 MB | the whole file: 46 points × 31 t × 2 c (362 MB) | 0.10 s | 357 MB |
-| Imaris IMS (gzip chunks) | 452 MB | one channel: 312 z of 512 × 512 (78 MB) | 0.03 s | 153 MB |
-| CellVoyager CV8000 plate: 384 wells, 2,304 fields, 18,452 files | 35 GB | open | 0.67 s | |
+| | | 8192 × 8192 RGB region (192 MB) | 0.24 s | 379 MB |
+| MRC image (uncompressed, 67,320 × 50,960) | 6.9 GB | 512 × 512 region | 29 ms | |
+| | | 8192 × 8192 region (128 MB) | 0.85 s | 121 MB (≈ read region's size) |
+| ICS / IDS, deconvolved (float32, 4 c × 226 z of 1352 × 1352) | 6.6 GB | One channel: 226 z of 1352 × 1352 (1.5 GB) | 0.92 s | 1.5 GB (≈ read region's size) |
+| Micro-Manager OME-TIFF, two files (140 t × 3 c × 21 z) | 4.7 GB | One channel: 140 t × 21 z of 512 × 512 (1.4 GB) | 0.26 s | 1.4 GB (≈ read region's size) |
+| Imaris IMS (gzip chunks, float32, 9 c × 569 z) | 3.1 GB | One channel: 569 z of 512 × 512 (569 MB) | 0.17 s | 636 MB |
+| Nikon ND2, 46 XY points | 395 MB | Whole file: 46 points × 31 t × 2 c (362 MB) | 0.24 s | 356 MB (≈ read region's size) |
+| Zeiss CZI plate: 20 wells, 500 fields | 27.5 GB | Open | 1.8 s | |
+| | | One well: 25 fields × 7 c × 3 z of 1144 × 1144 (1.3 GB) | 0.29 s | 1.3 GB (≈ read region's size) |
+| Zeiss CZI fluorescence mosaic (5 × 9 tiles per well) | 738 MB | One channel of a well: 2 t × 4 z of 3444 × 2944 (77 MB) | 0.04 s | 74 MB (≈ read region's size) |
+| CellVoyager CV8000 plate: 384 wells, 2,304 fields, 18,452 files | 35 GB | Open | 1.9 s | |
+| | | One well: 6 fields × 6 c × 3 z of 996 × 996, from 108 files (204 MB) | 0.21 s | 205 MB (≈ read region's size) |
 
-JPEG XR regions cost the most: the tiles of this scan are 1600 × 1200 and can only be decoded whole, so a small region costs one to four whole-tile decodes, which run in parallel. Numbers vary with hardware, storage and whether the file is already in the OS cache.
+Actual performance depends on hardware and storage.
 
-## Memory usage
+## Learn more
 
-Memory usage is controlled by a configurable limit:
+- **[Getting started](https://bugraoezdemir.github.io/micro-reader/getting-started/):** Install the package, open an image and read a region.
+- **[Concepts](https://bugraoezdemir.github.io/micro-reader/concepts/):** Files, images, indices, axes and coordinate systems.
+- **[User guide](https://bugraoezdemir.github.io/micro-reader/guide/opening/):** Opening files, finding images, reading regions, resolution levels, metadata and plates.
+- **[Formats](https://bugraoezdemir.github.io/micro-reader/formats/):** Supported formats, format-specific features and optional dependencies.
+- **[API reference](https://bugraoezdemir.github.io/micro-reader/reference/):** Public functions, classes, attributes and errors.
+- **[Examples](https://bugraoezdemir.github.io/micro-reader/examples/):** Recipes for image processing, Zarr export, Dask, plates and parallel workers.
 
-```python
-micro_reader.set_memory_limit("8GB")
-micro_reader.memory_limit()
-```
+## Used by
 
-The default limit is one quarter of the computer's memory.
+- **[EuBI-Bridge](https://github.com/Euro-BioImaging/EuBI-Bridge)** converts microscopy files to OME-Zarr and uses micro-reader as its default reader for supported formats.
+- **[dyna-zarr](https://pypi.org/project/dyna-zarr/)** uses `micro_reader.Image` as a lazy data source for writing Zarr arrays.
 
-You can also set it through the environment:
+## Feedback
 
-```bash
-export MICRO_READER_MEMORY_LIMIT=8GB
-```
+Bug reports, requests for additional formats and sample files are welcome on [GitHub](https://github.com/bugraoezdemir/micro-reader/issues).
 
-The limit covers the blocks being decoded at once. Decoded blocks are also kept for reuse,
-so a block shared by neighbouring reads is not decoded twice. All open files share one
-cache limit, 256 MB by default:
+### Development note
 
-```python
-micro_reader.set_cache_limit("512MB")
-micro_reader.cache_limit()
-micro_reader.cached_bytes()     # what the caches hold now
-```
-
-or `export MICRO_READER_CACHE_LIMIT=512MB`. The process then uses at most the memory
-limit plus the cache limit for decoding, however many files are open. One exception: a
-single picture (PNG, JPEG, ... up to 256 MB) is kept decoded by its own open file.
-
-For uncompressed data, only the requested rows are read. When you ask for part of
-each row, the rest of the row is read along with it if that is faster than reading the
-rows one by one.
-
-Compressed data is stored in blocks such as TIFF strips or tiles, CZI subblocks, and ND2 frames. Small blocks are decoded as a whole. Blocks larger than 16 MB are read in parts where the codec allows it.
-
-### Streamed decoding
-
-Deflate, LZW, zstd, PackBits, and LZMA blocks are decoded from their start while keeping only the rows needed by the requested region.
-
-This covers, among others:
-
-* TIFF strips and tiles
-* ND2 lossless frames
-* CZI subblocks
-* non-interlaced PNG
-
-Reading a block from top to bottom stays a single pass: each read continues where the last one stopped.
-
-Jumping back in a large block, as a viewer does, resumes from a checkpoint for deflate. For LZW and zstd, the block is decoded again from its start.
-
-### Region decoding
-
-JPEG 2000 and JPEG XL can decode only the requested region.
-
-This is used for TIFF, CZI, and legacy ND2 where supported by the format.
-
-### JPEG restart markers
-
-JPEG blocks with restart markers can be decoded only for the part covering the requested rows.
-
-### Codecs that require whole-block decoding
-
-Some blocks can only be decoded as a whole, including:
-
-* progressive and lossless JPEG
-* JPEG without restart markers
-* interlaced PNG
-* JPEG XR
-* CZI zstd with hi-lo packing
-
-### How the limit is enforced
-
-Every decode, whole or in parts, counts against the memory limit.
-
-If a block that must be decoded whole is larger than the configured limit, `MemoryLimitError` is raised instead of allowing the process to run out of memory.
-
-Blocks decoded concurrently from multiple threads are accounted for together. If a decode does not fit within the current memory budget, it waits until sufficient memory is available.
-
-## Design principles
-
-`micro-reader` aims to keep the application-facing interface small even when the underlying file formats are complex.
-
-Applications work with the same `File` and `Image` model described in [How it works](#how-it-works). Format-specific complexity stays inside the reader.
-
-The goal is that an application can open a microscopy file, identify the image it needs, read only the required pixels, and obtain standardized metadata without needing to understand the vendor-specific file structure.
-
-## Compatibility with eubi-bridge
-
-micro-reader 0.1.0 renamed the image index `scene` to `series`. eubi-bridge 0.1.3 to 0.2.x and eubi-bridge-lite below 0.3.0 still read `scene`, so `import micro_reader` refuses to load next to them. It raises an `ImportError` that names the installed eubi version and the two ways out: upgrade eubi (`pip install -U 'eubi-bridge>=0.3.0'`, or the same for `eubi-bridge-lite`), or keep that eubi with the micro-reader it was built for (`pip install 'micro-reader<0.1'`). The check reads the versions of the installed packages; it never imports eubi. An editable install of eubi is checked like any other: its recorded version can be out of date, so the message then says to reinstall it.
-
-To skip the check, set the environment variable `MICRO_READER_SKIP_EUBI_CHECK=1`. Only the value `1` skips it; any other value keeps the check. micro-reader then warns once that the check was skipped. This is meant for work on an eubi checkout, not for normal use.
-
-The check will be removed when every eubi-bridge / eubi-bridge-lite line below 0.3.0 has left the support window, checked by the release version matrix; not before.
+The project has been developed with substantial AI assistance. Its functionality is continuously tested against real datasets, but some issues or edge cases may remain undiscovered. 
 
 ## License
 
-MIT
-
-Source code, tests, and development documentation:
-
-https://github.com/bugraoezdemir/micro-reader
+`micro-reader` and `micro-reader-codecs` are MIT licensed. The codec wheels include third-party libraries. Their notices are available in [`codecs/THIRD_PARTY_LICENSES.txt`](https://github.com/bugraoezdemir/micro-reader/blob/main/codecs/THIRD_PARTY_LICENSES.txt).

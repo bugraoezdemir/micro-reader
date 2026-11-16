@@ -1,21 +1,34 @@
 # Opening files
 
-Everything starts with `micro_reader.open()`:
+The main entry point for reading microscopy data is `micro_reader.open()`:
 
 ```python
-micro_reader.open(path, backend=None, *, tiles="separate", resolutions="base",
-                  rename=None, plates=True, multifile=True,
-                  axes="canonical", samples="channels", squeeze=False) -> File
+micro_reader.open(
+    path,
+    backend=None,
+    *,
+    tiles="separate",
+    resolutions="base",
+    rename=None,
+    plates=True,
+    multifile=True,
+    axes="canonical",
+    samples="channels",
+    squeeze=False,
+) -> File
 ```
 
-This page shows what each option is for. The [reference](../reference/functions.md#open) lists them in one table.
+This page explains each option and when to use it. For a compact overview, see the [API reference](../reference/functions.md#open).
 
 ## The basics
+
+Open a file and access its images:
 
 ```python
 import micro_reader
 
 f = micro_reader.open("cells.nd2")
+
 try:
     image = f.images[0]
     ...
@@ -23,7 +36,7 @@ finally:
     f.close()
 ```
 
-Or, the same with a context manager:
+The recommended approach is to use a context manager:
 
 ```python
 with micro_reader.open("cells.nd2") as f:
@@ -31,221 +44,284 @@ with micro_reader.open("cells.nd2") as f:
     ...
 ```
 
-`path` can be a `str` or any `os.PathLike` such as `pathlib.Path`.
+The `path` argument accepts a string or any `os.PathLike` object, such as `pathlib.Path`.
 
-!!! warning "Reading from a closed file raises"
-    Images read through their file's handles. After `f.close()`, or after the `with` block, every read raises:
+!!! warning "Keep the file open while reading"
+
+    Images read their pixels through the handles owned by their parent file. Once `f.close()` is called, or the context manager exits, further reads from its images raise an error:
 
     ```text
     ValueError: this ND2 image has been closed: its file was closed (File.close() or the end of a with block)
     ```
 
-    Keep the file open for as long as you read from its images.
+    Keep the file open for as long as you need to read its images.
 
-## How the format is found
+## How the format is detected
 
-micro-reader reads the first kilobyte of the file and asks each backend in turn whether it recognises the content. The extension is used only when the content is not enough, for example for MRC. A `.tif` that is really an Olympus VSI is read as VSI, and a DeltaVision file with any extension is read as DeltaVision.
+micro-reader reads the first kilobyte of a file and asks its backends, in turn, whether they recognise the contents. The file extension is used only when the contents are not sufficient to identify the format.
+
+For example, a TIFF extension does not necessarily mean the file is a TIFF. An Olympus VSI file saved as `.tif` is still recognised as VSI. DeltaVision files are recognised by their contents regardless of their extension.
 
 ```python
 f = micro_reader.open("scan.tif")
-f.backend    # 'tiff'
-f.format     # 'ome-tiff', 'imagej', 'svs', 'micromanager', ... or plain 'tiff'
+
+f.backend  # 'tiff'
+f.format   # 'ome-tiff', 'imagej', 'svs', 'micromanager', ... or 'tiff'
 ```
 
-If no backend recognises the file, you get `UnsupportedFormatError`:
+If no backend recognises the file, `open()` raises `UnsupportedFormatError`:
 
 ```python
 try:
     f = micro_reader.open("notes.txt")
 except micro_reader.UnsupportedFormatError as e:
-    print(e)    # no micro-reader backend recognises 'notes.txt'
+    print(e)  # no micro-reader backend recognises 'notes.txt'
 ```
 
 ### Forcing a backend
 
-Pass `backend=` to skip detection:
+You can specify `backend=` to bypass automatic detection:
 
 ```python
 f = micro_reader.open("odd_extension.dat", backend="mrc")
 ```
 
-The names are those in `micro_reader.BACKENDS`:
+The available backend names are listed in `micro_reader.BACKENDS`:
 
 ```python
 [b.NAME for b in micro_reader.BACKENDS]
 # ['vsi', 'flex', 'tiff', 'czi', 'luxendo', 'bdv', 'ilastik', 'hdf5', 'ims', 'nd2', 'oir',
 #  'omp2info', 'oif', 'lif', 'harmony', 'columbus', 'scanr', 'cellomics', 'jdce',
 #  'metaxpress', 'metamorph', 'micromanager', 'incell', 'cv7000', 'companion',
-#  'ndpis', 'ics', 'raster', 'dv', 'mrc']
+#  'ndpis', 'ics', 'raster', 'klb', 'dv', 'mrc']
 ```
 
 !!! note
-    A named backend reads `path` itself. It does not redirect a part of a multi-file image to its main file, as automatic detection does (see below).
 
-## Opening a part or a folder
+    A forced backend reads the specified `path` directly. It does not redirect a file that belongs to a multi-file dataset to the dataset's main file. Automatic detection handles this redirection, as described below.
 
-Some images are spread over several files. Opening **any** of them opens the whole image:
+## Opening part of a dataset or a folder
+
+Some microscopy datasets are spread across multiple files. In these cases, opening any one of the associated files can open the complete dataset.
+
+For example, opening a DeltaVision log file resolves to its main image file:
 
 ```python
-f = micro_reader.open("cells_R3D.dv.log")   # the softWoRx log of a DeltaVision file
-f.path      # 'cells_R3D.dv'       the main file that was read
-f.opened    # 'cells_R3D.dv.log'   what you passed
+f = micro_reader.open("cells_R3D.dv.log")
+
+f.path    # 'cells_R3D.dv': the main file that was read
+f.opened  # 'cells_R3D.dv.log': the path passed to open()
 ```
 
-The same works for an OIF plane in `name.oif.files/`, an OIR continuation file, a Micro-Manager stack file, an `.ets` file of a VSI, and the side files of a plate.
+The same applies to an OIF plane inside `name.oif.files/`, an OIR continuation file, a Micro-Manager stack file, an `.ets` file belonging to a VSI dataset, and side files belonging to a plate.
 
-You can also open a folder. It opens the image the folder belongs to (an NDTiff dataset, a Harmony or CellVoyager measurement), or the one image it holds. A folder of Opera Flex `.flex` files opens as a plate. A folder with several images raises an error that lists them. To sort a folder of many images, use [`group_files`](multi-file.md#grouping-many-files).
+You can also pass a folder to `open()`. Depending on its contents, micro-reader opens the dataset the folder belongs to, such as an NDTiff dataset or a Harmony or CellVoyager measurement, or the single image contained in the folder.
+
+A folder containing Opera Flex `.flex` files opens as a plate. A folder that holds no image itself, such as a downloaded sample folder with the data one or two levels down, opens the one dataset found in its subfolders. If a folder contains several unrelated images or datasets, `open()` raises an error listing them.
+
+To organise a folder containing many images into groups, use [`group_files`](multi-file.md#grouping-many-files).
 
 ## Options
 
-### `tiles`: separate tiles or one mosaic
+### `tiles`: separate tiles or combine them into a mosaic
 
-By default, each tile is its own image with a `tile` index. With `tiles="mosaic"` you get one image per series instead, with its tiles placed on one canvas:
+By default, every tile is exposed as a separate image with a `tile` index. Pass `tiles="mosaic"` to combine the tiles into one image per series, placed on a shared canvas.
 
-=== "separate (default)"
+**Separate tiles (default):**
 
-    ```python
-    f = micro_reader.open("mosaic.czi")
-    print(f)
-    ```
-    ```text
-    <micro_reader.File 'mosaic.czi' backend='czi' format='czi' images=8>
-      series 0: tiles 0-3, x illumination 2, tczyx (1, 3, 41, 1000, 1500) uint16
-    ```
+```python
+f = micro_reader.open("mosaic.czi")
+print(f)
+```
 
-=== "mosaic"
+```text
+<micro_reader.File 'mosaic.czi' backend='czi' format='czi' images=8>
+  series 0: tiles 0-3, x illumination 2, tczyx (1, 3, 41, 1000, 1500) uint16
+```
 
-    ```python
-    f = micro_reader.open("mosaic.czi", tiles="mosaic")
-    print(f)
-    ```
-    ```text
-    <micro_reader.File 'mosaic.czi' backend='czi' format='czi' images=2>
-      series 0: x illumination 2, tczyx (1, 3, 41, 1850, 2774) uint16
-    ```
+**Mosaic:**
 
-Tiles are placed where the file says they are: Zeiss CZI by its stitching information, Leica LIF / XLEF tile scans by their stage positions, FluoView tiling sets (`.omp2info`) by their grid. Nothing is registered, and where tiles overlap the later tile is on top. For a tiled file of another format, `tiles="mosaic"` raises `UnsupportedFormatError`.
+```python
+f = micro_reader.open("mosaic.czi", tiles="mosaic")
+print(f)
+```
 
-`tiles="stitched"` is the old name for `tiles="mosaic"`. It still works and warns.
+```text
+<micro_reader.File 'mosaic.czi' backend='czi' format='czi' images=2>
+  series 0: x illumination 2, tczyx (1, 3, 41, 1850, 2774) uint16
+```
 
-### `resolutions`: base level only, or every level
+Tiles are placed according to the information stored in the file:
 
-Pyramidal files (whole-slide TIFFs, Imaris, CZI with stored pyramids) store lower resolution levels.
+- Zeiss CZI uses its stitching information.
+- Leica LIF / XLEF tile scans use their stage positions.
+- FluoView tiling sets (`.omp2info`) use their acquisition grid.
+- BigDataViewer / BigStitcher tiles use their nominal positions (the acquisition grid or tile configuration, not a registration), rounded to whole pixels, one canvas per angle and illumination. Views that are turned, sheared or mirrored, tiles apart along `z` and tiles of different pixel sizes cannot be placed this way and are refused, naming why.
 
-- `resolutions="base"` (default): `f.images` holds the full-resolution images. You reach the lower levels with `image.resolutions`.
-- `resolutions="all"`: every level is an image of its own in `f.images`, indexed by `resolution`.
+Tiles are not registered or blended. Where they overlap, the later tile is placed on top, and areas without a tile read as 0.
+
+Mosaic assembly is currently supported for these tiled formats. Passing `tiles="mosaic"` for a tiled format without mosaic support raises `UnsupportedFormatError`.
+
+The older option `tiles="stitched"` is an alias for `tiles="mosaic"`. It still works but raises a warning.
+
+### `resolutions`: full resolution or every pyramid level
+
+Pyramidal formats, including whole-slide TIFF, Imaris and CZI files with stored pyramids, contain lower-resolution versions of their images.
+
+There are two ways to expose these levels:
+
+- **`resolutions="base"` (default):** `f.images` contains the full-resolution images. Access lower-resolution levels through `image.resolutions`.
+- **`resolutions="all"`:** Every resolution level is exposed as a separate image in `f.images`, identified by the `resolution` index.
+
+For example:
 
 ```python
 f = micro_reader.open("cells.ims", resolutions="all")
-f.index_range                     # {'series': 1, 'resolution': 4}
+
+f.index_range  # {'series': 1, 'resolution': 4}
+
 level2 = f.select(series=0, resolution=2)[0]
 ```
 
 See [Resolution levels](pyramids.md).
 
-### `rename`: say what an unnamed dimension is
+### `rename`: assign a meaning to an unnamed dimension
 
-Some files do not say what a dimension means. A plain multi-page TIFF with 80 pages can be a z-stack, a time series or anything else. micro-reader does not guess. It gives one image per page, indexed by `sequence`:
+Some formats contain dimensions whose meaning is not recorded in the file. For example, a plain multi-page TIFF with 80 pages could represent a z-stack, a time series or something else.
+
+micro-reader does not guess. By default, an unnamed dimension is represented by an index called `sequence`, with one image per value:
 
 ```python
 f = micro_reader.open("stack.tif")
-f.index_range         # {'series': 1, 'sequence': 80}
-f.images[0].axes      # 'tczyx' (axes=None: 'yx')
+
+f.index_range     # {'series': 1, 'sequence': 80}
+f.images[0].axes  # 'tczyx' (with axes=None: 'yx')
 ```
 
-If you know what the pages are, use `rename` to make the index an array axis:
+When you know what the pages represent, use `rename` to convert the index into an array axis:
 
 ```python
 f = micro_reader.open("stack.tif", rename={"sequence": "z"})
-len(f.images)         # 1
-f.images[0].axes      # 'tczyx' (axes=None: 'zyx')
-f.images[0].shape     # (1, 1, 80, 256, 300) (axes=None: (80, 256, 300))
+
+len(f.images)        # 1
+f.images[0].axes     # 'tczyx' (with axes=None: 'zyx')
+f.images[0].shape    # (1, 1, 80, 256, 300)
+                     # with axes=None: (80, 256, 300)
 ```
 
-Rules:
+The following rules apply:
 
-- The keys must be indices that are sampled at the same points: `illumination`, `phase`, `block`, `emission`, `excitation`, `lifetime` or `sequence`.
-- The values must be `"t"`, `"c"` or `"z"`, and two keys cannot map to the same axis.
-- Only the TIFF backend can rename for now. For other backends, `rename` raises `UnsupportedFormatError` when the file has that index, and changes nothing when it does not.
+- **Keys:** Only indices sampled at the same points can be renamed: `illumination`, `phase`, `block`, `emission`, `excitation`, `lifetime` and `sequence`.
+- **Values:** Each key must map to `"t"`, `"c"` or `"z"`. Two keys cannot map to the same axis.
+- **Backend support:** Currently, only the TIFF backend supports `rename`. For other backends, it raises `UnsupportedFormatError` if the file contains the specified index. If the index is absent, the option has no effect.
 
-Because a file without the index is not affected, you can pass the same `rename` to every file of a batch:
+You can pass the same `rename` mapping to a batch of files. Files without the specified index are left unchanged:
 
 ```python
 RENAME = {"sequence": "z"}
+
 for path in paths:
     with micro_reader.open(path, rename=RENAME) as f:
         ...
 ```
 
-### `plates`: read more files as plates
+### `plates`: interpret plate datasets as plates
 
-Plate formats (Harmony, Columbus, MetaXpress, IN Cell, CellVoyager, Opera Flex, scanR, Cellomics, ImageXpress HCS.ai) always open as plates. Some files can be a plate or not. By default (`plates=True`) they open as a plate:
+Dedicated plate formats, including Harmony, Columbus, MetaXpress, IN Cell, CellVoyager, Opera Flex, scanR, Cellomics and ImageXpress HCS.ai, open as plates.
 
-- a Zeiss CZI recorded on a plate;
-- an ND2 whose positions are named after wells (`A10_0000`), or a folder of NIS-Elements ND2 files from a well-plate run;
-- an OME companion file or an OME-TIFF that describes a plate, such as a Yokogawa CQ1 `MeasurementResult.ome.tif`.
+Other formats may also contain plate data. With the default `plates=True`, micro-reader recognises the following as plates:
+
+- Zeiss CZI files acquired on a plate.
+- ND2 files whose XY positions are named after wells, such as `A10_0000`, and folders of NIS-Elements ND2 files from a well-plate run.
+- OME companion files and OME-TIFF files describing a plate, such as a Yokogawa CQ1 `MeasurementResult.ome.tif`.
+
+For example:
 
 ```python
 f = micro_reader.open("W96_B2+B4.czi")
-f.plates[0].wells[0].name     # 'B2'
+
+f.plates[0].wells[0].name  # 'B2'
 ```
 
-`plates=True` is the default, so a plate in any format reads as a plate; `plates=False` reads such a file by its series instead (`f.plates` is then empty). For a file that is not a plate, it changes nothing. See [Plates](plates.md).
+For formats that support switching between plate and series representations, pass `plates=False` to read the data by series instead. In that case, `f.plates` is empty.
 
-### `multifile`: a whole OME-TIFF set or one file
+For files that do not contain plate data, this option has no effect.
 
-Some OME-TIFF sets keep the full OME-XML in each of their TIFF files. Opening one of those files reads the whole set by default. With `multifile=False`, you get only the planes stored in the file you opened, with the set's metadata:
+See [Plates](plates.md).
+
+### `multifile`: open a complete file set or just one file
+
+Some OME-TIFF datasets consist of multiple TIFF files, each containing the complete OME-XML metadata. By default, opening any one of these files opens the entire set.
+
+Pass `multifile=False` to read only the planes stored in the specified file, while retaining the set's metadata:
 
 ```python
 f = micro_reader.open("set_t001.ome.tif", multifile=False)
 ```
 
-For a plate made of many files (an Opera Flex folder, a NIS-Elements run of ND2 files), `multifile=False` reads only the file you opened.
+The same option applies to other sets in which one file opens the whole set. With `multifile=False`, only the file you opened is read:
+
+- A TIFF of an OME companion set, which is then read with the companion's metadata.
+- A plane file of a plate (Harmony, CellVoyager, MetaXpress, IN Cell, ...), an Opera Flex file, a Cellomics `.C01` file, or one ND2 file of a NIS-Elements well-plate run.
+- A Leica `.lof`, `.xlif` or `.lifext` that belongs to a larger experiment.
+- A `.lux.h5` stack or an `imaris.ims` of a Luxendo experiment.
 
 `multifile` does not apply to:
 
-- parts of other multi-file formats (OIR, OIF, VSI);
-- Micro-Manager stacks: they split their files by size, so one file is not a complete part of the image;
-- single-file OME-TIFFs.
+- Other multi-file formats such as OIR, OIF and VSI.
+- Micro-Manager stacks, where files are split by size and an individual file is not a complete part of the image.
+- Single-file OME-TIFF datasets.
 
-### `axes`, `samples`, `squeeze`: present every image in one layout
+### `axes`, `samples` and `squeeze`: choose the array layout
 
-These three options reshape every image of the file, as [`Image.as_axes`](axes.md) does for one image:
+These three options control the layout of every image in the file. They apply the same transformations as [`Image.as_axes`](axes.md) does to an individual image.
 
 ```python
 f = micro_reader.open("image.tif", axes="canonical", squeeze=False)
-f.images[0].axes      # 'tczyx'
-f.images[0].source    # the image in its native layout
+
+f.images[0].axes   # 'tczyx'
+f.images[0].source # the image in its native layout
 ```
 
 | Option | Values | Effect |
 | --- | --- | --- |
-| `axes` | `None` (keep), `"canonical"` (`tczyx` + `s`), or letters such as `"zyx"` | the order of the axes; missing axes are added with size 1 |
-| `samples` | `"channels"` (default), `"keep"` | fold RGB samples into the channels, or keep them as an `s` axis |
-| `squeeze` | `False`, `True` | drop every size-1 axis except `y` and `x` |
+| `axes` | `None` (keep native order), `"canonical"` (`tczyx` plus `s`), or axis strings such as `"zyx"` | Sets the axis order. Missing axes are added with size 1. |
+| `samples` | `"channels"` (default), `"keep"` | Converts RGB samples into channels, or retains them as an `s` axis. |
+| `squeeze` | `False` (default), `True` | Removes every size-1 axis except `y` and `x`. |
 
-An RGB image opens with 3 channels (red, green, blue) by default. Pass `samples="keep"` to get the `s` axis. See [Axes](axes.md#rgb-samples).
+By default, RGB images are represented as three channels (red, green and blue). Pass `samples="keep"` to retain the colour samples as an `s` axis.
+
+See [Axes](axes.md#rgb-samples).
 
 ## Batch processing many files
 
-When you convert or scan many files, keep these in mind:
+When converting or inspecting many files, a few practices make processing more reliable:
 
-- Wrap each file in a `with` block, so that handles are released even when a read fails.
-- Catch `micro_reader.UnsupportedFormatError` to skip or route files that micro-reader does not read.
-- Treat warnings as data. Missing plane files, damaged CZI files and missing companion files are reported as warnings, not errors (see [Errors and warnings](../reference/errors.md)).
+- **Use a context manager for each file.** File handles are released even if a read fails.
+- **Catch `UnsupportedFormatError`.** This lets you skip unsupported files or route them to another reader.
+- **Treat warnings as data.** Missing planes, damaged CZI files and missing companion files may be reported as warnings rather than errors. See [Errors and warnings](../reference/errors.md).
+
+For example, the following function inventories a collection of files and records any warnings raised while opening and inspecting them:
 
 ```python
 import warnings
 import micro_reader
 
+
 def inventory(paths):
     for path in paths:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
+
             try:
                 with micro_reader.open(path) as f:
-                    yield path, f.format, len(f.images), f.index_range, \
-                          [str(w.message) for w in caught]
+                    yield (
+                        path,
+                        f.format,
+                        len(f.images),
+                        f.index_range,
+                        [str(w.message) for w in caught],
+                    )
             except micro_reader.UnsupportedFormatError:
                 yield path, None, 0, {}, ["not supported"]
 ```
