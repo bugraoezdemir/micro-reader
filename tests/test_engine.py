@@ -16,7 +16,7 @@ import micro_reader  # noqa: E402
 from micro_reader import _engine  # noqa: E402
 from micro_reader._errors import CorruptFileError  # noqa: E402
 
-from test_tiff import HAVE_CODECS, LAYOUTS, _data, _keys, _native, _reference  # noqa: E402
+from test_tiff import HAVE_CODECS, LAYOUTS, _data, _keys, _native, _reference, _retag  # noqa: E402
 
 if not _engine.enabled():
     pytest.skip("the engine is switched off (MICRO_READER_ENGINE=0)", allow_module_level=True)
@@ -55,9 +55,9 @@ def counted(monkeypatch):
     seen = {"pieces": 0}
     run = _engine.Batch.run
 
-    def counting(self, out):
+    def counting(self, out, counts=None):
         seen["pieces"] += len(self.rows)
-        return run(self, out)
+        return run(self, out, counts)
     monkeypatch.setattr(_engine.Batch, "run", counting)
     return seen
 
@@ -227,3 +227,23 @@ def test_set_engine_true_without_core_is_refused(monkeypatch):
     monkeypatch.setattr(_engine, "_core", None)
     with pytest.raises(RuntimeError, match="not installed"):
         _engine.set_engine(True)
+
+
+@pytest.mark.parametrize("dtype,predictor,layout", [
+    ("u2", 2, {"rowsperstrip": 16}), ("i1", 2, {"tile": (32, 32)}),
+    ("f4", 3, {"rowsperstrip": 16}), ("f4", 3, {"tile": (32, 32)})])
+def test_a_predictor_on_uncompressed_data_is_ignored_on_both_paths(tmp_path, dtype, predictor,
+                                                                   layout):
+    """The engine and the Python path both read the stored values, as libtiff
+    and tifffile from 2026.11.12 do (test_tiff has the default path)."""
+    data = _data((64, 80), dtype)
+    path = str(tmp_path / "pred.tif")
+    tifffile.imwrite(path, data, extratags=[(32001, 3, 1, predictor, True)], **layout)
+    _retag(path, 32001, 317)                                  # Predictor
+    for engine in (True, False):
+        _engine.set_engine(engine)
+        try:
+            with _native(path, axes=None) as f:
+                np.testing.assert_array_equal(f.images[0][...], data)
+        finally:
+            _engine.set_engine(None)

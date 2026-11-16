@@ -652,6 +652,15 @@ class _TiffImage(Image):
         out, read = self._read_series(full)
         return out.reshape(tuple(s.stop - s.start for s in block)), read
 
+    def _plan_into(self, block, out, stack):
+        if not self._fixed:
+            return [(self, self._plan_series(block, out))]
+        it = iter(block)
+        full = tuple(slice(self._fixed[i], self._fixed[i] + 1) if i in self._fixed else next(it)
+                     for i in range(len(self._full_shape)))
+        # the fixed axes as size-1 axes of *out* (a view: the plan writes into *out*)
+        return [(self, self._plan_series(full, np.expand_dims(out, tuple(sorted(self._fixed)))))]
+
     def _read_series(self, block):
         """Read *block* over all axes of the series."""
         out = np.empty(tuple(s.stop - s.start for s in block), dtype=self.dtype)

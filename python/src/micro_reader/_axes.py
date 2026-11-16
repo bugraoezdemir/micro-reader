@@ -161,6 +161,42 @@ class AxesImage(Image):
                 select[a] = 0
         return "".join(a for a in axes if a not in drop)
 
+    def _plan_into(self, block, out, stack):
+        """The source's plans into a view of *out* laid out in the source's axes:
+        a squeezed axis is a size-1 axis, folded channels split into (channels,
+        samples), the axes this view adds are left out (size 1) and the order is
+        the source's.  None when the folded channels asked for do not start and
+        end on a pixel's samples (they are read and copied instead)."""
+        names, select = self._names, self._select
+        want = dict(zip(self.axes, block))
+        size = dict(zip(self.axes, out.shape))
+        stride = dict(zip(self.axes, out.strides))
+        S = self._samples
+        native_key, shape, strides = [], [], []
+        for a in names:
+            if a in select:
+                native_key.append(slice(select[a], select[a] + 1))
+                shape.append(1)
+                strides.append(0)
+            elif self._fold and a in "cs":
+                k = want.get("c", slice(0, 1))
+                if k.start % S or k.stop % S:
+                    return None
+                if a == "s":
+                    native_key.append(slice(0, S))
+                    shape.append(S)
+                    strides.append(stride["c"])
+                else:
+                    native_key.append(slice(k.start // S, k.stop // S))
+                    shape.append(k.stop // S - k.start // S)
+                    strides.append(stride["c"] * S)
+            else:
+                native_key.append(want[a])
+                shape.append(size[a])
+                strides.append(stride[a])
+        view = np.lib.stride_tricks.as_strided(out, tuple(shape), tuple(strides), writeable=True)
+        return self.source._plan_into(tuple(native_key), view, stack)
+
     def _read_block(self, block):
         names, select, axes = self._names, self._select, self.axes
         want = dict(zip(axes, block))

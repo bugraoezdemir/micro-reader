@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased (0.5.0)
+
+micro-reader-core, the native read engine, is new and not on PyPI yet. Without it,
+micro-reader reads as before.
+
+### New
+
+- A native read engine, micro-reader-core 0.0.1 (a Rust package). TIFF images, file sets of
+  TIFF planes and MetaMorph planes are read through it. It reads and decodes the strips and
+  tiles of a region on its own threads, without holding Python's GIL, and writes them
+  straight into the output array. It keeps its own file handles and a cache of decoded
+  segments whose size follows `set_cache_limit`. Pieces the engine does not take yet (LZMA,
+  packed bit depths, FillOrder 2, codecs that only tifffile decodes, and segments read as a
+  stream) are read on the Python path as before. The environment variable
+  `MICRO_READER_ENGINE=0` switches the engine off.
+- `micro_reader.read_many(requests)`, also available as `Image.read_many`, reads the regions
+  of many images in one go, each into an array you give. When one region spans many files,
+  as in a z stack stored as one file per plane, the strips and tiles of all of them are read
+  and decoded together in one engine call, without one Python call per file. dyna-zarr's
+  concatenation uses it when its parts are micro-reader images. On a well of 768 one-plane
+  TIFFs (2048 x 2048) converted by eubi-bridge with 8 threads, the conversion took
+  6.9-8.8 s instead of 10.3 s, with identical output. Images whose reads cannot be planned
+  this way are read one by one, with the same result.
+
 ## 0.4.5 (2026-11-16)
 
 Requires micro-reader-codecs 0.0.4 (`>=0.0.4,<0.1`), unchanged from 0.4.3.

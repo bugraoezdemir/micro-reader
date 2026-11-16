@@ -281,9 +281,10 @@ impl Engine {
         Ok(pool)
     }
 
-    /// Run `plan` on `threads` threads (1: on the caller's); returns the number of
-    /// samples read or decoded.
-    pub fn read(&self, plan: &Plan, threads: usize) -> Result<usize, String> {
+    /// Run `plan` on `threads` threads (1: on the caller's); returns, per job, the
+    /// job's first piece and the samples it read or decoded (a segment several
+    /// pieces need counts once, on its first piece).
+    pub fn read_jobs(&self, plan: &Plan, threads: usize) -> Result<Vec<(usize, usize)>, String> {
         // the files, looked up once
         let mut sources: HashMap<u64, Arc<Source>> = HashMap::new();
         for p in &plan.pieces {
@@ -322,10 +323,17 @@ impl Engine {
                 Job::Segment(v) => self.segment(plan, &sources, v),
             }
         };
+        let counted = |job: &Job| -> Result<(usize, usize), String> {
+            let first = match job {
+                Job::Raw(i) => *i,
+                Job::Segment(v) => v[0],
+            };
+            run(job).map(|n| (first, n))
+        };
         if threads <= 1 || jobs.len() < 2 {
-            return jobs.iter().map(run).sum();
+            return jobs.iter().map(counted).collect();
         }
-        self.pool(threads)?.install(|| jobs.par_iter().map(run).sum())
+        self.pool(threads)?.install(|| jobs.par_iter().map(counted).collect())
     }
 
     /// Decode (or take from the cache) the segment of pieces `v`, copy each out.
@@ -712,8 +720,8 @@ mod tests {
             planes[j] = planes[j].wrapping_sub(planes[j - 1]);
         }
         floating_point_predictor(&mut planes, 1, 2, 1, 4);
-        let got: Vec<f32> = planes.chunks_exact(4)
-            .map(|c| f32::from_ne_bytes(c.try_into().unwrap())).collect();
+        let got: Vec<f32> = planes.as_chunks::<4>().0.iter()
+            .map(|c| f32::from_ne_bytes(*c)).collect();
         assert_eq!(got, values);
     }
 }

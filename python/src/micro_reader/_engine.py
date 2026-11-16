@@ -107,6 +107,9 @@ class Batch:
         self._table_at: dict = {}
         #: the largest decoded segment, for the memory budget
         self.max_segment = 0
+        #: per row, the plan it came from (``run_plans`` with counts)
+        self.owners: list = []
+        self.owner = 0
 
     def _codec(self, spec) -> int:
         at = self._codec_at.get(id(spec))
@@ -134,45 +137,89 @@ class Batch:
         if r1 <= r0 or cols[1] <= cols[0] or samples[1] <= samples[0]:
             return
         s = dst.strides
+        self.owners.append(self.owner)
         self.rows.append((handles.engine_file(self.engine), offset, count, self._codec(spec),
                           self._table(table), seg_shape[0], seg_shape[1], r0, r1, cols[0],
                           cols[1], samples[0], samples[1],
                           dst.__array_interface__["data"][0], s[0], s[1], s[2]))
 
-    def run(self, out: np.ndarray) -> int:
-        """Run the pieces into *out*, the array every destination is part of."""
+    def run(self, out: np.ndarray, counts=None) -> int:
+        """Run the pieces into *out*, the array every destination is part of.
+        *counts*: a list that gets, per plan (``owner``), what its pieces read."""
         if not self.rows:
             return 0
         pieces = np.array(self.rows, dtype=np.int64)
+        if counts is not None:
+            per_piece = np.zeros(len(self.rows), np.int64)
+            n = self._run(pieces, out, per_piece)
+            for owner, k in enumerate(np.bincount(self.owners, weights=per_piece,
+                                                  minlength=len(counts))):
+                counts[owner] += int(k)
+            return n
+        return self._run(pieces, out)
+
+    def _run(self, pieces, out, per_piece=None) -> int:
         threads = _pool.decode_threads()
         # at most one decoded segment per thread at once, plus a raw read buffer each
         hold = min(threads, len(self.rows)) * (self.max_segment + (4 << 20))
         hold = min(hold, _memory.memory_limit())
         with _memory.reserve(hold, "segments decoded by the read engine"):
-            return self.engine.read(pieces, self.codecs, self.tables, out, threads)
+            if per_piece is None:
+                return self.engine.read(pieces, self.codecs, self.tables, out, threads)
+            return self.engine.read(pieces, self.codecs, self.tables, out, threads,
+                                    counts=per_piece)
 
 
-def run_plans(plans, out: np.ndarray) -> int:
+def _counted(tasks, log, k):
+    """*tasks* (pool tasks returning what they read), each logging ``(k, read)``
+    to *log* (``list.append`` is atomic across threads; ``+=`` on an item is not)."""
+    for task in tasks:
+        def run(task=task):
+            n = task()
+            log.append((k, n))
+            return n
+        yield run
+
+
+def _pool_counted(plans, counts) -> int:
+    """The pool tasks of *plans*, run, with what each plan read added to *counts*."""
+    log: list = []
+    n = _pool.run(itertools.chain.from_iterable(
+        _counted(image._tasks(*plan), log, k) for k, (image, plan) in enumerate(plans)))
+    for k, read in log:
+        counts[k] += read
+    return n
+
+
+def run_plans(plans, out: np.ndarray, counts=None) -> int:
     """Run the plans of images (``[(image, plan), ...]``, a backend's
     ``_plan_series``) into *out*: on the engine what each image hands it
     (``image._engine_split(batch, *plan)``), the rest as the images' pool
-    tasks (``image._tasks``).  Without the engine, all of it on the pool."""
+    tasks (``image._tasks``).  Without the engine, all of it on the pool.
+    *counts*: a list of one 0 per plan, which gets what each plan read
+    (``read_many``: each image's ``stats``)."""
+    plans = list(plans)
     eng = engine()
     if eng is None:
-        return _pool.run(itertools.chain.from_iterable(
-            image._tasks(*plan) for image, plan in plans))
+        if counts is None:
+            return _pool.run(itertools.chain.from_iterable(
+                image._tasks(*plan) for image, plan in plans))
+        return _pool_counted(plans, counts)
     batch = Batch(eng)
     rest = []
-    for image, plan in plans:
+    for k, (image, plan) in enumerate(plans):
         split = getattr(image, "_engine_split", None)
+        batch.owner = k
         rest.append((image, split(batch, *plan) if split is not None else plan))
     try:
-        n = batch.run(out)
+        n = batch.run(out, counts)
     except ValueError as exc:                # the engine's message names file and offset
         from ._errors import CorruptFileError
         raise CorruptFileError(str(exc)) from exc
     except OSError as exc:
         from ._errors import CorruptFileError
         raise CorruptFileError(str(exc)) from exc
-    return n + _pool.run(itertools.chain.from_iterable(
-        image._tasks(*plan) for image, plan in rest))
+    if counts is None:
+        return n + _pool.run(itertools.chain.from_iterable(
+            image._tasks(*plan) for image, plan in rest))
+    return n + _pool_counted(rest, counts)

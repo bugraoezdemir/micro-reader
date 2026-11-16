@@ -77,16 +77,32 @@ impl Engine {
     /// Run a read plan: `pieces`, a C-contiguous int64 buffer of rows of `NCOL`
     /// (`PIECE_COLUMNS` names them); `codecs` and `tables` (bytes), what its rows
     /// point to; `out`, the writable buffer every destination address lies in.
-    /// Returns the number of samples read or decoded.
-    #[pyo3(signature = (pieces, codecs, tables, out, threads=1))]
+    /// Returns the number of samples read or decoded.  `counts`, a writable int64
+    /// buffer of one item per piece, receives that number per piece (a segment
+    /// several pieces need counts once, on the first of them; the others get 0).
+    #[pyo3(signature = (pieces, codecs, tables, out, threads=1, counts=None))]
+    #[allow(clippy::too_many_arguments)]
     fn read(&self, py: Python<'_>, pieces: &Bound<'_, PyAny>, codecs: Vec<Codec>,
-            tables: Vec<Bound<'_, PyBytes>>, out: &Bound<'_, PyAny>, threads: usize)
+            tables: Vec<Bound<'_, PyBytes>>, out: &Bound<'_, PyAny>, threads: usize,
+            counts: Option<&Bound<'_, PyAny>>)
         -> PyResult<usize> {
         let rows: PyBuffer<i64> = PyBuffer::get(pieces)?;
         if !rows.is_c_contiguous() {
             return Err(PyBufferError::new_err("the plan must be C-contiguous"));
         }
         let rows = rows.to_vec(py)?;
+        let npieces = rows.len() / engine::NCOL;
+        let counts: Option<PyBuffer<i64>> = match counts {
+            None => None,
+            Some(c) => {
+                let buf: PyBuffer<i64> = PyBuffer::get(c)?;
+                if buf.readonly() || !buf.is_c_contiguous() || buf.item_count() != npieces {
+                    return Err(PyBufferError::new_err(format!(
+                        "counts must be a writable, contiguous int64 buffer of {npieces} items")));
+                }
+                Some(buf)
+            }
+        };
         let dst: PyBuffer<u8> = PyBuffer::get(out).or_else(|_| {
             // any numpy dtype: its bytes
             let view = out.call_method1("view", ("u1",))?;
@@ -100,9 +116,17 @@ impl Engine {
         let plan = engine::Plan::new(&rows, codecs.into_iter().map(|c| c.0).collect(), tables,
                                      region).map_err(PyValueError::new_err)?;
         // `dst` stays alive (and the buffer exported) until the read has ended
-        let result = py.detach(|| self.0.read(&plan, threads.max(1)));
+        let result = py.detach(|| self.0.read_jobs(&plan, threads.max(1)));
         drop(dst);
-        result.map_err(PyValueError::new_err)
+        let jobs = result.map_err(PyValueError::new_err)?;
+        if let Some(buf) = counts {
+            let mut per_piece = vec![0i64; npieces];
+            for &(piece, n) in &jobs {
+                per_piece[piece] += n as i64;
+            }
+            buf.copy_from_slice(py, &per_piece)?;
+        }
+        Ok(jobs.iter().map(|&(_, n)| n).sum())
     }
 
     /// Bytes the decoded-segment cache holds now.
