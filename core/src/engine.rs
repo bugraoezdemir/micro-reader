@@ -49,6 +49,11 @@ pub const NCOL: usize = 17;
 /// Uncompressed reads: bytes read at a time when rows are buffered.
 const CHUNK_BYTES: usize = 4 << 20;
 
+/// Work below this (bytes read raw, plus 8 x the bytes of segments to decode) runs
+/// on the caller's thread: waking the pool's threads costs more than they save.  The
+/// Python path reads a request below 8 MB of raw rows as one task.
+const SMALL_WORK: usize = 2 << 20;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Raw,
@@ -63,6 +68,11 @@ pub enum Kind {
     Jxl,
     Png,
     Eer,
+    /// JPEG XR (CZI slide scans), through jxrlib
+    JpegXr,
+    /// CZI's zstd with a header (compression 6): the header's first byte is its
+    /// length; hi-lo byte packing of 16-bit samples when its flag is set
+    ZstdCzi,
 }
 
 impl Kind {
@@ -80,13 +90,16 @@ impl Kind {
             "jxl" => Self::Jxl,
             "png" => Self::Png,
             "eer" => Self::Eer,
+            "jpegxr" => Self::JpegXr,
+            "zstd-czi" => Self::ZstdCzi,
             _ => return None,
         })
     }
 
     /// Codecs that give the stored bytes (the predictor and byte order apply after).
     fn bytes(self) -> bool {
-        matches!(self, Self::None | Self::Lzw | Self::Zlib | Self::PackBits | Self::Zstd)
+        matches!(self, Self::None | Self::Lzw | Self::Zlib | Self::PackBits | Self::Zstd
+                       | Self::ZstdCzi)
     }
 }
 
@@ -112,6 +125,8 @@ pub struct Codec {
     /// raw reads: bytes worth skipping between rows rather than issuing one more
     /// read per row
     pub gap: usize,
+    /// the segment holds B, G, R(, A) samples (CZI): placed as R, G, B(, A)
+    pub bgr: bool,
 }
 
 impl Codec {
@@ -132,7 +147,17 @@ impl Codec {
                 return Err("codec eer: one sample per pixel".into());
             }
         }
+        if self.bgr && !matches!(self.samples, 3 | 4) {
+            return Err(format!("codec {:?}: B, G, R order with {} samples", self.kind,
+                               self.samples));
+        }
         Ok(())
+    }
+
+    /// The stored sample that destination sample `c` takes.
+    #[inline]
+    fn stored(&self, c: usize) -> usize {
+        if self.bgr && c < 3 { 2 - c } else { c }
     }
 
     /// Whether stored samples need their bytes reversed to native order.
@@ -330,7 +355,19 @@ impl Engine {
             };
             run(job).map(|n| (first, n))
         };
-        if threads <= 1 || jobs.len() < 2 {
+        let work: usize = jobs.iter().map(|job| match job {
+            Job::Raw(i) => {
+                let p = &plan.pieces[*i];
+                let c = &plan.codecs[p.codec];
+                p.rows() * (p.x1 - p.x0) * c.samples * c.itemsize
+            }
+            Job::Segment(v) => {
+                let p = &plan.pieces[v[0]];
+                let c = &plan.codecs[p.codec];
+                8 * p.seg_rows * p.seg_cols * c.samples * c.itemsize
+            }
+        }).sum();
+        if threads <= 1 || jobs.len() < 2 || work < SMALL_WORK {
             return jobs.iter().map(counted).collect();
         }
         self.pool(threads)?.install(|| jobs.par_iter().map(counted).collect())
@@ -485,6 +522,40 @@ fn decode_segment(source: &Source, p: &Piece, codec: &Codec, table: Option<&[u8]
                                                        itemsize: item })
                 .map_err(|e| corrupt(format!("corrupt EER data: {e}")))?;
         }
+        Kind::ZstdCzi => {
+            // header: its length, then (from 3 bytes on) chunk 1 = preprocessing,
+            // whose bit 0 is hi-lo byte packing (all low bytes, then all high bytes)
+            let header = *data.first().ok_or_else(|| corrupt("empty zstd subblock".into()))?
+                as usize;
+            if header > data.len() {
+                return Err(corrupt(format!("zstd header of {header} bytes in {}", data.len())));
+            }
+            let hilo = header >= 3 && data[1] == 1 && data[2] & 1 == 1;
+            let body = &data[header..];
+            let zstd = |out: &mut [u8]| -> Result<(), String> {
+                let n = decode::zstd(body, out)
+                    .map_err(|e| corrupt(format!("corrupt zstd data: {e}")))?;
+                if n != out.len() {
+                    return Err(corrupt(format!("zstd data decodes to {n} bytes, expected {}",
+                                               out.len())));
+                }
+                Ok(())
+            };
+            if hilo && item == 2 {
+                let mut packed = vec![0u8; seg.len()];
+                zstd(&mut packed)?;
+                let half = seg.len() / 2;
+                let (lo, hi) = packed.split_at(half);
+                for ((v, &l), &h) in seg.as_chunks_mut::<2>().0.iter_mut().zip(lo).zip(hi) {
+                    *v = [l, h];
+                }
+            } else {
+                zstd(seg)?;
+            }
+        }
+        Kind::JpegXr => {
+            jpegxr(data, seg, codec, ns, item, &corrupt, &check)?;
+        }
     }
     if codec.kind.bytes() {
         match codec.predictor {
@@ -505,6 +576,36 @@ fn decode_segment(source: &Source, p: &Piece, codec: &Codec, table: Option<&[u8]
         swap_bytes(seg, item);                   // image codecs write little-endian
     }
     Ok(())
+}
+
+/// A JPEG XR segment through jxrlib.  With `codec.bgr` the samples end up B, G,
+/// R(, A) as stored (8-bit Zeiss tiles decode that way without a conversion pass;
+/// others come out R, G, B and are swapped here).
+#[cfg(feature = "jxrlib")]
+fn jpegxr(data: &[u8], seg: &mut [u8], codec: &Codec, ns: usize, item: usize,
+          corrupt: &dyn Fn(String) -> String,
+          check: &dyn Fn((usize, usize, usize)) -> Result<(), String>) -> Result<(), String> {
+    let (w, h, n, bytes, _kind, order) = decode::jpegxr(data, seg, codec.bgr)
+        .map_err(|e| corrupt(format!("corrupt JPEG XR data: {e}")))?;
+    check((w, h, n))?;
+    if bytes != item {
+        return Err(corrupt(format!("JPEG XR samples of {bytes} bytes, the file says {item}")));
+    }
+    if codec.bgr && order != "bgr" && ns >= 3 {
+        for px in seg.chunks_exact_mut(ns * item) {
+            for b in 0..item {
+                px.swap(b, 2 * item + b);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "jxrlib"))]
+fn jpegxr(_data: &[u8], _seg: &mut [u8], _codec: &Codec, _ns: usize, _item: usize,
+          corrupt: &dyn Fn(String) -> String,
+          _check: &dyn Fn((usize, usize, usize)) -> Result<(), String>) -> Result<(), String> {
+    Err(corrupt("JPEG XR: micro-reader-core was built without jxrlib".into()))
 }
 
 fn io_error(source: &Source, offset: u64, e: std::io::Error) -> String {
@@ -584,15 +685,16 @@ unsafe fn copy_items(src: &[u8], dst: *mut u8, item: usize, swap: bool) {
 
 /// Write rows `y0..y1` (relative to the piece's first row: `rows` holds them, each
 /// `row_len` bytes, starting at column 0 of the segment) to the piece's destination,
-/// columns `x0..x1` and samples `c0..c1`.
+/// columns `x0..x1` and samples `c0..c1` (B, G, R segments reversed: `codec.bgr`).
 #[allow(clippy::too_many_arguments)]
-fn scatter(rows: &[u8], row_len: usize, first: usize, n: usize, p: &Piece, ns: usize,
-           item: usize, swap: bool) {
+fn scatter(rows: &[u8], row_len: usize, first: usize, n: usize, p: &Piece, codec: &Codec,
+           swap: bool) {
+    let (ns, item) = (codec.samples, codec.itemsize);
     let width = p.x1 - p.x0;
     let nc = p.c1 - p.c0;
     let px = ns * item;
     // contiguous destination rows holding every sample: one copy per row
-    let whole = p.c0 == 0 && p.c1 == ns && p.dst_sample == item && p.dst_col == px;
+    let whole = !codec.bgr && p.c0 == 0 && p.c1 == ns && p.dst_sample == item && p.dst_col == px;
     for r in 0..n {
         let src = &rows[r * row_len..(r + 1) * row_len];
         // SAFETY: Piece::parse checked the rectangle against the output buffer
@@ -600,7 +702,7 @@ fn scatter(rows: &[u8], row_len: usize, first: usize, n: usize, p: &Piece, ns: u
         unsafe {
             if whole {
                 copy_items(&src[p.x0 * px..p.x1 * px], base as *mut u8, item, swap);
-            } else if p.dst_sample == item {
+            } else if !codec.bgr && p.dst_sample == item {
                 for x in 0..width {
                     let s = (p.x0 + x) * px + p.c0 * item;
                     copy_items(&src[s..s + nc * item], (base + x * p.dst_col) as *mut u8, item, swap);
@@ -608,7 +710,7 @@ fn scatter(rows: &[u8], row_len: usize, first: usize, n: usize, p: &Piece, ns: u
             } else {
                 for x in 0..width {
                     for c in 0..nc {
-                        let s = (p.x0 + x) * px + (p.c0 + c) * item;
+                        let s = (p.x0 + x) * px + codec.stored(p.c0 + c) * item;
                         copy_items(&src[s..s + item],
                                    (base + x * p.dst_col + c * p.dst_sample) as *mut u8, item, swap);
                     }
@@ -621,8 +723,7 @@ fn scatter(rows: &[u8], row_len: usize, first: usize, n: usize, p: &Piece, ns: u
 /// Copy piece `p`'s rectangle out of its decoded (native-order) segment.
 fn place(seg: &[u8], p: &Piece, codec: &Codec) {
     let row_len = p.seg_cols * codec.samples * codec.itemsize;
-    scatter(&seg[p.y0 * row_len..p.y1 * row_len], row_len, 0, p.rows(), p, codec.samples,
-            codec.itemsize, false);
+    scatter(&seg[p.y0 * row_len..p.y1 * row_len], row_len, 0, p.rows(), p, codec, false);
 }
 
 /// Read piece `p` of an uncompressed segment (stride `seg_cols` pixels) in place:
@@ -641,7 +742,8 @@ fn raw(source: &Source, p: &Piece, codec: &Codec) -> Result<usize, String> {
             Err(e) => Err(io_error(source, offset, e)),
         }
     };
-    let whole_pixels = p.c0 == 0 && p.c1 == ns && p.dst_sample == item && p.dst_col == px;
+    let whole_pixels = !codec.bgr && p.c0 == 0 && p.c1 == ns && p.dst_sample == item
+        && p.dst_col == px;
     let direct = whole_pixels && !swap;
     if direct && p.x0 == 0 && p.x1 == p.seg_cols && p.dst_row == row_len {
         // the destination has the file's layout: one read straight into it
@@ -654,45 +756,71 @@ fn raw(source: &Source, p: &Piece, codec: &Codec) -> Result<usize, String> {
         // a few skipped bytes per row cost less than one more read per row: read
         // from the first row's columns to the last row's, in chunks
         let per_chunk = (CHUNK_BYTES / row_len).max(1).min(rows);
-        let mut buf = vec![0u8; per_chunk * row_len];
-        let mut r = 0;
-        while r < rows {
-            let n = per_chunk.min(rows - r);
-            let span = (n - 1) * row_len + width * px;
-            read(&mut buf[p.x0 * px..p.x0 * px + span], at(p.y0 + r, p.x0))?;
-            scatter(&buf[..n * row_len], row_len, r, n, p, ns, item, swap);
-            r += n;
-        }
-        return Ok((rows - 1) * p.seg_cols * ns + width * ns);
+        return raw_buffer(per_chunk * row_len, |buf| {
+            let mut r = 0;
+            while r < rows {
+                let n = per_chunk.min(rows - r);
+                let span = (n - 1) * row_len + width * px;
+                read(&mut buf[p.x0 * px..p.x0 * px + span], at(p.y0 + r, p.x0))?;
+                scatter(&buf[..n * row_len], row_len, r, n, p, codec, swap);
+                r += n;
+            }
+            Ok((rows - 1) * p.seg_cols * ns + width * ns)
+        });
     }
     if p.x0 == 0 && p.x1 == p.seg_cols {
         // whole rows are contiguous: read them in chunks
         let per_chunk = (CHUNK_BYTES / row_len).max(1).min(rows);
-        let mut buf = vec![0u8; per_chunk * row_len];
-        let mut r = 0;
-        while r < rows {
-            let n = per_chunk.min(rows - r);
-            read(&mut buf[..n * row_len], at(p.y0 + r, 0))?;
-            scatter(&buf[..n * row_len], row_len, r, n, p, ns, item, swap);
-            r += n;
-        }
-        return Ok(rows * p.seg_cols * ns);
+        return raw_buffer(per_chunk * row_len, |buf| {
+            let mut r = 0;
+            while r < rows {
+                let n = per_chunk.min(rows - r);
+                read(&mut buf[..n * row_len], at(p.y0 + r, 0))?;
+                scatter(&buf[..n * row_len], row_len, r, n, p, codec, swap);
+                r += n;
+            }
+            Ok(rows * p.seg_cols * ns)
+        });
     }
     // row by row: straight into the destination when its rows have the file's layout
-    let mut buf = vec![0u8; if direct { 0 } else { row_len }];
-    for r in 0..rows {
-        if direct {
+    if direct {
+        for r in 0..rows {
             // SAFETY: as above, one row of the checked rectangle
             let dst = unsafe {
                 std::slice::from_raw_parts_mut((p.dst + r * p.dst_row) as *mut u8, width * px)
             };
             read(dst, at(p.y0 + r, p.x0))?;
-        } else {
-            read(&mut buf[p.x0 * px..p.x1 * px], at(p.y0 + r, p.x0))?;
-            scatter(&buf, row_len, r, 1, p, ns, item, swap);
         }
+        return Ok(rows * width * ns);
     }
-    Ok(rows * width * ns)
+    raw_buffer(row_len, |buf| {
+        for r in 0..rows {
+            read(&mut buf[p.x0 * px..p.x1 * px], at(p.y0 + r, p.x0))?;
+            scatter(buf, row_len, r, 1, p, codec, swap);
+        }
+        Ok(rows * width * ns)
+    })
+}
+
+thread_local! {
+    /// the thread's buffer for uncompressed rows, reused between pieces
+    static RAW: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `f` on `n` bytes of this thread's raw-read buffer (grown, never zeroed
+/// again once grown; let go when a rare piece made it larger than a chunk).
+fn raw_buffer<R>(n: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
+    RAW.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        if buf.len() < n {
+            buf.resize(n, 0);
+        }
+        let result = f(&mut buf[..n]);
+        if buf.len() > CHUNK_BYTES + (1 << 20) {
+            *buf = Vec::new();
+        }
+        result
+    })
 }
 
 #[cfg(test)]

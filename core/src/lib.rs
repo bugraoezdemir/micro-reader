@@ -27,17 +27,18 @@ struct Codec(engine::Codec);
 impl Codec {
     #[new]
     #[pyo3(signature = (kind, itemsize, samples, *, predictor=1, big_endian=false,
-                        colour="auto", jpeg_header=false, eer=(7, 2, 2), gap=32768))]
+                        colour="auto", jpeg_header=false, eer=(7, 2, 2), gap=32768,
+                        bgr=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(kind: &str, itemsize: usize, samples: usize, predictor: u8, big_endian: bool,
-           colour: &str, jpeg_header: bool, eer: (u32, u32, u32), gap: usize)
+           colour: &str, jpeg_header: bool, eer: (u32, u32, u32), gap: usize, bgr: bool)
         -> PyResult<Self> {
         let kind = engine::Kind::parse(kind)
             .ok_or_else(|| PyValueError::new_err(format!("unknown codec {kind:?}")))?;
         let colour = JpegColour::parse(colour)
             .ok_or_else(|| PyValueError::new_err(format!("unknown JPEG colour {colour:?}")))?;
         let c = engine::Codec { kind, itemsize, samples, predictor, big_endian, colour,
-                                jpeg_header, eer, gap };
+                                jpeg_header, eer, gap, bgr };
         c.check().map_err(PyValueError::new_err)?;
         Ok(Self(c))
     }

@@ -9,9 +9,10 @@ however many pieces need it, a cache of decoded segments of its own.  Whatever
 a backend does not hand over (large segments decoded in parts, codecs the
 engine lacks) runs on the decode pool as before, in the same call.
 
-Off when micro-reader-core is not installed, with ``MICRO_READER_ENGINE=0``, or
-after ``set_engine(False)``; the Python path is then the only one, and stays the
-reference the tests compare the engine with.
+Off when micro-reader-core is not installed, with ``MICRO_READER_ENGINE=0``, with
+``MICRO_READER_NO_NATIVE=1`` (no native code at all: the reference decoders on the
+Python path), or after ``set_engine(False)``; the Python path is then the only one,
+and stays the reference the tests compare the engine with.
 """
 from __future__ import annotations
 
@@ -44,11 +45,18 @@ def available() -> bool:
     return _core is not None
 
 
+def has(feature: str) -> bool:
+    """Whether the installed micro-reader-core has *feature* (``HAS_JXRLIB``,
+    ``HAS_LIBJPEG_TURBO``); False without it."""
+    return bool(getattr(_core, feature, False))
+
+
 def enabled() -> bool:
     """Whether reads go through the engine."""
     global _enabled
     if _enabled is None:
-        _enabled = _core is not None and os.environ.get("MICRO_READER_ENGINE", "1") != "0"
+        _enabled = (_core is not None and os.environ.get("MICRO_READER_ENGINE", "1") != "0"
+                    and not os.environ.get("MICRO_READER_NO_NATIVE"))
     return _enabled
 
 

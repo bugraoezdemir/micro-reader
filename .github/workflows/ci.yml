@@ -70,9 +70,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --find-links wheels -e "python[test]"
           python -m pip install --no-index --find-links wheels micro-reader-core
-      - name: tests (native decoders)
+      # the read engine and the native decoders; then no native code at all: the
+      # Python path with the reference decoders (test_engine.py compares the engine
+      # with the Python path on the native decoders)
+      - name: tests (read engine, native decoders)
         run: python -m pytest -q
-      - name: tests (reference decoders)
+      - name: tests (Python path, reference decoders)
         env:
           MICRO_READER_NO_NATIVE: "1"
         run: python -m pytest -q

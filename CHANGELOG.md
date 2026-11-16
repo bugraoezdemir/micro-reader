@@ -14,7 +14,13 @@ micro-reader reads as before.
   segments whose size follows `set_cache_limit`. Pieces the engine does not take yet (LZMA,
   packed bit depths, FillOrder 2, codecs that only tifffile decodes, and segments read as a
   stream) are read on the Python path as before. The environment variable
-  `MICRO_READER_ENGINE=0` switches the engine off.
+  `MICRO_READER_ENGINE=0` switches the engine off, and so does `MICRO_READER_NO_NATIVE=1`.
+- CZI files are read through the engine too: uncompressed tiles, zstd (both codes, hi-lo
+  packing included), LZW, JPEG, lossless JPEG, JPEG XR and JPEG XL. Overlapping mosaic
+  tiles are composed as before, each pixel from the last tile that covers it. A JPEG XR
+  slide's plane is read on all decode threads at once (about 2 to 5 times faster with 8
+  threads in a first measurement). Chunked subblocks, and compressed tiles too large to
+  decode whole, are read on the Python path.
 - `micro_reader.read_many(requests)`, also available as `Image.read_many`, reads the regions
   of many images in one go, each into an array you give. When one region spans many files,
   as in a z stack stored as one file per plane, the strips and tiles of all of them are read
