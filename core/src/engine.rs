@@ -383,7 +383,7 @@ impl Engine {
         let need = first.seg_rows * first.seg_cols * codec.samples * codec.itemsize;
         let (cached, keep) = {
             let mut cache = self.cache.lock().unwrap();
-            (cache.get(key), need <= cache.item_limit && need <= cache.limit)
+            (cache.get(key), need <= cache.item_limit && need <= cache.room())
         };
         if let Some(seg) = cached {
             if seg.len() != need {

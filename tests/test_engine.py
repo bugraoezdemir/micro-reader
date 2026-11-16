@@ -375,3 +375,56 @@ def test_czi_truncated_subblock_is_a_corrupt_file_error(tmp_path):
             fh.truncate(size - 4000)
         with pytest.raises(CorruptFileError):
             image[...]
+
+
+# -- one cache limit ------------------------------------------------------------------
+
+def test_the_engine_and_the_python_caches_share_one_limit(tmp_path):
+    """The limit covers the engine's cache and the Python caches together, and
+    each side can take at least half of it from the other: a process reading
+    one format on the Python path and another on the engine stays within it."""
+    from micro_reader import _io
+    if not HAVE_CODECS:
+        pytest.skip("needs imagecodecs to write zlib tiles")
+    paths = []
+    for name in ("python.tif", "engine.tif"):
+        path = str(tmp_path / name)
+        tifffile.imwrite(path, _data((512, 512), "u2"), compression="zlib", tile=(64, 64))
+        paths.append(path)                                 # 64 tiles of 8 KB decoded
+    limit, tile = 256 << 10, 64 * 64 * 2
+    old = micro_reader.cache_limit()
+    micro_reader.set_cache_limit(limit)
+    eng = _engine.engine()
+
+    files = [_native(path) for path in paths]             # open throughout: closing
+                                                           # a file empties its caches
+    def read(k, engine):
+        _engine.set_engine(engine)
+        try:
+            files[k].images[0][...]
+        finally:
+            _engine.set_engine(None)
+
+    def held():
+        return _io._shared_bytes, eng.cached_bytes()
+
+    try:
+        eng.clear_cache()
+        read(0, False)                                     # the Python caches fill up
+        python, engine = held()
+        assert limit - tile < python <= limit and engine == 0
+        read(1, True)                                      # they give back half to the engine
+        python, engine = held()
+        assert python <= limit // 2 and engine >= limit // 2 - tile
+        assert python + engine <= limit
+        read(0, False)                                     # the engine gives back half
+        python, engine = held()
+        assert python >= limit // 2 - tile and engine <= limit // 2
+        assert python + engine <= limit
+        assert micro_reader.cached_bytes() == python + engine
+        micro_reader.set_cache_limit(64 << 10)            # lowered: both shrink
+        assert micro_reader.cached_bytes() <= 64 << 10
+    finally:
+        for f in files:
+            f.close()
+        micro_reader.set_cache_limit(None if old == _io.DEFAULT_CACHE_LIMIT else old)

@@ -11,7 +11,8 @@ micro-reader reads as before.
   TIFF planes and MetaMorph planes are read through it. It reads and decodes the strips and
   tiles of a region on its own threads, without holding Python's GIL, and writes them
   straight into the output array. It keeps its own file handles and a cache of decoded
-  segments whose size follows `set_cache_limit`. Pieces the engine does not take yet (LZMA,
+  segments. `set_cache_limit` covers that cache and the other caches together: whichever
+  side is reading can always take at least half of the limit. Pieces the engine does not take yet (LZMA,
   packed bit depths, FillOrder 2, codecs that only tifffile decodes, and segments read as a
   stream) are read on the Python path as before. The environment variable
   `MICRO_READER_ENGINE=0` switches the engine off, and so does `MICRO_READER_NO_NATIVE=1`.

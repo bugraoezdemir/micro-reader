@@ -139,7 +139,22 @@ impl Engine {
     fn set_cache_limit(&self, limit: usize) {
         let mut cache = self.0.cache.lock().unwrap();
         cache.limit = limit;
-        cache.shrink(limit);
+        let room = cache.room();
+        cache.shrink(room);
+    }
+
+    /// What micro-reader's Python caches hold now (bytes): the cache limit covers
+    /// both, so the engine keeps at most the limit less this.
+    fn set_held_elsewhere(&self, nbytes: usize) {
+        self.0.cache.lock().unwrap().elsewhere = nbytes;
+    }
+
+    /// Drop least recently used segments until the cache holds at most `nbytes`;
+    /// returns what it holds then.
+    fn shrink_cache(&self, nbytes: usize) -> usize {
+        let mut cache = self.0.cache.lock().unwrap();
+        cache.shrink(nbytes);
+        cache.bytes()
     }
 
     fn clear_cache(&self) {

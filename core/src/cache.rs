@@ -16,11 +16,20 @@ pub struct Cache {
     pub limit: usize,
     /// larger segments are not kept (one whole-plane strip would evict the rest)
     pub item_limit: usize,
+    /// what micro-reader's Python caches hold: `limit` covers both (the Python side
+    /// says so on every change), so this cache keeps at most `limit - elsewhere`
+    pub elsewhere: usize,
 }
 
 impl Cache {
     pub fn new(limit: usize, item_limit: usize) -> Self {
-        Self { items: HashMap::new(), order: BTreeMap::new(), tick: 0, bytes: 0, limit, item_limit }
+        Self { items: HashMap::new(), order: BTreeMap::new(), tick: 0, bytes: 0, limit, item_limit,
+               elsewhere: 0 }
+    }
+
+    /// What this cache may hold now: the limit less what is held elsewhere.
+    pub fn room(&self) -> usize {
+        self.limit.saturating_sub(self.elsewhere)
     }
 
     pub fn bytes(&self) -> usize {
@@ -39,14 +48,14 @@ impl Cache {
 
     pub fn put(&mut self, key: Key, seg: Arc<Vec<u8>>) {
         let n = seg.len();
-        if n > self.item_limit || n > self.limit || self.items.contains_key(&key) {
+        if n > self.item_limit || n > self.room() || self.items.contains_key(&key) {
             return;
         }
         self.tick += 1;
         self.items.insert(key, (seg, self.tick));
         self.order.insert(self.tick, key);
         self.bytes += n;
-        self.shrink(self.limit);
+        self.shrink(self.room());
     }
 
     /// Drop least recently used segments until at most `limit` bytes are kept.
@@ -95,5 +104,20 @@ mod tests {
         assert!(c.get((3, 0)).is_none());
         c.forget(1);
         assert_eq!(c.bytes(), 10);
+    }
+
+    #[test]
+    fn what_is_held_elsewhere_counts_against_the_limit() {
+        let mut c = Cache::new(30, 20);
+        c.elsewhere = 15;                              // room for 15
+        c.put((1, 0), Arc::new(vec![0; 10]));
+        c.put((1, 10), Arc::new(vec![0; 10]));         // evicts (1, 0)
+        assert_eq!(c.bytes(), 10);
+        assert!(c.get((1, 0)).is_none());
+        c.put((1, 20), Arc::new(vec![0; 16]));         // larger than the room: not kept
+        assert!(c.get((1, 20)).is_none());
+        c.elsewhere = 40;                              // more than the limit: no room
+        c.put((2, 0), Arc::new(vec![0; 1]));
+        assert!(c.get((2, 0)).is_none());
     }
 }

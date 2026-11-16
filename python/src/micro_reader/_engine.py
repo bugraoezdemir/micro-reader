@@ -80,11 +80,14 @@ def engine():
         with _lock:
             if _engine is None:
                 _engine = _core.Engine()
-    from ._io import cache_limit
+    from ._io import cache_limit, yield_to_engine
     limit = cache_limit()
     if limit != _cache_limit:                    # set_cache_limit() applies here too
         _engine.set_cache_limit(limit)
         _cache_limit = limit
+    # one limit for the engine's cache and the Python caches (_io): they give back
+    # down to half of it if they hold more, and the engine keeps at most the rest
+    yield_to_engine(_engine, limit)
     return _engine
 
 
