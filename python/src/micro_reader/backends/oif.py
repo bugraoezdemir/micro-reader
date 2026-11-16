@@ -257,7 +257,8 @@ class _Layout:
                                              f"{page.shaped}")
             self.rows, self.cols = page.imagelength, page.imagewidth
             self.dtype = np.dtype(page.dtype).newbyteorder(tif.byteorder)
-            self.raw = (page.compression == 1 and page.predictor == 1 and page.fillorder == 1
+            # uncompressed: no predictor, as in libtiff (tiff.predictor)
+            self.raw = (page.compression == 1 and page.fillorder == 1
                         and page.bitspersample == 8 * self.dtype.itemsize and not page.is_tiled)
             self.offsets, self.counts = page.dataoffsets, page.databytecounts
             self.rows_per_strip = page.rowsperstrip or self.rows
