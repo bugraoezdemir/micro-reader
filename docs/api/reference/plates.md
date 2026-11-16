@@ -11,7 +11,7 @@ File.plates[p]                 Plate
 
 ## Containment
 
-Every level knows what it is and what holds it:
+Every level knows what it is and what holds it.
 
 | Level | `kind` | `parent` | Holds |
 | --- | --- | --- | --- |
@@ -20,9 +20,9 @@ Every level knows what it is and what holds it:
 | `Well` | `"well"` | its plate | `.fields` |
 | `Field` | `"field"` | its well | `.images`, `.tiles`, `.image` |
 
-Accessors go down only. An accessor of another level (`well.plates`, `file.wells`, `field.wells`) raises `AttributeError` that names what the object holds and says `.parent` is what holds it. For a plate that was cut with `rows` / `columns` (below), `parent` is still the file.
+Accessors go down only. An accessor of another level, such as `well.plates`, `file.wells` or `field.wells`, raises `AttributeError`. The message names what the object holds and says that `.parent` is what holds it. For a plate that was cut with `rows` or `columns` (below), `parent` is still the file.
 
-Rows and columns are a well's address, not levels of containment: a plate does not hold rows.
+Rows and columns are part of the address of a well. They are not levels of containment, so a plate does not hold rows.
 
 ## Plate
 
@@ -40,25 +40,25 @@ class micro_reader.Plate:
 
 | Field | Description |
 | --- | --- |
-| `name` | The plate's name; `""` when the file has none. |
-| `row_names` | Row names of the plate layout: `row_names[i]` names row `i` (e.g. `"A"`). |
-| `column_names` | Column names: `column_names[j]` names column `j` (e.g. `"1"`). |
-| `wells` | The wells that hold images. Image index `"well": i` is `wells[i]` of the whole plate. |
-| `acquisitions` | The plate's imaging runs. Empty when the file does not record them. |
+| `name` | The name of the plate. It is `""` when the file has none. |
+| `row_names` | The row names of the plate layout. `row_names[i]` names row `i`, for example `"A"`. |
+| `column_names` | The column names. `column_names[j]` names column `j`, for example `"1"`. |
+| `wells` | The wells that hold images. The image index `"well": i` is `wells[i]` of the whole plate. |
+| `acquisitions` | The imaging runs of the plate. This is empty when the file does not record them. |
 | `parent` | The [`File`](file.md) that holds the plate. |
-| `whole` | For a part of a plate (below): the whole plate's wells. Empty for a whole plate. |
+| `whole` | For a part of a plate (below), the wells of the whole plate. It is empty for a whole plate. |
 
 | Property | Description |
 | --- | --- |
-| `kind` | `"plate"`. |
-| `rows` | A slicer over the plate's rows (below). `len(plate.rows)` is the number of rows of the layout. |
-| `columns` | A slicer over the plate's columns. |
-| `is_part` | `True` for a plate cut with `rows` / `columns` that holds fewer wells than the whole. |
+| `kind` | Always `"plate"`. |
+| `rows` | A slicer over the rows of the plate (below). `len(plate.rows)` is the number of rows of the layout. |
+| `columns` | A slicer over the columns of the plate. |
+| `is_part` | `True` for a plate cut with `rows` or `columns` that holds fewer wells than the whole plate. |
 
 !!! warning "0.3.0: `rows` and `columns` changed meaning"
-    Before 0.3.0, `Plate.rows` and `Plate.columns` held the row and column *names*. Those are now `Plate.row_names` and `Plate.column_names`. Change `plate.rows[well.row]` to `plate.row_names[well.row]`. `len(plate.rows)` still gives the number of rows. Iterating `plate.rows` raises `TypeError` that points to `row_names`.
+    Before 0.3.0, `Plate.rows` and `Plate.columns` held the row and column *names*. Those are now `Plate.row_names` and `Plate.column_names`. Change `plate.rows[well.row]` to `plate.row_names[well.row]`. `len(plate.rows)` still gives the number of rows. Iterating `plate.rows` raises a `TypeError` that points to `row_names`.
 
-The layout is the plate's own, not just the wells that hold images. A layout the file describes too small for its wells is grown to hold them, with a [`PlateLayoutWarning`](errors.md#platelayoutwarning).
+The layout is the layout of the plate itself and not only of the wells that hold images. If the file describes a layout that is too small for its wells, the layout is grown to hold them, and a [`PlateLayoutWarning`](errors.md#platelayoutwarning) is issued.
 
 ### Cutting a plate: `rows` and `columns`
 
@@ -67,18 +67,18 @@ Plate.rows[key] -> Plate
 Plate.columns[key] -> Plate
 ```
 
-The part of the plate in those rows (or columns), still a plate. `key` is a position, a `slice`, a name or a list of them:
+Returns the part of the plate in those rows or columns, which is still a plate. `key` is a position, a `slice`, a name or a list of them:
 
 ```python
 plate.rows[2]                      # row C
 plate.rows[2:5]                    # rows C, D, E
 plate.rows["B"]                    # by name
 plate.rows[["B", "D"]]             # rows B and D
-plate.rows[-2:]                    # the last two rows (negative bounds count from the layout's end)
+plate.rows[-2:]                    # the last two rows (negative bounds count from the end of the layout)
 plate.rows[2:5].columns[3:7]       # rows C-E, columns 4-7: the two combine
 ```
 
-Positions are the whole layout's, so a part's `rows[3]` is still row D. A name that is not in the layout raises `KeyError`; a position out of range `IndexError`. The result's `wells` are the wells of the part that hold images; `well_index` answers with the index the images carry. `File.select(row=..., column=...)` picks the same wells' images.
+Positions refer to the whole layout, so `rows[3]` of a part is still row D. A name that is not in the layout raises `KeyError`, and a position out of range raises `IndexError`. The `wells` of the result are the wells of the part that hold images. `well_index` answers with the index that the images carry. `File.select(row=..., column=...)` picks the images of the same wells.
 
 ### `well_index`
 
@@ -86,11 +86,12 @@ Positions are the whole layout's, so a part's `rows[3]` is still row D. A name t
 Plate.well_index(name) -> int
 ```
 
-The index of the well called `name` (e.g. `"B2"`) as its images carry it, for `File.select(well=...)`. For a part of a plate it is still the place in the whole plate's wells. Raises `KeyError` listing the wells with images when there is no such well.
+Returns the index of the well called `name`, for example `"B2"`, as its images carry it. You can pass it to `File.select(well=...)`. For a part of a plate, it is still the place in the wells of the whole plate. It raises `KeyError` when there is no such well, and the message lists the wells with images.
 
 ```python
-f.select(well=plate.well_index("B2"))
-f.select(well="B2")                    # the same
+plate = f.plates[0]
+f.select(plate=0, well=plate.well_index("B2"))
+f.select(plate=0, well="B2")                    # the same
 ```
 
 ## Well
@@ -107,10 +108,10 @@ class micro_reader.Well:
 
 | Field | Description |
 | --- | --- |
-| `row` | Row, counting from 0. |
-| `column` | Column, counting from 0. |
-| `name` | Row name + column name, e.g. `"B2"` for row 1, column 1. |
-| `fields` | The fields that have images, in field order. `fields[j]` is the j-th field present. Its `.index` is its field number. |
+| `row` | The row, counting from 0. |
+| `column` | The column, counting from 0. |
+| `name` | The row name followed by the column name, for example `"B2"` for row 1, column 1. |
+| `fields` | The fields that have images, in field order. `fields[j]` is the j-th field present, and its `.index` is its field number. |
 | `parent` | The plate that holds the well. |
 
 `kind` is `"well"`.
@@ -128,12 +129,12 @@ One field (site) of a well.
 
 | Member | Description |
 | --- | --- |
-| `index` | The field number, the same as the images' `"field"` index. |
-| `images` | All images of the field (full resolution), in `File.images` order. |
+| `index` | The field number. It is the same as the `"field"` index of the images. |
+| `images` | All images of the field at full resolution, in `File.images` order. |
 | `parent` | The well that holds the field. |
-| `image` | The field's one image (a field that is not tiled, or placed as one mosaic with `tiles="mosaic"`). Raises `ValueError` when the field has more than one: use `tiles` or `select()`. |
-| `tiles` | The images in tile order. `tiles[k]` is the k-th tile present, and `.index["tile"]` is its tile index. Raises `ValueError` when an orthogonal index (view, acquisition, illumination, ...) also varies in the field. |
-| `select(**index) -> Field` | This field with only the images whose index matches, e.g. `field.select(view=1).tiles[7]`. A value may be an `int`, a `list`, `tuple`, `range` or `set` of them (any of them), or a `slice` of positions, as in [`File.select`](file.md#select). Raises `KeyError` for an unknown index name (a plate's `row` / `column` are not accepted: a field sits in one well). |
+| `image` | The one image of the field, for a field that is not tiled or that is placed as one mosaic with `tiles="mosaic"`. It raises `ValueError` when the field has more than one image. In that case, use `tiles` or `select()`. |
+| `tiles` | The images in tile order. `tiles[k]` is the k-th tile present, and `.index["tile"]` is its tile index. It raises `ValueError` when an orthogonal index such as view, acquisition or illumination also varies in the field. |
+| `select(**index) -> Field` | Returns this field with only the images whose index matches, for example `field.select(view=1).tiles[7]`. A value may be an `int`, a `list`, `tuple`, `range` or `set` of them, which means any of them, or a `slice` of positions, as in [`File.select`](file.md#select). It raises `KeyError` for an unknown index name. The `row` and `column` of a plate are not accepted, because a field sits in one well. |
 
 `kind` is `"field"`.
 
@@ -146,4 +147,4 @@ class micro_reader.Acquisition:
     name: str = ""
 ```
 
-One imaging run of a plate. Images carry the run in their `"acquisition"` index. `File.select(acquisition_name=...)` picks by `name`.
+One imaging run of a plate. The images carry the run in their `"acquisition"` index. `File.select(acquisition_name=...)` picks a run by `name`.

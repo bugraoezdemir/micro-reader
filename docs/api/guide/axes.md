@@ -1,20 +1,27 @@
 # Axes
 
-Every image's array uses the axes `t c z y x`, plus `s` for RGB samples. `open()` gives every image all five, `tczyx`, by default (`axes="canonical"`); with `axes=None` (also spelled `"native"`) each image keeps only the axes its file has, in the file's own order for formats that have one. This page shows how to get the layout you want.
+Images use five standard axes: `t c z y x`, with an optional `s` axis for colour samples.
 
-## The native layout
+By default, `open()` uses `axes="canonical"` and gives every image the five axes `tczyx`. With `axes=None` (also accepted as `"native"`), each image retains the axes present in its original layout and their original order.
 
-What `open(..., axes=None)` gives:
+RGB samples are represented as channels by default. To retain the stored `s` axis, pass `samples="keep"`.
+
+This page explains how to choose the array layout you need.
+
+## Native layout
+
+With `open(..., axes=None)`, images retain their native axis order. Typical layouts include:
 
 | Format | Typical native axes |
 | --- | --- |
-| CZI, ND2, LIF, OIR, OIB / OIF, VSI, Imaris, plates, companion sets | `tczyx` (RGB: `tczyxs` as stored, see [RGB samples](#rgb-samples)) |
-| TIFF (plain, ImageJ, OME-TIFF, ...) | the file's own order, for example `yx`, `zyx`, `tzcyx`, `yxs` |
-| DeltaVision | the file's own order of time, waves and z, for example `ctzyx` |
+| CZI, ND2, LIF, OIR, OIB / OIF, VSI, Imaris, plates, companion sets | `tczyx` (RGB samples can be retained as `tczyxs`; see [RGB samples](#rgb-samples)) |
+| TIFF (plain, ImageJ, OME-TIFF, ...) | The order stored in the file, for example `yx`, `zyx`, `tzcyx`, `yxs` |
+| DeltaVision | The file's own order of time, waves and z, for example `ctzyx` |
 | MRC | `zyx` or `yx` |
-| PNG, JPEG, BMP | `yx` or `yxs` as stored |
+| PNG, JPEG, BMP | `yx` or `yxs`, as stored |
+| Lambda scans (LIF, OIR, OIB / OIF, OME-TIFF) | The format's axes with the bands along an added `l`, for example `tlczyx` (see [Lambda scans](#lambda-scans)) |
 
-When code handles many formats, it is easier to ask for one layout.
+When working with multiple formats, using a consistent layout is usually more convenient. You can do this with `axes="canonical"` or by reshaping individual images with `as_axes()`.
 
 ## `as_axes()`
 
@@ -22,51 +29,55 @@ When code handles many formats, it is easier to ask for one layout.
 image.as_axes(axes=None, *, samples="keep", squeeze=False) -> Image
 ```
 
-`as_axes` returns a new image that shows the same pixels in another layout. Nothing is read when you call it. Reads on the new image are turned into reads in the native layout, so they stay exact.
+`as_axes()` returns a new image with the same pixels presented in a different axis layout. It does not read any pixel data when called. Reads from the new image are translated into reads in the original layout, so the pixel values are unchanged.
 
-=== "canonical"
+### Examples
+
+=== "Canonical layout"
 
     ```python
-    im = image.as_axes("canonical")      # "tczyx", then "s" if the image is RGB
+    im = image.as_axes("canonical")
+    # "tczyx", followed by "s" if the image has RGB samples
     ```
 
     ```text
-    <micro_reader.Image 'series0' index={'series': 0} axes='tczyx' shape=(1, 1, 80, 256, 300) dtype=uint16 (any rectangle) of 'zyx'>
+    <micro_reader.Image 'stack' index={'series': 0} axes='tczyx' shape=(1, 1, 80, 256, 300) dtype=uint16 (any rectangle) of 'zyx'>
     ```
 
-    The `of 'zyx'` at the end of the printout shows the native axes.
+    The `of 'zyx'` at the end shows the image's native axes.
 
-=== "explicit letters"
+=== "Explicit axis order"
 
     ```python
-    im = image.as_axes("zyx")    # only z, y, x: t and c must have size 1
-    im = image.as_axes("ctzyx")  # any order you need
-    im = image.as_axes("yxz")    # z last, for tools that want it
+    im = image.as_axes("zyx")   # only z, y and x; t and c must have size 1
+    im = image.as_axes("ctzyx") # any order you need
+    im = image.as_axes("yxz")   # z last, for tools that require it
     ```
 
-=== "keep the order"
+=== "Keep the native order"
 
     ```python
-    im = image.as_axes(None, samples="channels")   # same order, RGB folded into c
+    im = image.as_axes(None, samples="channels")
+    # Same axis order, with RGB samples folded into c
     ```
 
-Rules:
+### Rules
 
-- Axes that the image lacks are added with size 1.
-- An axis that the image has but you leave out must have size 1. Otherwise you get an error that names it:
+- **Missing axes:** Axes absent from the image are added with size 1.
+- **Omitted axes:** An axis present in the image can be left out only if its size is 1. Otherwise, `as_axes()` raises an error identifying the axis that cannot be omitted:
 
     ```text
-    ValueError: 'series0' has axes 'z' that 'cyx' cannot hold
+    ValueError: 'stack' has axes 'z' that 'cyx' cannot hold
     ```
 
-- Each letter must be one of `tczyxs` and appear only once. Index names such as `view` cannot be axes. Use [`rename`](opening.md#rename-say-what-an-unnamed-dimension-is) for a TIFF `sequence`.
-- The native image stays available as `.source`:
+- **Valid letters:** Axis names must be single letters from `tczyxs`, or an axis the native image has, such as the `l` of a [lambda scan](#lambda-scans), with no duplicates. Index names such as `view` cannot be used as axes. To turn a TIFF `sequence` index into an axis, use [`rename`](opening.md#rename-assign-a-meaning-to-an-unnamed-dimension) when opening the file.
+- **Native image:** The original image remains available through `.source`:
 
     ```python
-    im.source.axes    # 'zyx'
+    im.source.axes  # 'zyx'
     ```
 
-- Calling `as_axes` on the result starts again from the native image. Layouts do not stack.
+- **No stacking:** Calling `as_axes()` on an already reshaped image starts from its native source. Layout transformations therefore do not accumulate.
 
 ## `squeeze()`
 
@@ -74,72 +85,138 @@ Rules:
 image.squeeze(axes=None) -> Image
 ```
 
-`squeeze()` drops every size-1 axis except `y` and `x`. A plane stays a plane:
+`squeeze()` removes size-1 axes. With no argument, it removes every size-1 axis except `y` and `x`, so a 2-D plane remains a 2-D array.
 
 ```python
-image.axes, image.shape              # ('tczyx', (1, 1, 80, 256, 300))
-image.squeeze().axes                 # 'zyx'
-image.squeeze("t").axes              # 'czyx': only t
-image.squeeze("c").shape             # (1, 80, 256, 300)
+image.axes, image.shape   # ('tczyx', (1, 1, 80, 256, 300))
+
+image.squeeze().axes      # 'zyx'
+image.squeeze("t").axes   # 'czyx': remove only t
+image.squeeze("c").shape  # (1, 80, 256, 300)
 ```
 
-Naming an axis that is not size 1 raises `ValueError`. You can also squeeze while changing the layout: `image.as_axes("canonical", squeeze=True)`.
+You can specify which axes to remove. An axis must have size 1; otherwise, `squeeze()` raises `ValueError`.
+
+You can also squeeze while changing the layout:
+
+```python
+image.as_axes("canonical", squeeze=True)
+```
 
 ## RGB samples
 
-Colour images store three (RGB) or four (RGBA) samples per pixel. `open()` turns them into channels by default, so an RGB image has `c` of 3 and no `s` axis:
+Colour images store three samples per pixel for RGB or four for RGBA. By default, `open()` converts these samples into channels. An RGB image therefore has three channels and no `s` axis:
 
 ```python
 f = micro_reader.open("photo.jpg")
 image = f.images[0]
-image.axes, image.shape           # ('tczyx', (1, 3, 1, 1080, 1920)); axes=None: ('cyx', (3, 1080, 1920))
+
+image.axes, image.shape
+# ('tczyx', (1, 3, 1, 1080, 1920))
+# With axes=None: ('cyx', (3, 1080, 1920))
+
 [ch.color for ch in image.metadata.channels]
 # ['#FF0000', '#00FF00', '#0000FF']
 ```
 
-The metadata lists one channel per sample: red, green and blue (and white for alpha). A channel named "Stain" becomes "Stain R", "Stain G" and "Stain B"; an unnamed channel stays unnamed. Wavelengths are kept. A file that already lists one channel per sample keeps its own channels.
+The channel metadata contains one entry per sample: red, green and blue, and white for alpha.
 
-Images without samples are not changed. The image as the file stores it, with its `s` axis, is `image.source`:
+Channel names are expanded to match the samples. For example, a channel named `"Stain"` becomes `"Stain R"`, `"Stain G"` and `"Stain B"`. An unnamed channel remains unnamed. Wavelengths are preserved. Files that already represent each sample as a separate channel retain their existing channels.
+
+Images without colour samples are unchanged.
+
+The original image layout, including its `s` axis when present, remains available through `image.source`:
 
 ```python
-image.source.axes                 # 'yxs'
+image.source.axes  # 'yxs'
 ```
 
-To keep the `s` axis, open with `samples="keep"`:
+To retain the `s` axis in the image returned by `open()`, pass `samples="keep"`:
 
 ```python
 f = micro_reader.open("photo.jpg", samples="keep")
-f.images[0].axes, f.images[0].shape    # ('tczyxs', (1, 1, 1, 1080, 1920, 3)); axes=None: ('yxs', (1080, 1920, 3))
+
+f.images[0].axes, f.images[0].shape
+# ('tczyxs', (1, 1, 1, 1080, 1920, 3))
+# With axes=None: ('yxs', (1080, 1920, 3))
 ```
 
-When the image already has channels, the samples are folded into them: channel `k` of the result is sample `k % S` of channel `k // S`. A 2-channel RGB image gives 6 channels, in the order R0 G0 B0 R1 G1 B1.
+If the image already has multiple channels, samples are folded into those channels. Output channel `k` corresponds to sample `k % S` of input channel `k // S`, where `S` is the number of samples per pixel.
 
-`as_axes()` is different: it keeps `s` unless you ask for `samples="channels"`, and it starts from the stored image (`.source`), not from the image `open()` gave you:
+For example, an image with two RGB channels becomes six channels, ordered as:
+
+`R0 G0 B0 R1 G1 B1`
+
+### RGB behaviour in `as_axes()`
+
+`as_axes()` has a different default from `open()`. It starts from the stored image (`.source`) and keeps the `s` axis unless you explicitly request `samples="channels"`.
 
 ```python
-image.as_axes("canonical").axes                       # 'tczyxs'
-image.as_axes("canonical", samples="channels").axes   # 'tczyx'
+image.as_axes("canonical").axes
+# 'tczyxs'
+
+image.as_axes("canonical", samples="channels").axes
+# 'tczyx'
 ```
 
-The channel metadata of a folded image has one entry per output channel, so `len(im.metadata.channels)` equals `im.shape[1]`.
+When samples are folded into channels, the resulting channel metadata contains one entry per output channel. Therefore:
+
+```python
+len(im.metadata.channels) == im.shape[1]
+```
 
 ## Setting the layout for a whole file
 
-`open()` takes the same three options and applies them to every image:
+`open()` accepts the same three layout options and applies them to every image:
 
 ```python
 f = micro_reader.open(path, axes="canonical")
-all(im.axes == "tczyx" for im in f.images)    # True
+
+all(im.axes == "tczyx" for im in f.images)
+# True
 ```
 
-This is the usual setup for a converter that writes 5-D OME-Zarr. Each image's native form is `im.source`. Plate navigation (`f.plates[...]`) reaches the reshaped images.
+This is useful when converting data into a common format, such as 5-D OME-Zarr.
+
+Each image's original layout remains accessible through `im.source`. Plate navigation through `f.plates[...]` also returns the reshaped images.
 
 ## Turning an unnamed dimension into an axis
 
-When a TIFF does not say what its pages are, they become the `sequence` index rather than an axis. `as_axes` cannot change that, because an index is not an axis. Tell `open()` instead:
+Some TIFF files contain pages without identifying what those pages represent. micro-reader exposes these pages through the `sequence` index rather than guessing that they represent z-planes or time points.
+
+`as_axes()` cannot turn an index into an axis. Use `rename` when opening the file to specify what the dimension represents:
 
 ```python
 f = micro_reader.open("stack.tif", rename={"sequence": "z"})
 ```
 
-See [Opening files](opening.md#rename-say-what-an-unnamed-dimension-is).
+See [Opening files](opening.md#rename-assign-a-meaning-to-an-unnamed-dimension).
+
+## Lambda scans
+
+A spectral (lambda) scan is one image in every format. Its bands lie along `c`, with the bands of one detector next to each other in wavelength order. Each channel has its `emission_wavelength`, and its name ends with the wavelength:
+
+```python
+f = micro_reader.open("Convalaria_LambdaScan.lif")
+image = f.images[0]
+
+image.axes, image.shape
+# ('tczyx', (1, 29, 1, 512, 512))
+
+[ch.name for ch in image.metadata.channels][:3]
+# ['HyD S 1 420 nm', 'HyD S 1 430 nm', 'HyD S 1 440 nm']
+
+image.metadata.channels[0].emission_wavelength
+# Quantity(value=420.0, unit='nanometer')
+```
+
+With `axes=None`, or with axes that name `l` such as `axes="tlczyx"`, the bands are a real `l` axis instead, and `metadata.index_values["emission"]` holds the wavelength of each band, in order:
+
+```python
+f = micro_reader.open("Convalaria_LambdaScan.lif", axes=None)
+f.images[0].axes                                   # 'tlczyx'
+f.images[0].metadata.index_values["emission"][:3]
+# (Quantity(value=420.0, unit='nanometer'), Quantity(value=430.0, unit='nanometer'), ...)
+```
+
+A Zeiss LSM stores its bands as channels, so it has no `l` axis. Its channels carry their wavelengths. Excitation scans remain an `excitation` index.
