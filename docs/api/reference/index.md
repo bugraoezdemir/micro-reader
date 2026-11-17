@@ -12,6 +12,7 @@ import micro_reader
 | --- | --- |
 | [`open(path, ...)`](functions.md#open) | Opens a file, folder or file set and returns a [`File`](file.md). |
 | [`group_files(paths)`](functions.md#group_files) | Sorts many files into the images they make and returns a [`Grouping`](grouping.md). |
+| [`read_many(requests)`](functions.md#read_many) | Reads the regions of many images in one go, each into an array you give. |
 | [`memory_limit()`](functions.md#memory_limit) / [`set_memory_limit(x)`](functions.md#set_memory_limit) | The process-wide memory limit for decoding. |
 | [`cache_limit()`](functions.md#cache_limit) / [`set_cache_limit(x)`](functions.md#set_cache_limit) / [`cached_bytes()`](functions.md#cached_bytes) | The decoded-block cache. |
 | [`decode_threads()`](functions.md#decode_threads) / [`set_decode_threads(n)`](functions.md#set_decode_threads) | The decode thread pool. |

@@ -187,9 +187,10 @@ def test_tiles_are_returned_one_by_one(tmp_path):
 def test_compressed_files_via_the_reference_decoder(tmp_path, name, monkeypatch):
     """Without the native module (monkeypatched away) the same files decode
     to the same pixels through the reference path."""
-    from micro_reader import _codecs
+    from micro_reader import _codecs, _engine
     pytest.importorskip("zstandard")
     monkeypatch.setattr(_codecs, "_native", None)
+    monkeypatch.setattr(_engine, "_enabled", False)          # the Python path
     path, expected, _ = _write(tmp_path, name)
     with _native(path, tiles="mosaic") as img:
         assert {s.compression for s in img._level0} <= {5, 6}
@@ -402,8 +403,12 @@ def test_read_region_in_file_coordinates(tmp_path, name):
 
 def test_small_region_decodes_its_tiles_in_parallel_once(tmp_path, monkeypatch):
     """A region in one row band over several compressed tiles: the tiles are decoded on
-    the pool first (each once), then composed; same pixels as a serial read."""
+    the pool first (each once), then composed; same pixels as a serial read.  The
+    Python path's own scheduling (the read engine decodes each tile once per call on
+    its threads: test_engine.py)."""
+    from micro_reader import _engine
     from micro_reader.backends import czi as czi_backend
+    monkeypatch.setattr(_engine, "_enabled", False)
     path, expected, _ = _write(tmp_path, "zstd1_mosaic")
     region = (slice(None), slice(0, 1), slice(None), slice(5, 45), slice(10, 140))
     old = micro_reader.decode_threads()

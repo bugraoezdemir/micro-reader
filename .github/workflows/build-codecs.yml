@@ -1,6 +1,10 @@
 # Build micro-reader-codecs: one abi3 wheel per platform (Python >= 3.11) and
 # the sdist.  Called by ci.yml (every push) and release.yml (codecs-v* tags).
 #
+# With `crate: core` it builds micro-reader-core the same way (core/, artifacts
+# core-wheel-* and core-sdist): the read engine links the codecs crate as a Rust
+# library (Workplan decision MR-8), so it needs the same C toolchain.
+#
 # The codecs link two C libraries from codecs/vendor (codecs/build.rs): libjpeg-turbo,
 # built with CMake and its SIMD (x86 needs NASM; ARM's NEON is C), and jxrlib.
 # MICRO_READER_REQUIRE_SIMD=1 makes a wheel without SIMD a failed build, not a slow one.
@@ -8,6 +12,11 @@ name: Build codecs
 
 on:
   workflow_call:
+    inputs:
+      crate:
+        description: "the folder to build: codecs (micro-reader-codecs) or core (micro-reader-core)"
+        type: string
+        default: codecs
 
 permissions:
   contents: read
@@ -44,7 +53,7 @@ jobs:
         run: brew install nasm
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: codecs
+          working-directory: ${{ inputs.crate }}
           target: ${{ matrix.platform.target }}
           manylinux: auto          # ignored outside Linux
           args: --release --out dist
@@ -65,8 +74,8 @@ jobs:
             if [ "$(uname -m)" = "x86_64" ]; then nasm -v; fi
       - uses: actions/upload-artifact@v4
         with:
-          name: codecs-wheel-${{ matrix.platform.name }}
-          path: codecs/dist
+          name: ${{ inputs.crate }}-wheel-${{ matrix.platform.name }}
+          path: ${{ inputs.crate }}/dist
 
   sdist:
     runs-on: ubuntu-latest
@@ -74,10 +83,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: codecs
+          working-directory: ${{ inputs.crate }}
           command: sdist
           args: --out dist
       - uses: actions/upload-artifact@v4
         with:
-          name: codecs-sdist
-          path: codecs/dist
+          name: ${{ inputs.crate }}-sdist
+          path: ${{ inputs.crate }}/dist

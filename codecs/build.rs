@@ -150,6 +150,14 @@ fn jxrlib() {
         // 0.90-0.95x imagecodecs per tile (0.82x without either, 2026-11-10)
         build.flag("/GL");
         println!("cargo:rustc-link-arg=/LTCG");     // said up front: no restart, no notice
+        // /GL objects hold compiler IR, whose symbols rustc's archive writer cannot
+        // list: bundled into this crate's rlib, a crate linking it (micro-reader-core)
+        // would not find them.  The library goes to the final link as lib.exe built it.
+        build.cargo_metadata(false);
+        build.compile("mr_jxrlib");
+        println!("cargo:rustc-link-search=native={}", env::var("OUT_DIR").unwrap());
+        println!("cargo:rustc-link-lib=static:-bundle=mr_jxrlib");
+        return;
     }
     build.compile("mr_jxrlib");
 }

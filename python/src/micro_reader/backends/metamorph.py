@@ -379,7 +379,7 @@ class _NDImage(PlaneImage):
         super().__init__(*args, **kwargs)
         self._owner, self._channels, self._dz = owner, channels, dz
 
-    def _read_block(self, block):
+    def _check_readable(self) -> None:
         if self._closed:
             raise ValueError(f"{self.name!r} has been closed: its file was closed "
                              "(File.close() or the end of a with block)")
@@ -387,37 +387,52 @@ class _NDImage(PlaneImage):
             raise UnsupportedFormatError(
                 f"{self.name!r} is ragged and its parts do not share a z grid: read its "
                 f"parts (image.parts)")
-        from .. import _pool
+
+    def _read_block(self, block):
+        self._check_readable()
+        from .. import _engine
         (t0, t1), (c0, c1), (z0, z1) = ((s.start, s.stop) for s in block[:3])
         ys, xs = block[3], block[4]
         out = np.empty((t1 - t0, c1 - c0, z1 - z0, ys.stop - ys.start, xs.stop - xs.start),
                        dtype=self.dtype)
         # every plane's reads planned straight into *out*, then run in one batch on
         # the decode pool (as ``PlaneImage._read_pages``)
-        entries, plans = [], []
+        entries: list = []
         try:
-            for t in range(t0, t1):
-                for c in range(c0, c1):
-                    for z in range(z0, z1):
-                        dest = out[t - t0, c - c0, z - z0]
-                        spec = self._planes.get((t, c, z))
-                        if spec is None:                # a missing plane reads as zeros
-                            dest[...] = 0
-                            continue
-                        path, k, n = spec
-                        entry = self._members.acquire(path)
-                        entries.append(entry)
-                        image = self._fits_member(path, entry[0], n)
-                        if image.ndim == 2:
-                            plan = image._plan_series((ys, xs), dest)
-                        else:
-                            plan = image._plan_series((slice(k, k + 1), ys, xs), dest[None])
-                        plans.append((image, plan))
-            return out, _pool.run(itertools.chain.from_iterable(
-                image._tasks(*plan) for image, plan in plans))
+            return out, _engine.run_plans(self._plan_planes(block, out, entries), out)
         finally:
-            for entry in entries:
-                self._members.release(entry)
+            self._release(entries)
+
+    def _plan_into(self, block, out, stack):
+        self._check_readable()
+        entries: list = []
+        stack.callback(self._release, entries)
+        return self._plan_planes(block, out, entries)
+
+    def _plan_planes(self, block, out, entries) -> list:
+        """The plans that fill *out* (shaped like *block*); each member acquired
+        is added to *entries*, which the caller releases once they have run."""
+        (t0, t1), (c0, c1), (z0, z1) = ((s.start, s.stop) for s in block[:3])
+        ys, xs = block[3], block[4]
+        plans = []
+        for t in range(t0, t1):
+            for c in range(c0, c1):
+                for z in range(z0, z1):
+                    dest = out[t - t0, c - c0, z - z0]
+                    spec = self._planes.get((t, c, z))
+                    if spec is None:                # a missing plane reads as zeros
+                        dest[...] = 0
+                        continue
+                    path, k, n = spec
+                    entry = self._members.acquire(path)
+                    entries.append(entry)
+                    image = self._fits_member(path, entry[0], n)
+                    if image.ndim == 2:
+                        plan = image._plan_series((ys, xs), dest)
+                    else:
+                        plan = image._plan_series((slice(k, k + 1), ys, xs), dest[None])
+                    plans.append((image, plan))
+        return plans
 
     def _fits_member(self, path: str, member, n: int):
         """The member's image, after checking it holds *n* planes of this

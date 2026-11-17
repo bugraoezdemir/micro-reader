@@ -21,6 +21,8 @@ class ThreadHandles:
         self._local = threading.local()
         self._lock = threading.Lock()
         self._all: list = []
+        #: (engine, file number) of this file in the read engine (``_engine``)
+        self._engine = None
 
     def get(self):
         fh = getattr(self._local, "fh", None)
@@ -39,11 +41,31 @@ class ThreadHandles:
                                    "(truncated file?)")
         return data
 
+    def engine_file(self, engine) -> int:
+        """This file's number in the read engine *engine*, opened there on first
+        use (and again after :meth:`close`)."""
+        with self._lock:
+            if self._engine is None or self._engine[0] is not engine:
+                self._engine = (engine, engine.open(self.path))
+            return self._engine[1]
+
     def close(self) -> None:
         with self._lock:
             handles, self._all = self._all, []
+            engine, self._engine = self._engine, None
         for fh in handles:
             fh.close()
+        if engine is not None:
+            engine[0].close(engine[1])
+
+    def __del__(self):
+        # the engine's handle is not garbage-collected with this object
+        engine = getattr(self, "_engine", None)
+        if engine is not None:
+            try:
+                engine[0].close(engine[1])
+            except Exception:                       # noqa: BLE001 - interpreter exit
+                pass
 
 
 #: what all decoded-block caches of a process may hold together, by default
@@ -53,6 +75,13 @@ DEFAULT_CACHE_LIMIT = 256 << 20
 # open files does not multiply the memory the caches hold: (cache id, key) ->
 # (cache, nbytes). Reentrant: a cache that is garbage-collected releases its bytes
 # from __del__, which may run while this thread holds the lock.
+#
+# The read engine (micro-reader-core) keeps its own cache of decoded segments, and
+# the limit covers both: the engine is told what these caches hold on every change
+# and keeps at most the rest; these caches count what the engine holds when they add
+# a block.  Each side can take at least half from the other: these caches give back
+# down to half before an engine read (``yield_to_engine``), and the engine gives
+# back down to half when one of these caches adds a block.
 _shared_lock = threading.RLock()
 _shared: OrderedDict = OrderedDict()
 _shared_bytes = 0
@@ -73,20 +102,50 @@ def cache_limit() -> int:
 
 def set_cache_limit(limit) -> None:
     """Set what all decoded-block caches of this process may hold together (bytes or
-    e.g. "512MB"; 0 keeps nothing); None restores the default (the
-    ``MICRO_READER_CACHE_LIMIT`` environment variable, else 256 MB). Least recently
-    used blocks are dropped at once if the caches hold more."""
+    e.g. "512MB"; 0 keeps nothing), the read engine's included; None restores the
+    default (the ``MICRO_READER_CACHE_LIMIT`` environment variable, else 256 MB).
+    Least recently used blocks are dropped at once if the caches hold more."""
     global _cache_limit
     from ._memory import parse_size
     with _shared_lock:
         _cache_limit = None if limit is None else max(0, parse_size(limit))
-        _evict_shared(cache_limit())
+        limit = cache_limit()
+        engine = _engine_cache()
+        held = 0
+        if engine is not None:
+            engine.set_cache_limit(limit)            # it keeps at most limit - ours
+            held = engine.cached_bytes()
+        _evict_shared(max(0, limit - held))
+        _tell_engine(engine)
+
+
+def _engine_cache():
+    """The read engine of the process, if one was made (its cache counts too)."""
+    from . import _engine
+    return _engine._engine
+
+
+def _tell_engine(engine) -> None:
+    """Tell the engine what these caches hold (call with the lock held)."""
+    if engine is not None:
+        engine.set_held_elsewhere(_shared_bytes)
+
+
+def yield_to_engine(engine, limit: int) -> None:
+    """Before a read on *engine*: these caches give back down to half of *limit* if
+    they hold more, and the engine learns what they hold."""
+    with _shared_lock:
+        if _shared_bytes > limit // 2:
+            _evict_shared(limit // 2)
+        engine.set_held_elsewhere(_shared_bytes)
 
 
 def cached_bytes() -> int:
-    """What the decoded-block caches of this process hold now, in bytes."""
+    """What the decoded-block caches of this process hold now, in bytes (the
+    read engine's included)."""
+    from ._engine import cached_bytes as engine_bytes
     with _shared_lock:
-        return _shared_bytes
+        return _shared_bytes + engine_bytes()
 
 
 def _evict_shared(limit: int) -> None:
@@ -137,7 +196,13 @@ class DecodeCache:
                 _shared.pop((self._id, old_key))
                 _shared_bytes -= self._items[old_key].nbytes
                 self._drop(old_key)
-            _evict_shared(cache_limit())
+            limit = cache_limit()
+            engine = _engine_cache()
+            held = 0
+            if engine is not None:                   # the engine gives back down to half
+                held = engine.shrink_cache(max(limit // 2, limit - _shared_bytes))
+            _evict_shared(max(0, limit - held))
+            _tell_engine(engine)
 
     def _drop(self, key) -> None:
         """Forget *key* (the shared order is updated by the caller)."""
@@ -153,6 +218,7 @@ class DecodeCache:
                     _shared_bytes -= seg.nbytes
             self._items.clear()
             self._bytes = 0
+            _tell_engine(_engine_cache())
 
     def __del__(self):
         try:

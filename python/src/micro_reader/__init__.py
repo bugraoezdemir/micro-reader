@@ -19,10 +19,11 @@ from ._io import cache_limit, cached_bytes, set_cache_limit
 from ._pool import decode_threads, set_decode_threads
 from ._registry import BACKENDS, open  # noqa: A004 - the public entry point
 from ._groups import FileGroup, Grouping, group_files
+from ._many import read_many
 from .backends.czi import DamagedFileWarning
 
 __all__ = [
-    "open", "group_files", "FileGroup", "Grouping", "File", "Image", "INDEX_NAMES", "PLATE_INDICES", "SAMPLED_INDICES", "ReadStats",
+    "open", "read_many", "group_files", "FileGroup", "Grouping", "File", "Image", "INDEX_NAMES", "PLATE_INDICES", "SAMPLED_INDICES", "ReadStats",
     "BACKENDS", "Metadata", "Channel", "Quantity", "Plate", "Well", "Field", "Acquisition",
     "Axis", "CoordinateSystem", "Transformation", "Collection",
     "decode_threads", "set_decode_threads", "memory_limit", "set_memory_limit",

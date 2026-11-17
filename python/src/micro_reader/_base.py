@@ -380,6 +380,23 @@ class Image:
         number of pixels actually read or decoded to produce it)."""
         raise NotImplementedError
 
+    @staticmethod
+    def read_many(requests) -> None:
+        """``micro_reader.read_many``, here too: libraries that join arrays (dyna's
+        concatenation) look for ``read_many`` on their sources' type, and read
+        the parts of a join of images in one call."""
+        from ._many import read_many
+        read_many(requests)
+
+    def _plan_into(self, block: tuple[slice, ...], out: np.ndarray, stack):
+        """The plans that fill *out* (a writable array shaped like *block*) once
+        run, ``[(image, plan), ...]`` for ``_engine.run_plans`` (``read_many``);
+        None when this image cannot plan a read into a given array, and is read
+        with ``_read_block`` and copied instead.  *stack*, a
+        ``contextlib.ExitStack``, holds what must stay acquired until the plans
+        have run (a file set's members)."""
+        return None
+
     def close(self) -> None:
         """Release file handles; the image is unusable afterwards."""
 

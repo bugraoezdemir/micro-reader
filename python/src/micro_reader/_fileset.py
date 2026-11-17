@@ -20,7 +20,6 @@ separate 2-D files (Harmony, MetaXpress, ...), listed by an index file.
   its parts."""
 from __future__ import annotations
 
-import itertools
 import os
 import threading
 import warnings
@@ -219,38 +218,56 @@ class PlaneImage(Image):
                     read += n
         return out, read
 
+    def _plan_into(self, block, out, stack):
+        if self._closed or not self._readable or not self._members._pages:
+            return None                     # read_many reads it with _read_block
+        entries: list = []
+        stack.callback(self._release, entries)
+        (t0, t1), (c0, c1), (z0, z1) = ((s.start, s.stop) for s in block[:3])
+        return self._plan_pages(out, (t0, t1), (c0, c1), (z0, z1), block[3], block[4],
+                                tuple(block[5:]), entries)
+
+    def _release(self, entries) -> None:
+        for entry in entries:
+            self._members.release(entry)
+
     def _read_pages(self, out, ts, cs, zs, ys, xs, extra=()) -> int:
         """Fill *out* from members opened as pages: every plane's reads are
         planned straight into *out* first, then all of them run in one batch on
         the decode pool, as a multi-page TIFF's pages do (no copy per plane, the
         pool busy across planes). The members stay acquired until it is done."""
-        from . import _pool
-        entries, plans = [], []
+        from . import _engine
+        entries: list = []
         try:
-            for t in range(*ts):
-                for c in range(*cs):
-                    for z in range(*zs):
-                        dest = out[t - ts[0], c - cs[0], z - zs[0]]
-                        member = self._planes.get((t, c, z))
-                        if member is None:              # a missing plane reads as zeros
-                            dest[...] = 0
-                            continue
-                        path, ifd = member
-                        entry = self._members.acquire(path)
-                        entries.append(entry)
-                        image, k = _page(entry[0], ifd, path, self._samples)
-                        self._fits(path, image, ifd)
-                        if image.axes[0] != "z":
-                            plan = image._plan_series((ys, xs) + extra, dest)
-                        else:
-                            plan = image._plan_series((slice(k, k + 1), ys, xs) + extra,
-                                                      dest[None])
-                        plans.append((image, plan))
-            return _pool.run(itertools.chain.from_iterable(
-                image._tasks(*plan) for image, plan in plans))
+            return _engine.run_plans(self._plan_pages(out, ts, cs, zs, ys, xs, extra, entries),
+                                     out)
         finally:
-            for entry in entries:
-                self._members.release(entry)
+            self._release(entries)
+
+    def _plan_pages(self, out, ts, cs, zs, ys, xs, extra, entries) -> list:
+        """The plans of ``_read_pages``; each member acquired is added to
+        *entries* (the caller releases them once the plans have run)."""
+        plans = []
+        for t in range(*ts):
+            for c in range(*cs):
+                for z in range(*zs):
+                    dest = out[t - ts[0], c - cs[0], z - zs[0]]
+                    member = self._planes.get((t, c, z))
+                    if member is None:              # a missing plane reads as zeros
+                        dest[...] = 0
+                        continue
+                    path, ifd = member
+                    entry = self._members.acquire(path)
+                    entries.append(entry)
+                    image, k = _page(entry[0], ifd, path, self._samples)
+                    self._fits(path, image, ifd)
+                    if image.axes[0] != "z":
+                        plan = image._plan_series((ys, xs) + extra, dest)
+                    else:
+                        plan = image._plan_series((slice(k, k + 1), ys, xs) + extra,
+                                                  dest[None])
+                    plans.append((image, plan))
+        return plans
 
     def _fits(self, path: str, image, ifd=None) -> None:
         """Raise unless member *path* (its first image, or page *ifd*) is one

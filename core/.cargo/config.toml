@@ -1,0 +1,15 @@
+# C code built by the cc crate (OpenJPEG, libzstd, libdeflate).
+#
+# MSVC never defines __SSE__ / __SSE2__, which OpenJPEG uses to select its
+# SIMD wavelet and colour-transform code (GCC and Clang define them on every
+# x86-64 target). Defining them gives Windows the same code paths as the
+# Linux / macOS wheels, so lossy (floating-point) JPEG 2000 decodes the same
+# way on every x86-64 platform. SSE2 is part of the x86-64 baseline, so the
+# wheels stay portable. AVX2 is not baseline and stays off: it would need
+# runtime dispatch.
+#
+# Measured 2026-10-01: no speed change on our files, with or without these
+# defines. /Ob3 and /arch:AVX2 gave none either, and /GL breaks the Rust
+# link. See micro-reader PLAN.md, codec audit follow-up.
+[env]
+CFLAGS_x86_64_pc_windows_msvc = "/D__SSE__ /D__SSE2__"

@@ -46,7 +46,7 @@ from typing import Optional
 
 import numpy as np
 
-from .. import _codecs, _jpeg_restarts, _memory, _pool, _stream
+from .. import _codecs, _engine, _jpeg_restarts, _memory, _pool, _stream
 from .._base import File, Image
 from .._errors import CorruptFileError, MicroReaderError, UnsupportedFormatError
 from .._io import DecodeCache, ThreadHandles
@@ -62,6 +62,11 @@ RAW_TASK_BYTES = 8 << 20            # scenes are read in row bands of this size
 #: bytes worth skipping in one contiguous read rather than issuing one more
 #: read (a seek + read from Python costs about as much as copying this much)
 SEPARATE_READ_BYTES = 32 << 10
+#: subblock headers a read needs that are read on the pool rather than one after
+#: another (a slide scan's thousands, where a cold disk's latency adds up).  Fewer
+#: are read inline: with the file in the OS cache, 135 headers (a 5 x 9 mosaic's
+#: plane) took 6.7 ms inline and 8.5 ms on the pool (2026-11-17)
+HEADERS_ON_POOL = 1024
 NATIVE_LITTLE = sys.byteorder == "little"
 
 #: pixel type -> (dtype, samples)
@@ -80,6 +85,10 @@ COMPRESSIONS = {UNCOMPRESSED: "none", JPEG: "JPEG", LZW: "LZW",
                 CHUNKED: "chunked (experimental in libCZI)",
                 JPEG_XL: "JPEG XL (undocumented; a JPEG XL codestream assumed)"}
 IMAGE_CODECS = {JPEG, JPEG_LOSSLESS, JPEG_XR, JPEG_XL}
+#: compressions the read engine (micro-reader-core) decodes -> its codec name;
+#: chunked subblocks stay on the Python path
+ENGINE_KINDS = {ZSTD0: "zstd", ZSTD1: "zstd-czi", LZW: "lzw", JPEG: "jpeg",
+                JPEG_LOSSLESS: "jpeg", JPEG_XR: "jpegxr", JPEG_XL: "jxl"}
 DECODE_CACHE_BYTES = 64 << 20       # decoded compressed tiles kept for reuse
 STREAM_PIECE_BYTES = 8 << 20        # rows of a streamed subblock decoded at a time
 
@@ -811,6 +820,92 @@ class _CziImage(Image):
             return 0
         return _pool.run([lambda s=s: self._decoded(s)[1] for s in want.values()])
 
+    # -- the read engine (micro-reader-core) ------------------------------------
+
+    def _engine_source(self, s: Subblock):
+        """``(codec spec, offset, count, raw)`` of subblock *s* for the read
+        engine, or None when the Python path reads it: chunked subblocks,
+        compressed tiles too large to decode whole (streamed or decoded in
+        parts), JPEG XR in a micro-reader-core built without jxrlib."""
+        data = self._data_offset(s)
+        ns, item = self._samples, self._file_dtype.itemsize
+        nbytes = s.height * s.width * ns * item
+        offset = self._czi._base + data
+        bgr = ns > 1                                   # stored B, G, R(, A): placed R, G, B
+        if s.compression == UNCOMPRESSED or (s.data_size == nbytes
+                                             and s.compression not in IMAGE_CODECS):
+            return (_engine.codec("raw", item, ns, gap=SEPARATE_READ_BYTES, bgr=bgr),
+                    offset, 0, True)
+        kind = ENGINE_KINDS.get(s.compression)
+        if kind is None or _memory.should_stream(nbytes) or (
+                kind == "jpegxr" and not _engine.has("HAS_JXRLIB")):
+            return None
+        if kind in ("jpeg", "jxl"):                    # these decoders give R, G, B
+            bgr = False
+        return _engine.codec(kind, item, ns, bgr=bgr), offset, s.data_size, False
+
+    def _engine_split(self, batch, items) -> tuple:
+        """Hand the pieces of *items* (``_plan_block``) the read engine can do
+        to *batch*; return the rest, as a plan for ``_tasks``.  Uncompressed
+        pieces go in row bands of ``RAW_TASK_BYTES`` (a large plane is still
+        read on several threads); a compressed tile is decoded once however
+        many pieces need it."""
+        if not self._file_dtype.isnative:
+            return (items,)
+        ox, oy = self._xy
+        ns, item = self._samples, self._file_dtype.itemsize
+        handles, sources, rest = self._czi._handles, {}, []
+        for job in items:
+            s, piece, band_y0, xs, dst = job
+            if s.position not in sources:
+                sources[s.position] = self._engine_source(s)
+            source = sources[s.position]
+            if source is None:
+                rest.append(job)
+                continue
+            spec, offset, count, raw = source
+            y0, y1, x0, x1 = piece
+            sy0, sx0 = s.y - oy, s.x - ox
+            target = dst[y0 - band_y0:y1 - band_y0, x0 - xs.start:x1 - xs.start]
+            if ns == 1:
+                target = target[..., None]
+            cols = (x0 - sx0, x1 - sx0)
+            if raw:
+                per = max(1, RAW_TASK_BYTES // max(1, (x1 - x0) * ns * item))
+                for a in range(y0, y1, per):
+                    b = min(y1, a + per)
+                    batch.add(handles, offset, 0, spec, None, (s.height, s.width),
+                              (a - sy0, b - sy0), cols, (0, ns), target[a - y0:b - y0])
+            else:
+                batch.max_segment = max(batch.max_segment, s.height * s.width * ns * item)
+                batch.add(handles, offset, count, spec, None, (s.height, s.width),
+                          (y0 - sy0, y1 - sy0), cols, (0, ns), target)
+        return (rest,)
+
+    def _tasks(self, items):
+        """The pool tasks of *items*: each piece drawn on the Python path."""
+        return [lambda job=job: self._draw(*job) for job in items]
+
+    def _plan_block(self, plane_spans, ys, xs, out) -> list:
+        """The pieces of a read for the engine: per plane, the part of each tile
+        inside the region that no later tile covers, as ``(subblock, piece,
+        band_y0, xs, plane of out)``.  Subblock headers not read yet are read
+        first, on the pool when there are many (a slide scan's thousands)."""
+        region = (ys.start, ys.stop, xs.start, xs.stop)
+        items = []
+        for key in itertools.product(*(range(s.start, s.stop) for s in plane_spans)):
+            tiles = self._planes.get(key)
+            if tiles is None:
+                continue                                    # nothing acquired: background
+            dst = out[tuple(k - s.start for k, s in zip(key, plane_spans))]
+            for i in tiles.query(region):
+                s = tiles.subblocks[i]
+                items.extend((s, piece, ys.start, xs, dst) for piece in tiles.visible(i, region))
+        unread = list({s.position: s for s, *_ in items if not s.data_offset}.values())
+        if len(unread) > HEADERS_ON_POOL and _pool.decode_threads() > 1:
+            _pool.run([lambda s=s: self._data_offset(s) and 0 for s in unread])
+        return items
+
     def _read_block(self, block):
         if self._closed:
             raise ValueError("this CZI image has been closed: its file was closed "
@@ -820,6 +915,12 @@ class _CziImage(Image):
         ss = block[n + 2] if self._samples > 1 else None
         out = np.zeros(tuple(s.stop - s.start for s in block[:n + 2])
                        + ((self._samples,) if ss is not None else ()), dtype=self.dtype)
+        if _engine.engine() is not None and self._file_dtype.isnative:
+            items = self._plan_block(plane_spans, ys, xs, out)
+            read = _engine.run_plans([(self, (items,))], out)
+            if ss is not None and (ss.start, ss.stop) != (0, self._samples):
+                out = out[..., ss]
+            return out, read
         row_bytes = max(1, (xs.stop - xs.start) * self._samples * self._file_dtype.itemsize)
         per_task = max(1, RAW_TASK_BYTES // row_bytes)
         tasks, bands = [], []

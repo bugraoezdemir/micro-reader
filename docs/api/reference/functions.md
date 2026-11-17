@@ -121,6 +121,44 @@ See [Grouping many files](../guide/multi-file.md#grouping-many-files).
 
 ---
 
+## `read_many`
+
+```python
+micro_reader.read_many(requests) -> None
+```
+
+Reads the regions of many images in one go, each into an array you give. *New in 0.5.0.*
+
+Use it when one region spans many files, for example a z stack stored as one file per plane. All the strips and tiles of all the files are read and decoded together on the decode threads, and written straight into your arrays. That saves one Python call per file and a copy of each part, which matters when the files are many and each one's part of the region is small. The result is the same as `out[...] = image[key]` for each request.
+
+#### Parameters
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `requests` | iterable of `(image, key, out)` | `image` is an [`Image`](image.md) of any open file. `key` is any index that `image[key]` takes. `out` is a writable NumPy array with the shape and dtype that `image[key]` returns. Usually the `out` arrays are slices of one array that holds the whole region. |
+
+Images whose reads cannot be planned this way are read one by one into their arrays, with the same result. This applies to formats the native read engine does not handle yet, to keys with steps, and to some channels of an image whose samples were folded into channels. Each image's [`stats`](image.md) count the read as for `image[key]`. The same function is available as `Image.read_many`, where libraries that join arrays, such as dyna-zarr's concatenation, look for it.
+
+#### Raises
+
+| Exception | When |
+| --- | --- |
+| `TypeError` | An `out` is not a NumPy array. |
+| `ValueError` | An `out` is read-only or has the wrong shape or dtype, or an image's file is closed. |
+
+#### Examples
+
+```python
+import numpy as np
+import micro_reader
+
+files = [micro_reader.open(p) for p in plane_paths]       # one plane per file
+images = [f.images[0] for f in files]                      # each t c z y x = 1 1 1 Y X
+region = np.empty((len(images), 1024, 1024), images[0].dtype)
+micro_reader.read_many([(image, (0, 0, 0, slice(0, 1024), slice(0, 1024)), region[k])
+                        for k, image in enumerate(images)])
+```
+
 ## `memory_limit`
 
 ```python

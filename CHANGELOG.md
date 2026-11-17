@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.5.0 (2026-11-17)
+
+Requires micro-reader-core 0.0.1 (new, `>=0.0.1,<0.1`), the native read engine, and
+micro-reader-codecs `>=0.0.4,<0.1`; micro-reader-codecs 0.0.5 is released with it (the same
+decoders, now also usable as a Rust library by micro-reader-core). Both are installed
+automatically. `MICRO_READER_ENGINE=0` reads on the Python path instead, as before.
+
+### New
+
+- A native read engine, micro-reader-core 0.0.1 (a Rust package). TIFF images, file sets of
+  TIFF planes and MetaMorph planes are read through it. It reads and decodes the strips and
+  tiles of a region on its own threads, without holding Python's GIL, and writes them
+  straight into the output array. On real slide files (NDPI, SVS, BIF), a large region reads
+  2 to 6.7 times faster than with 0.4.5 and needs about half the peak memory, because tiles
+  are decoded straight into the result. It keeps its own file handles and a cache of decoded
+  segments. `set_cache_limit` covers that cache and the other caches together: whichever
+  side is reading can always take at least half of the limit. Pieces the engine does not take yet (LZMA,
+  packed bit depths, FillOrder 2, codecs that only tifffile decodes, and segments read as a
+  stream) are read on the Python path as before. So is a read that comes down to a single
+  uncompressed strip or tile, which costs less there than a call to the engine. When the
+  axes you read in differ from the file's, as with RGB samples shown as channels, the engine
+  writes each sample straight to its place in the result instead of the result being
+  reordered afterwards on one thread: an 8192 x 8192 RGB JPEG plane reads about 4 times
+  faster with 16 threads than without this. The environment variable
+  `MICRO_READER_ENGINE=0` switches the engine off, and so does `MICRO_READER_NO_NATIVE=1`.
+- CZI files are read through the engine too: uncompressed tiles, zstd (both codes, hi-lo
+  packing included), LZW, JPEG, lossless JPEG, JPEG XR and JPEG XL. Overlapping mosaic
+  tiles are composed as before, each pixel from the last tile that covers it. A JPEG XR
+  slide's plane is read on all decode threads at once: on two slide scans, 3 to 5 times
+  faster than before with 8 threads, and 3.5 to 7.6 times with 16. Chunked subblocks, and compressed tiles too large to
+  decode whole, are read on the Python path.
+- `micro_reader.read_many(requests)`, also available as `Image.read_many`, reads the regions
+  of many images in one go, each into an array you give. When one region spans many files,
+  as in a z stack stored as one file per plane, the strips and tiles of all of them are read
+  and decoded together in one engine call, without one Python call per file. dyna-zarr's
+  concatenation uses it when its parts are micro-reader images. On a well of 768 one-plane
+  TIFFs (2048 x 2048) converted by eubi-bridge with 8 threads, the conversion took
+  6.9-8.8 s instead of 10.3 s, with identical output. Images whose reads cannot be planned
+  this way are read one by one, with the same result.
+
 ## 0.4.5 (2026-11-16)
 
 Requires micro-reader-codecs 0.0.4 (`>=0.0.4,<0.1`), unchanged from 0.4.3.

@@ -64,7 +64,8 @@ def test_tiff_releases_the_handles_of_levels_it_does_not_list(tmp_path):
         level = f.images[0].resolutions[1]
         np.asarray(level[...])
         handles = level._handles
-        assert handles._all                             # the level opened its own file handle
-    assert not handles._all                             # closing the file closed it
+        # the level opened its own file handle (or the read engine's)
+        assert handles._all or handles._engine
+    assert not handles._all and handles._engine is None  # closing the file closed it
     with pytest.raises(ValueError, match="closed"):
         level[...]

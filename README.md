@@ -18,7 +18,7 @@ The library supports a wide range of microscopy formats through a common interfa
 pip install micro-reader
 ```
 
-Requires Python 3.11 or newer. The native image decoders are provided by `micro-reader-codecs`, which is installed automatically. Prebuilt wheels are available for Linux (x86-64 and ARM), macOS (Intel and Apple silicon) and Windows (x86-64).
+Requires Python 3.11 or newer. The native image decoders are provided by `micro-reader-codecs` and the native read engine by `micro-reader-core`. Both are installed automatically. Prebuilt wheels are available for Linux (x86-64 and ARM), macOS (Intel and Apple silicon) and Windows (x86-64).
 
 Some formats and less common TIFF compression methods require optional dependencies:
 
@@ -168,7 +168,7 @@ See [Memory and threads](https://bugraoezdemir.github.io/micro-reader/guide/perf
 
 `micro-reader` uses native decoding libraries provided by `micro-reader-codecs`. These include libjpeg-turbo, jxrlib, OpenJPEG, libdeflate and zstd.
 
-Decoding is parallelised across CPU cores, and native decoding releases Python's global interpreter lock. A single read can therefore make use of multiple cores. Decoded blocks are also cached, so nearby region requests can reuse data that has already been decoded.
+Decoding is parallelised across CPU cores, and native decoding releases Python's global interpreter lock. A single read can therefore make use of multiple cores. For TIFF and CZI files, the read engine in `micro-reader-core` reads, decodes and places all the pieces of a region in one call, on its own threads. Decoded blocks are also cached, so nearby region requests can reuse data that has already been decoded.
 
 The benchmarks below show typical reading times for several microscopy formats.
 
@@ -256,22 +256,23 @@ The project has been developed with substantial AI assistance. Its functionality
 
 ## License
 
-`micro-reader` and `micro-reader-codecs` are MIT licensed. The codec wheels include third-party libraries. Their notices are available in [`codecs/THIRD_PARTY_LICENSES.txt`](https://github.com/bugraoezdemir/micro-reader/blob/main/codecs/THIRD_PARTY_LICENSES.txt).
+`micro-reader`, `micro-reader-codecs` and `micro-reader-core` are MIT licensed. The wheels of the two native packages include third-party libraries. Their notices are available in [`codecs/THIRD_PARTY_LICENSES.txt`](https://github.com/bugraoezdemir/micro-reader/blob/main/codecs/THIRD_PARTY_LICENSES.txt) and [`core/THIRD_PARTY_LICENSES.txt`](https://github.com/bugraoezdemir/micro-reader/blob/main/core/THIRD_PARTY_LICENSES.txt).
 
 ## Repository and development
 
-The repository contains two packages, released together:
+The repository contains three packages, released together:
 
 | Folder | PyPI package | Description |
 | --- | --- | --- |
 | [`python/`](python) | `micro-reader` | Python image readers |
 | [`codecs/`](codecs) | `micro-reader-codecs` | Native image decoders written in Rust ([details](codecs/README.md)) |
+| [`core/`](core) | `micro-reader-core` | Native read engine written in Rust; it links the decoders of `codecs/` ([details](core/README.md)) |
 
-Tests for both packages are in [`tests/`](tests). They use synthetic files, so no external test data is required.
+Tests for all three packages are in [`tests/`](tests). They use synthetic files, so no external test data is required.
 
 ### Setting up
 
-Building the native decoders requires the Rust toolchain and maturin. The Rust version is specified in `codecs/rust-toolchain.toml` and installed automatically by rustup. You also need CMake and, on x86, NASM for the SIMD code in libjpeg-turbo. See [codecs/README.md](codecs/README.md) for details.
+Building the native packages requires the Rust toolchain and maturin. The Rust version is specified in `codecs/rust-toolchain.toml` and `core/rust-toolchain.toml` and installed automatically by rustup. You also need CMake and, on x86, NASM for the SIMD code in libjpeg-turbo. See [codecs/README.md](codecs/README.md) for details.
 
 ```bash
 python -m venv .venv

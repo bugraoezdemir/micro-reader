@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 import micro_reader
-from micro_reader import UnsupportedFormatError, _codecs
+from micro_reader import UnsupportedFormatError, _codecs, _engine
 
 from _czi_writer import raw_payload, write_czi
 
@@ -133,8 +133,15 @@ def _write(tmp_path, name):
     return path, expected, tol, code
 
 
-@pytest.fixture(params=["native", "reference"])
+@pytest.fixture(params=["engine", "native", "reference"])
 def decoders(request, monkeypatch):
+    """The read engine (micro-reader-core), the Python path with the native
+    decoders, the Python path with the reference decoders."""
+    if request.param == "engine":
+        if not _engine.enabled():
+            pytest.skip("the read engine is not installed or switched off")
+        return request.param
+    monkeypatch.setattr(_engine, "_enabled", False)
     if request.param == "native" and not _codecs.native_available():
         pytest.skip("native module not built")
     if request.param == "reference":
