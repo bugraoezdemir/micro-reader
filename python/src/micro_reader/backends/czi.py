@@ -62,6 +62,11 @@ RAW_TASK_BYTES = 8 << 20            # scenes are read in row bands of this size
 #: bytes worth skipping in one contiguous read rather than issuing one more
 #: read (a seek + read from Python costs about as much as copying this much)
 SEPARATE_READ_BYTES = 32 << 10
+#: subblock headers a read needs that are read on the pool rather than one after
+#: another (a slide scan's thousands, where a cold disk's latency adds up).  Fewer
+#: are read inline: with the file in the OS cache, 135 headers (a 5 x 9 mosaic's
+#: plane) took 6.7 ms inline and 8.5 ms on the pool (2026-11-17)
+HEADERS_ON_POOL = 1024
 NATIVE_LITTLE = sys.byteorder == "little"
 
 #: pixel type -> (dtype, samples)
@@ -897,7 +902,7 @@ class _CziImage(Image):
                 s = tiles.subblocks[i]
                 items.extend((s, piece, ys.start, xs, dst) for piece in tiles.visible(i, region))
         unread = list({s.position: s for s, *_ in items if not s.data_offset}.values())
-        if len(unread) > 8 and _pool.decode_threads() > 1:
+        if len(unread) > HEADERS_ON_POOL and _pool.decode_threads() > 1:
             _pool.run([lambda s=s: self._data_offset(s) and 0 for s in unread])
         return items
 

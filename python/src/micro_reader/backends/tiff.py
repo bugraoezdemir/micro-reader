@@ -664,8 +664,13 @@ class _TiffImage(Image):
     def _read_series(self, block):
         """Read *block* over all axes of the series."""
         out = np.empty(tuple(s.stop - s.start for s in block), dtype=self.dtype)
+        raws, decodes = plan = self._plan_series(block, out)
+        if not decodes and len(raws) == 1 and raws[0][4] == (0, raws[0][2]):
+            # whole rows of one uncompressed segment: one read here costs less than
+            # handing it to the engine (run_plans checks the same, later)
+            return out, _pool.run(self._tasks(*plan))
         # every page's uncompressed pieces and compressed segments, on all cores
-        return out, _engine.run_plans([(self, self._plan_series(block, out))], out)
+        return out, _engine.run_plans([(self, plan)], out)
 
     def _plan_series(self, block, out) -> tuple:
         """(raws, decodes) that fill *out* (shaped like *block*, over all axes

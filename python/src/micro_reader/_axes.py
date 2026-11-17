@@ -199,6 +199,22 @@ class AxesImage(Image):
 
     def _read_block(self, block):
         names, select, axes = self._names, self._select, self.axes
+        kept = [a for a in names if a not in select]
+        if self._fold or kept != [a for a in axes if a in kept]:
+            # the source's array would be reordered into this view's axes (RGB
+            # samples folded into the channels: a copy of the whole read, on one
+            # thread).  On the read engine, plan straight into the final array
+            # instead: each segment's samples go to their place on the engine's
+            # threads.  (2026-11-17: an 8192 x 8192 RGB JPEG plane at 16 threads,
+            # 127 ms -> the engine's own 32 ms.)
+            from . import _engine
+            if _engine.engine() is not None:
+                import contextlib
+                out = np.empty(tuple(s.stop - s.start for s in block), dtype=self.dtype)
+                with contextlib.ExitStack() as stack:
+                    plans = self._plan_into(block, out, stack)
+                    if plans is not None:
+                        return out, _engine.run_plans(plans, out)
         want = dict(zip(axes, block))
         S = self._samples
         if self._fold:                          # folded channels k0:k1 -> channels, all samples

@@ -400,7 +400,22 @@ impl Engine {
         SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
             let (data, spare) = &mut *scratch;
-            let result = if keep {
+            let result = if v.len() == 1 && whole_segment(first, codec) {
+                // the destination has the segment's layout: decoded straight into it
+                // (no buffer, no copy), then copied into the cache if it keeps it.
+                // SAFETY: Piece::parse checked the rectangle lies in the output buffer;
+                // with these strides it is `need` contiguous bytes, and the plan's other
+                // pieces write elsewhere
+                let dst = unsafe { std::slice::from_raw_parts_mut(first.dst as *mut u8, need) };
+                if !fills_whole(codec.kind) {
+                    dst.fill(0);
+                }
+                decode_into(source, first, codec, table, data, dst).map(|()| {
+                    if keep {
+                        self.cache.lock().unwrap().put(key, Arc::new(dst.to_vec()));
+                    }
+                })
+            } else if keep {
                 // decoded into its own memory, which the cache keeps
                 let mut seg = Vec::new();
                 decode_segment(source, first, codec, table, data, &mut seg).map(|()| {
@@ -436,10 +451,39 @@ thread_local! {
         const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
+/// Whether piece `p` is its whole segment and its destination has the decoded
+/// segment's layout (rows of whole pixels, back to back): the segment can be
+/// decoded straight into it.
+fn whole_segment(p: &Piece, codec: &Codec) -> bool {
+    let px = codec.samples * codec.itemsize;
+    p.y0 == 0 && p.y1 == p.seg_rows && p.x0 == 0 && p.x1 == p.seg_cols && p.c0 == 0
+        && p.c1 == codec.samples && !codec.bgr && p.dst_sample == codec.itemsize
+        && p.dst_col == px && p.dst_row == p.seg_cols * px
+}
+
+/// Whether the decoder of `kind` writes every byte of the segment or fails: zstd
+/// checks its length; libjpeg writes every scanline, a truncated stream included;
+/// jxrlib copies the whole rectangle or errs.  The others may stop short, and a
+/// short segment must read as zeros (not as what the memory held before).
+fn fills_whole(kind: Kind) -> bool {
+    matches!(kind, Kind::Zstd | Kind::ZstdCzi | Kind::Jpeg | Kind::JpegXr)
+}
+
 /// Read `p.count` bytes of a segment and decode them to native-order samples,
-/// `seg_rows` x `seg_cols` x `samples`.
+/// `seg_rows` x `seg_cols` x `samples`, into `seg` (sized here).
 fn decode_segment(source: &Source, p: &Piece, codec: &Codec, table: Option<&[u8]>,
                   data: &mut Vec<u8>, seg: &mut Vec<u8>) -> Result<(), String> {
+    if !fills_whole(codec.kind) {
+        seg.clear();
+    }
+    seg.resize(p.seg_rows * p.seg_cols * codec.samples * codec.itemsize, 0);
+    decode_into(source, p, codec, table, data, seg)
+}
+
+/// [`decode_segment`] into `seg`, exactly the segment's size (zeros first where
+/// the decoder may stop short: [`fills_whole`]).
+fn decode_into(source: &Source, p: &Piece, codec: &Codec, table: Option<&[u8]>,
+               data: &mut Vec<u8>, seg: &mut [u8]) -> Result<(), String> {
     data.clear();
     data.resize(p.count, 0);
     if !source.read_exact_at(data, p.offset).map_err(|e| io_error(source, p.offset, e))? {
@@ -447,9 +491,6 @@ fn decode_segment(source: &Source, p: &Piece, codec: &Codec, table: Option<&[u8]
     }
     let data: &[u8] = data;
     let (rows, cols, ns, item) = (p.seg_rows, p.seg_cols, codec.samples, codec.itemsize);
-    seg.clear();
-    seg.resize(rows * cols * ns * item, 0);
-    let seg: &mut [u8] = seg;
     let corrupt = |e: String| format!("{}: segment at byte {}: {e}", quoted(&source.path), p.offset);
     let check = |got: (usize, usize, usize)| -> Result<(), String> {
         if got != (cols, rows, ns) {
@@ -707,6 +748,19 @@ fn scatter(rows: &[u8], row_len: usize, first: usize, n: usize, p: &Piece, codec
                     let s = (p.x0 + x) * px + p.c0 * item;
                     copy_items(&src[s..s + nc * item], (base + x * p.dst_col) as *mut u8, item, swap);
                 }
+            } else if !swap && matches!(item, 1 | 2 | 4 | 8) {
+                // samples to their own planes (RGB as c, y, x; B, G, R reversed): one
+                // strided pass per sample, typed (no memcpy call per sample)
+                for c in 0..nc {
+                    let s0 = p.x0 * px + codec.stored(p.c0 + c) * item;
+                    let d0 = base + c * p.dst_sample;
+                    match item {
+                        1 => strided::<u8>(src, s0, px, d0, p.dst_col, width),
+                        2 => strided::<u16>(src, s0, px, d0, p.dst_col, width),
+                        4 => strided::<u32>(src, s0, px, d0, p.dst_col, width),
+                        _ => strided::<u64>(src, s0, px, d0, p.dst_col, width),
+                    }
+                }
             } else {
                 for x in 0..width {
                     for c in 0..nc {
@@ -717,6 +771,26 @@ fn scatter(rows: &[u8], row_len: usize, first: usize, n: usize, p: &Piece, codec
                 }
             }
         }
+    }
+}
+
+/// Copy `n` samples of type `T`, `src[s0]`, `src[s0 + step]`, ... (bytes) to the
+/// addresses `d0`, `d0 + dst_step`, ... (unaligned on both sides).
+///
+/// # Safety
+/// The destination addresses must be valid for writes of `T`.
+#[inline]
+unsafe fn strided<T: Copy>(src: &[u8], s0: usize, step: usize, d0: usize, dst_step: usize,
+                           n: usize) {
+    let size = std::mem::size_of::<T>();
+    if n == 0 {
+        return;
+    }
+    assert!(s0 + (n - 1) * step + size <= src.len(), "strided copy past its source");
+    let from = src.as_ptr().add(s0);
+    for x in 0..n {
+        let v = std::ptr::read_unaligned(from.add(x * step) as *const T);
+        std::ptr::write_unaligned((d0 + x * dst_step) as *mut T, v);
     }
 }
 

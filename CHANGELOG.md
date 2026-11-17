@@ -16,13 +16,18 @@ automatically. `MICRO_READER_ENGINE=0` reads on the Python path instead, as befo
   segments. `set_cache_limit` covers that cache and the other caches together: whichever
   side is reading can always take at least half of the limit. Pieces the engine does not take yet (LZMA,
   packed bit depths, FillOrder 2, codecs that only tifffile decodes, and segments read as a
-  stream) are read on the Python path as before. The environment variable
+  stream) are read on the Python path as before. So is a read that comes down to a single
+  uncompressed strip or tile, which costs less there than a call to the engine. When the
+  axes you read in differ from the file's, as with RGB samples shown as channels, the engine
+  writes each sample straight to its place in the result instead of the result being
+  reordered afterwards on one thread: an 8192 x 8192 RGB JPEG plane reads about 4 times
+  faster with 16 threads than without this. The environment variable
   `MICRO_READER_ENGINE=0` switches the engine off, and so does `MICRO_READER_NO_NATIVE=1`.
 - CZI files are read through the engine too: uncompressed tiles, zstd (both codes, hi-lo
   packing included), LZW, JPEG, lossless JPEG, JPEG XR and JPEG XL. Overlapping mosaic
   tiles are composed as before, each pixel from the last tile that covers it. A JPEG XR
-  slide's plane is read on all decode threads at once (about 2 to 5 times faster with 8
-  threads in a first measurement). Chunked subblocks, and compressed tiles too large to
+  slide's plane is read on all decode threads at once: on two slide scans, 3 to 5 times
+  faster than before with 8 threads, and 3.5 to 7.6 times with 16. Chunked subblocks, and compressed tiles too large to
   decode whole, are read on the Python path.
 - `micro_reader.read_many(requests)`, also available as `Image.read_many`, reads the regions
   of many images in one go, each into an array you give. When one region spans many files,

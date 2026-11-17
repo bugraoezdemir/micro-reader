@@ -38,6 +38,8 @@ _engine = None
 _enabled = None
 _cache_limit = None
 _codecs: dict = {}
+#: ids of the specs in ``_codecs`` that read uncompressed bytes ("raw")
+_raw_specs: set = set()
 
 
 def available() -> bool:
@@ -101,7 +103,10 @@ def codec(kind: str, itemsize: int, samples: int, **kwargs):
     key = (kind, itemsize, samples, tuple(sorted(kwargs.items())))
     spec = _codecs.get(key)
     if spec is None:
-        spec = _codecs.setdefault(key, _core.Codec(kind, itemsize, samples, **kwargs))
+        with _lock:
+            spec = _codecs.setdefault(key, _core.Codec(kind, itemsize, samples, **kwargs))
+            if kind == "raw":
+                _raw_specs.add(id(spec))
     return spec
 
 
@@ -202,6 +207,17 @@ def _pool_counted(plans, counts) -> int:
     return n
 
 
+def _one_read(batch) -> bool:
+    """Whether *batch*'s only piece is uncompressed whole rows of its segment: one
+    contiguous read on the Python path, where it costs less than a call to the
+    engine (nothing to decode or spread; a viewer's 256 x 256 tile of an
+    uncompressed TIFF: about 15 us of 45).  A few columns of wide rows (strips
+    joined into one run) stay on the engine, which reads them faster."""
+    row = batch.rows[0]
+    seg_cols, c0, c1 = row[6], row[9], row[10]
+    return id(batch.codecs[row[3]]) in _raw_specs and c0 == 0 and c1 == seg_cols
+
+
 def run_plans(plans, out: np.ndarray, counts=None) -> int:
     """Run the plans of images (``[(image, plan), ...]``, a backend's
     ``_plan_series``) into *out*: on the engine what each image hands it
@@ -222,6 +238,9 @@ def run_plans(plans, out: np.ndarray, counts=None) -> int:
         split = getattr(image, "_engine_split", None)
         batch.owner = k
         rest.append((image, split(batch, *plan) if split is not None else plan))
+    if counts is None and len(batch.rows) == 1 and _one_read(batch):
+        return _pool.run(itertools.chain.from_iterable(
+            image._tasks(*plan) for image, plan in plans))
     try:
         n = batch.run(out, counts)
     except ValueError as exc:                # the engine's message names file and offset

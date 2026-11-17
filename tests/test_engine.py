@@ -51,14 +51,16 @@ def files(tmp_path_factory):
 
 @pytest.fixture
 def counted(monkeypatch):
-    """The pieces handed to the engine during a test."""
+    """The pieces handed to the engine during a test (a lone uncompressed piece
+    among them, which ``run_plans`` then reads on the Python path)."""
     seen = {"pieces": 0}
-    run = _engine.Batch.run
+    add = _engine.Batch.add
 
-    def counting(self, out, counts=None):
-        seen["pieces"] += len(self.rows)
-        return run(self, out, counts)
-    monkeypatch.setattr(_engine.Batch, "run", counting)
+    def counting(self, *args, **kwargs):
+        n = len(self.rows)
+        add(self, *args, **kwargs)
+        seen["pieces"] += len(self.rows) - n
+    monkeypatch.setattr(_engine.Batch, "add", counting)
     return seen
 
 
@@ -114,6 +116,127 @@ def test_the_engine_reads_the_same_counts(files, python_path):
         finally:
             _engine.set_engine(None)
     assert stats[0] == stats[1]
+
+
+def test_one_contiguous_uncompressed_read_is_done_on_the_python_path(tmp_path, monkeypatch):
+    """A read that is one uncompressed piece of whole segment rows is one read on
+    the Python path, cheaper than a call to the engine: run_plans does it there.
+    A few columns of a segment, two pieces, or a compressed piece go to the
+    engine."""
+    data = _data((512, 512), "u2")
+    tiles, strips, zpath = (str(tmp_path / f"{n}.tif") for n in ("tiles", "strips", "ztiles"))
+    tifffile.imwrite(tiles, data, tile=(256, 256))
+    tifffile.imwrite(strips, data, rowsperstrip=1)
+    calls = []
+    run = _engine.Batch._run
+
+    def counting(self, pieces, out, per_piece=None):
+        calls.append(len(pieces))
+        return run(self, pieces, out, per_piece)
+    monkeypatch.setattr(_engine.Batch, "_run", counting)
+    with _native(tiles) as f:
+        img = f.images[0]
+        np.testing.assert_array_equal(img[..., :256, :256], data[:256, :256])     # one tile
+        assert calls == []
+        np.testing.assert_array_equal(img[..., 10:20, 30:40], data[10:20, 30:40])
+        np.testing.assert_array_equal(img[..., :256, :512], data[:256, :512])     # two tiles
+        assert calls == [1, 2]
+        assert img.stats.pixels_returned == 256 * 256 + 100 + 256 * 512
+    calls.clear()
+    with _native(strips) as f:
+        img = f.images[0]
+        np.testing.assert_array_equal(img[..., 0:64, :], data[0:64, :])          # whole rows
+        assert calls == []
+        np.testing.assert_array_equal(img[..., 0:64, 100:200], data[0:64, 100:200])
+        assert len(calls) == 1
+    if HAVE_CODECS:
+        tifffile.imwrite(zpath, data, tile=(256, 256), compression="zlib")
+        calls.clear()
+        with _native(zpath) as f:
+            np.testing.assert_array_equal(f.images[0][..., :256, :256], data[:256, :256])
+        assert calls == [1]
+
+
+@pytest.mark.parametrize("cache", [0, 64 << 20], ids=["cache_off", "cache_on"])
+def test_a_short_segment_decoded_into_the_output_reads_as_zeros(tmp_path, cache):
+    """A whole tile is decoded straight into the output array (np.empty): a
+    deflate stream that ends before the tile is full leaves zeros there, as on
+    the Python path, not what the memory held."""
+    import zlib
+    path = str(tmp_path / "short.tif")
+    data = np.full((128, 128), 9, np.uint8)
+    tifffile.imwrite(path, data, tile=(64, 64), compression="zlib")
+    with tifffile.TiffFile(path) as tif:
+        offset = tif.pages[0].dataoffsets[0]
+        count = tif.pages[0].databytecounts[0]
+    short = zlib.compress(bytes([7]) * 2048)               # half of the 64 x 64 tile
+    assert len(short) <= count
+    with open(path, "r+b") as fh:
+        fh.seek(offset)
+        fh.write(short + bytes(count - len(short)))
+    want = data.copy()
+    want[:64, :64] = 0
+    want[:32, :64] = 7
+    old = micro_reader.cache_limit()
+    micro_reader.set_cache_limit(cache)
+    try:
+        for engine in (True, False):
+            _engine.set_engine(engine)
+            try:
+                for _ in range(2):          # the second read: from the cache, if on
+                    with _native(path) as f:
+                        np.testing.assert_array_equal(f.images[0][..., :64, :64], want[:64, :64])
+                        np.testing.assert_array_equal(f.images[0][...], want)
+            finally:
+                _engine.set_engine(None)
+    finally:
+        micro_reader.set_cache_limit(old)
+
+
+@pytest.mark.parametrize("compression", [None, "zlib"])
+def test_a_reordering_view_is_planned_straight_into_its_array(tmp_path, compression,
+                                                               monkeypatch, python_path):
+    """A view that reorders the file's axes (RGB samples folded into the channels,
+    other axes orders) reads on the engine straight into its final array, with no
+    copy afterwards; channels that split a pixel's samples are read and copied as
+    before.  Pixels and stats as on the Python path."""
+    if compression and not HAVE_CODECS:
+        pytest.skip("needs imagecodecs to write")
+    data = _data((2, 96, 160, 3), "u2")                       # z, y, x, samples
+    path = str(tmp_path / "rgb.tif")
+    tifffile.imwrite(path, data, photometric="rgb", tile=(32, 32), compression=compression,
+                     metadata={"axes": "ZYXS"})
+    keys = [(...,), (0, slice(0, 3), 0, slice(5, 70), slice(9, 150)),
+            (0, slice(1, 2), slice(None), slice(None), slice(None))]   # one sample: split
+    planned = []
+    from micro_reader._axes import AxesImage
+    plan_into = AxesImage._plan_into
+
+    def logging(self, block, out, stack):
+        plans = plan_into(self, block, out, stack)
+        planned.append(plans is not None)
+        return plans
+    monkeypatch.setattr(AxesImage, "_plan_into", logging)
+    results = {}
+    for engine in (True, False):
+        _engine.set_engine(engine)
+        try:
+            with micro_reader.open(path, axes="tczyx") as f:
+                img = f.images[0]
+                assert img.axes == "tczyx" and img.shape == (1, 3, 2, 96, 160)
+                got = [img[k] for k in keys]
+                got.append(img.as_axes("xyzc", samples="channels")[10:50, 20:40, :, :])
+                results[engine] = (got, img.stats)
+        finally:
+            _engine.set_engine(None)
+    # the engine's reads only (the Python path does not plan); a view of a view
+    # plans through both
+    assert planned[:3] == [True, True, False] and all(planned[3:]) and len(planned) > 3
+    for a, b in zip(*(results[e][0] for e in (True, False))):
+        assert a.flags.c_contiguous
+        np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(results[True][0][0][0, :, :, :, :], np.moveaxis(data, 3, 0))
+    assert results[True][1] == results[False][1]
 
 
 def test_closing_a_file_closes_its_engine_handles(files):
@@ -297,6 +420,29 @@ def test_czi_on_the_engine_matches_the_python_path(tmp_path, name, tiles, thread
     if tiles == "mosaic":
         for images, sid in zip(got, sorted(expected)):
             np.testing.assert_array_equal(images[0], expected[sid])     # key 0 is [...]
+
+
+def test_czi_headers_read_on_the_pool_give_the_same_pixels(tmp_path, counted, monkeypatch):
+    """A read needing more than HEADERS_ON_POOL unread subblock headers reads them
+    on the pool first (a slide scan's thousands); lowered here so a small mosaic
+    takes that way."""
+    tc = pytest.importorskip("test_czi")
+    from micro_reader import _pool
+    from micro_reader.backends import czi
+    monkeypatch.setattr(czi, "HEADERS_ON_POOL", 0)
+    runs = []
+    run = _pool.run
+
+    def logging(tasks):
+        tasks = list(tasks)
+        runs.append(len(tasks))
+        return run(tasks)
+    monkeypatch.setattr(czi._pool, "run", logging)
+    path, expected, _ = tc._write(tmp_path, "mosaic_overlap")
+    got = _czi_both_paths(path, 4, lambda shape: tc._keys(shape), tiles="mosaic")
+    assert counted["pieces"] > 0 and any(runs)
+    for images, sid in zip(got, sorted(expected)):
+        np.testing.assert_array_equal(images[0], expected[sid])
 
 
 @pytest.mark.parametrize("separate", [32 << 10, 0], ids=["spans", "separate_reads"])
