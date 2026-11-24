@@ -29,6 +29,7 @@ import os
 import re
 import struct
 import threading
+import warnings
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from functools import partial
@@ -191,6 +192,12 @@ class LegacyNd2Parser:
         self.per_channel = components // self.channels
         # RGB channels keep their samples (s); otherwise every component is a channel
         self.samples = 3 if self.per_channel == 3 else 1
+        if self.samples > 1:
+            # bare JPEG 2000 codestreams (no colour box) and no camera block: nothing in
+            # the file says which sample is red (modern ND2 declares it, backends/nd2.py)
+            warnings.warn(f"{self.path!r}: the file does not state the order of its "
+                          f"{self.samples} colour samples; they are read as stored and "
+                          "named R, G, B", stacklevel=5)
         self.c = self.channels if self.samples == 3 else components
         self.loops = self._loops()
         self.stored_frames = len(self.boxes.get(b"LUNK", [])) // max(1, self.channels)
@@ -284,6 +291,9 @@ class _LegacyNd2Image(Image):
                          name=f"{os.path.basename(nd2.path)} position {position}",
                          read_unit=(1, 1, 1, nd2.height, nd2.width)
                          + ((nd2.samples,) if self._rgb else ()))
+
+    #: legacy files never state the order of RGB samples (see LegacyNd2Parser)
+    sample_order = None
 
     def _read_block(self, block):
         if self._closed:

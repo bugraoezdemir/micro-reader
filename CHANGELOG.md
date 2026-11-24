@@ -12,6 +12,21 @@
   keeps (0.15 s). Smaller steps, and compressed images whose tiles are not declared (CZI,
   VSI), keep the runs, which measured faster there.
 
+### Fixed
+
+- RGB ND2 files had red and blue swapped. Nikon colour cameras store each pixel's samples as
+  blue, green, red, and the file says so in its camera metadata. micro-reader passed the
+  samples on as stored but named them red, green, blue, so `"<name> R"` held the blue
+  sample. The ND2 reader now reads the order the file declares and returns the samples as
+  red, green, blue on every read path, as it already did for CZI and VSI. This is a visible
+  change for every RGB ND2 file: outputs written with earlier releases keep red and blue
+  swapped, and a channel-colour override set to work around it now swaps them again. The
+  nd2 package and Bio-Formats pass the samples on as stored, so their pixels differ from
+  micro-reader's by the order of the samples. `image.sample_order` gives the stored order
+  (`("B", "G", "R")` for Nikon colour cameras). An RGB ND2 file that does not state its
+  order is read as stored, with a warning: this includes every legacy ND2 file (versions 1
+  and 2).
+
 ## 0.5.0 (2026-11-17)
 
 Requires micro-reader-core 0.0.1 (new, `>=0.0.1,<0.1`), the native read engine, and

@@ -170,3 +170,24 @@ def test_concurrent_reads(tmp_path, decode_threads):
         for th in threads:
             th.join()
     assert not errors
+
+
+def test_rgb_order_is_not_stated_warns_and_reads_as_stored(tmp_path):
+    """Legacy ND2 stores bare JPEG 2000 codestreams (no colour box) and no camera
+    block, so nothing says which sample is red: read as stored, with a warning
+    (Workplan MR30; modern ND2 declares the order, tests/test_nd2_rgb_order.py)."""
+    path, loops, frames = _write(tmp_path, "rgb_time")
+    with pytest.warns(UserWarning, match="does not state the order of its 3 colour samples"):
+        img = _native(path)
+    with img:
+        assert img.images[0].sample_order is None
+        np.testing.assert_array_equal(np.asarray(img.images[0][...]), _expected(loops, frames)[0])
+
+
+def test_grey_legacy_files_do_not_warn(tmp_path):
+    import warnings
+    path, _, _ = _write(tmp_path, "time_positions_channels")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with _native(path):
+            pass
