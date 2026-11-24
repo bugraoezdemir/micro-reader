@@ -84,6 +84,8 @@ class _MrcImage(Image):
     """The whole MRC volume as one image, in its stored order (sections,
     rows, columns), each axis named by the file's MAPS, MAPR, MAPC."""
 
+    exact_reads = True                  # uncompressed: any rectangle is read exactly
+
     def __init__(self, path: str, offset: int, shape, file_dtype: np.dtype, sizes=None,
                  axes: str = "zyx"):
         super().__init__(0, axes, shape, file_dtype, name=os.path.basename(path))

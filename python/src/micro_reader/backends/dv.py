@@ -239,6 +239,8 @@ class _DvImage(Image):
     """All sections of a DeltaVision file as one image: the section axes in
     the file's interleave order, then ``y x``."""
 
+    exact_reads = True                  # uncompressed: any rectangle is read exactly
+
     def __init__(self, path: str, raw: bytes, head: dict, order: str, sizes: dict, ext: bytes):
         self._order = SEQUENCES[head["sequence"]]
         lead = tuple(sizes[a] for a in self._order)

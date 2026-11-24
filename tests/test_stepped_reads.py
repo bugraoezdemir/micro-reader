@@ -78,3 +78,89 @@ def test_stepped_reads_of_a_tiff(tmp_path, monkeypatch, compression):
         image = f.images[0]
         for key in itertools.islice(KEYS, 8):
             np.testing.assert_array_equal(image[key], DATA[key])
+
+
+# --- reading only the selected positions (micro-reader-napari, 2026-11-20) -----------------
+# A step at least the backend's read unit puts every selected position in its own unit, so
+# reading the positions alone never decodes more than reading runs of them (before: [::64] of
+# a 6.9 GB MRC read the whole file, 640-row runs, to keep 1 row in 64).
+
+PLANE = 40 * 30 * 2
+
+
+def _planes(image):
+    return sum(image.blocks) / PLANE
+
+
+@pytest.mark.parametrize("exact", [False, True])
+@pytest.mark.parametrize("limit", [64, 2400, PLANE * 4, 1 << 30])
+@pytest.mark.parametrize("key", KEYS)
+def test_values_are_the_same_with_and_without_exact_reads(monkeypatch, key, limit, exact):
+    monkeypatch.setattr(_base, "STEPPED_READ_BYTES", limit)
+    image = Recording(DATA)
+    image.exact_reads = exact
+    np.testing.assert_array_equal(image[key], DATA[key])
+
+
+def test_an_exact_image_reads_only_the_selected_planes(monkeypatch):
+    monkeypatch.setattr(_base, "STEPPED_READ_BYTES", PLANE * 4)           # four planes fit
+    monkeypatch.setattr(_base, "SKIP_READ_MIN_STEP", 2)
+    image = Recording(DATA)
+    image.exact_reads = True
+    np.testing.assert_array_equal(image[::4], DATA[::4])
+    assert _planes(image) == 3                                          # 0, 4, 8: not 0-11
+
+
+def test_an_image_that_does_not_say_keeps_reading_runs(monkeypatch):
+    monkeypatch.setattr(_base, "STEPPED_READ_BYTES", PLANE * 4)
+    monkeypatch.setattr(_base, "SKIP_READ_MIN_STEP", 2)
+    image = Recording(DATA)                                             # read_unit None, not exact
+    image[::4]
+    assert _planes(image) == 12                                         # runs 0-3, 4-7, 8-11
+
+
+@pytest.mark.parametrize("unit, step, selected_only", [
+    (3, 6, True), (3, 7, True), (1, 2, True), (1, 4, True),
+    (3, 3, False),                     # a step of one unit skips no unit: the runs win (NDPI)
+    (3, 5, False), (3, 2, False), (2, 3, False)])
+def test_a_declared_read_unit_decides(monkeypatch, unit, step, selected_only):
+    monkeypatch.setattr(_base, "STEPPED_READ_BYTES", PLANE * 6)
+    monkeypatch.setattr(_base, "SKIP_READ_MIN_STEP", 2)
+    image = Recording(DATA)
+    image.read_unit = (unit, 40, 30)
+    np.testing.assert_array_equal(image[::step], DATA[::step])
+    selected = len(range(0, 12, step))
+    assert (_planes(image) == selected) is selected_only
+
+
+@pytest.mark.parametrize("step, selected_only", [(3, False), (4, True), (6, True)])
+def test_the_default_smallest_step(monkeypatch, step, selected_only):
+    monkeypatch.setattr(_base, "STEPPED_READ_BYTES", PLANE * 6)
+    image = Recording(DATA)
+    image.exact_reads = True
+    np.testing.assert_array_equal(image[::step], DATA[::step])
+    assert (_planes(image) == len(range(0, 12, step))) is selected_only
+
+
+def test_a_small_step_on_an_exact_image_still_reads_runs(monkeypatch):
+    """Below SKIP_READ_MIN_STEP one call per position costs more than it saves."""
+    monkeypatch.setattr(_base, "STEPPED_READ_BYTES", PLANE * 4)
+    monkeypatch.setattr(_base, "SKIP_READ_MIN_STEP", 3)
+    image = Recording(DATA)
+    image.exact_reads = True
+    image[::2]
+    assert _planes(image) == 12
+
+
+@pytest.mark.parametrize("compression, exact", [(None, True), ("zlib", False)])
+def test_tiff_says_whether_it_reads_exactly_also_through_axes(tmp_path, compression, exact):
+    tifffile = pytest.importorskip("tifffile")
+    import micro_reader
+    path = tmp_path / "e.tif"
+    tifffile.imwrite(path, DATA, compression=compression)
+    with micro_reader.open(str(path), rename={"sequence": "z"}) as f:
+        native = f.images[0]
+        assert native.exact_reads is exact
+        image = native.as_axes("canonical")                             # through AxesImage
+        assert image.axes == "tczyx" and image.exact_reads is exact
+        np.testing.assert_array_equal(image[0, 0, ::4, ::3, ::2], DATA[::4, ::3, ::2])

@@ -24,6 +24,11 @@ _RENAMED = "the image index 'scene' is now called 'series' (micro-reader 0.1.0);
 #: 0.4.0 the whole span was read and then thinned (``image[::16]`` of a 6.8 GB MRC held
 #: 6.8 GB). Smaller stepped reads keep one read of the span (fewer calls).
 STEPPED_READ_BYTES = 64 << 20
+#: the smallest step at which a stepped read takes only the selected positions, one at a
+#: time, instead of runs of them (``Image._positions_alone``); measured 2026-11-20: from
+#: step 4 the positions alone win on MRC, LIF, ICS and Micro-Manager TIFF (MRC [::64] of
+#: 6.9 GB: 4.7 s -> 0.15 s), at 2 and 3 they lose on MRC and LIF
+SKIP_READ_MIN_STEP = 4
 
 
 class ImageIndex(dict):
@@ -152,6 +157,11 @@ class Image:
     Results are always native-endian and never views into file-backed memory.
     """
 
+    #: True: any rectangle is read at exactly its own cost (uncompressed pixels), so a
+    #: stepped read takes only the selected positions (``_positions_alone``).  False
+    #: (the default): not known, e.g. a compressed format that declares no ``read_unit``.
+    exact_reads = False
+
     def __init__(self, position: int, axes: str, shape: Sequence[int], dtype,
                  name: Optional[str] = None,
                  read_unit: Optional[Sequence[int]] = None,
@@ -174,7 +184,9 @@ class Image:
         self._whole: Optional["Image"] = None
         self._metadata = None           # backends set a _metadata.Metadata
         #: None: any rectangle is read exactly.  Otherwise the smallest block
-        #: the backend reads at once (e.g. a compressed tile or strip).
+        #: the backend reads at once (e.g. a compressed tile or strip).  Not every
+        #: backend that leaves it None declares its tiles (CZI, VSI): ``exact_reads``
+        #: says when None is known to be exact.
         self.read_unit = None if read_unit is None else tuple(int(n) for n in read_unit)
         self.stats = ReadStats()
 
@@ -315,15 +327,34 @@ class Image:
             out = out.squeeze(axis=squeeze)
         return out
 
+    def _positions_alone(self, axis: int, step: int) -> bool:
+        """Whether a stepped read along *axis* reads only its selected positions, one at a
+        time, rather than runs of positions (``_read_stepped``).  Yes when the step is at
+        least twice the backend's read unit along *axis* (1 for an image that reads
+        exactly, ``exact_reads``) and at least SKIP_READ_MIN_STEP: every selected position
+        then lies in a unit of its own and at least every other unit is skipped, which the
+        runs read too ([::64] of a 6.9 GB MRC read the whole file).  Measured 2026-11-20:
+        a step of one unit skips nothing and loses to the runs (an NDPI's 8-row JPEG unit
+        at [::8]: 3.3 s vs 2.2 s), and so do steps 2 and 3 of exact images (MRC, LIF: one
+        call per position costs more than the positions skipped).  An image that declares
+        no unit and does not say it reads exactly (a compressed format whose tiles are not
+        declared) keeps the runs."""
+        if step < SKIP_READ_MIN_STEP:
+            return False
+        if self.read_unit is not None:
+            return step >= 2 * self.read_unit[axis]
+        return bool(self.exact_reads)
+
     def _read_stepped(self, out: np.ndarray, spans: list, steps: list, axis: int) -> None:
         """A stepped read into *out*, a piece of at most STEPPED_READ_BYTES at a time: the
         span is read whole once it fits; else, along *axis*, runs of positions that fit
         (each starting at a selected position, read and thinned: a compressed tile or strip
-        is decoded once, as for the whole span), or, when one step alone spans more than
-        fits (``[::16]`` of large planes), only the selected positions, one at a time; the
-        next axis splits what is still too large. Each piece is read with the backend's own
-        ``_read_block``. Within a row the columns are read and thinned (a read per pixel
-        would cost more). Peak: *out* and one piece."""
+        is decoded once, as for the whole span), or only the selected positions, one at a
+        time, when one step alone spans more than fits (``[::16]`` of large planes) or no
+        unit holds two of them (``_positions_alone``); the next axis splits what is still
+        too large. Each piece is read with the backend's own ``_read_block``. Within a row
+        the columns are read and thinned (a read per pixel would cost more). Peak: *out*
+        and one piece."""
         item = self.dtype.itemsize
         size = int(np.prod([b - a for a, b in spans]))
         if size * item <= STEPPED_READ_BYTES or axis == len(spans) - 1:
@@ -334,7 +365,7 @@ class Image:
         lead = (slice(None),) * axis
         (a, b), step = spans[axis], steps[axis]
         per = max(1, STEPPED_READ_BYTES // (size // (b - a) * item))   # positions that fit
-        if per >= step:
+        if per >= step and not self._positions_alone(axis, step):
             run = per - per % step                       # a whole number of steps
             for j in range(a, b, run):
                 k = min(b, j + run)

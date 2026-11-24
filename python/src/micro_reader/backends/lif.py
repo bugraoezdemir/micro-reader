@@ -506,6 +506,8 @@ def _mosaic(number: int, tiles: list, name: str, index: dict, path: str) -> "_Li
 class _LifImage(Image):
     """One tile / rotation of one Leica image."""
 
+    exact_reads = True                  # LIF pixels are stored uncompressed
+
     def __init__(self, index: int, element, name: str, block, layout: "_Layout", key: dict,
                  frames: _StageFrames):
         self._layout = layout
