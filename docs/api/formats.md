@@ -394,4 +394,4 @@ Supported formats include:
 - **Opera Flex** (`.flex`). Open any `.flex` file or its containing folder. Each barcode represents one plate.
 - **scanR** (Olympus / Evident). Open `experiment_descriptor.xml`, one of its folders or a data file. Older scanR plate formats are also supported.
 - **Cellomics** (`.C01`). Open any `.C01` file, its folder or the database. The plate layout is inferred, assuming at least 96 wells.
-- **Plates in generic formats.** These include Zeiss CZI plates, OME companion plates, OME-TIFF plates (Yokogawa CQ1), ND2 files whose XY positions are named after wells, and folders of ND2 files from one NIS-Elements well-plate run. Pass `plates=False` to read these by series instead.
+- **Plates in generic formats.** These include Zeiss CZI plates, OME companion plates, OME-TIFF plates (Yokogawa CQ1, and one-file OME-TIFF plates whose planes name no file, as tifffile writes them), ND2 files whose XY positions are named after wells, and folders of ND2 files from one NIS-Elements well-plate run. Pass `plates=False` to read these by series instead.

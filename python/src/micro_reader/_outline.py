@@ -69,5 +69,25 @@ def outline_lines(f) -> list:
     for image in rest:
         by_series.setdefault(image.index.get("series", 0), []).append(image)
     for series, members in sorted(by_series.items()):
-        lines.append(f"series {series}: {_leaf(members)}")
+        line = f"series {series}: {_leaf(members)}"
+        if len({image.index.get("tile") for image in members}) > 1:
+            hint = _mosaic_hint(f, series, members)
+            if hint:
+                line += f" {hint}"
+        lines.append(line)
     return lines
+
+
+def _mosaic_hint(f, series: int, members: list) -> str:
+    """Where a series is read as separate tiles (the default) and ``tiles="mosaic"``
+    would place them on one canvas, say so (Workplan MR28): a slide scan otherwise
+    shows thousands of tile images, and its stored pyramid is reached only through the
+    mosaic. Only where the mosaic would succeed (``File._mosaic_levels``)."""
+    try:
+        levels = f._mosaic_levels(series, members)
+    except Exception:                                   # a summary never fails
+        return ""
+    if levels is None:
+        return ""
+    stored = f", with its {levels} stored levels" if levels > len(members[0].resolutions) else ""
+    return f'(tiles="mosaic": its tiles as one image{stored})'

@@ -65,13 +65,12 @@ Every image knows its position in the pyramid:
 | Attribute | Level 0 | Lower level |
 | --- | --- | --- |
 | `image.level` | `0` | `1`, `2`, ... |
-| `image.pyramid` | The image itself | The level-0 image |
 | `image.resolutions` | All levels | All levels (the same list) |
 | `image.is_pyramidal` | `True` if lower levels exist | `True` |
 
 ```python
 level2.level                      # 2
-level2.pyramid is f.images[0]     # True
+level2.resolutions[0] is f.images[0]     # True: the level-0 image
 ```
 
 ## Pixel sizes per level

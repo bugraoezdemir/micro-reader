@@ -246,7 +246,7 @@ class Image:
         warnings.warn("Image.is_pyramid is deprecated: it means level 0, also for an image "
                       "without lower levels. Use image.level == 0; image.is_pyramidal says "
                       "whether the file stores lower levels", DeprecationWarning, stacklevel=2)
-        return self.pyramid is self
+        return self.resolutions[0] is self          # not through .pyramid: one warning
 
     @property
     def level(self) -> int:
@@ -259,8 +259,14 @@ class Image:
 
     @property
     def pyramid(self) -> "Image":
-        """The pyramid this image belongs to: itself at level 0, the
-        full-resolution image for a lower level."""
+        """Deprecated since 0.5.1: the name reads as "the whole pyramid", but it is one
+        image, the level-0 image of this image's pyramid. ``image.resolutions[0]`` says
+        what it does (``image.level == 0`` for a level-0 check). To go, with
+        ``is_pyramid``, in a later minor release, once no supported eubi-bridge or
+        ome_zarr_pyramid release uses it (neither does)."""
+        warnings.warn("Image.pyramid is deprecated: it is the level-0 image, not the whole "
+                      "pyramid. Use image.resolutions[0]; image.level == 0 checks for "
+                      "level 0", DeprecationWarning, stacklevel=2)
         return self.resolutions[0]
 
     # A ragged image: its channels do not share one sampling (e.g. one channel
@@ -766,6 +772,14 @@ class File:
         in it (``x view 2``), the image shape and the pyramid levels."""
         from ._outline import outline_lines
         return "\n".join([self._header()] + ["  " + line for line in outline_lines(self)])
+
+    def _mosaic_levels(self, series: int, images: list):
+        """For the summary (``_outline``, Workplan MR28): whether ``tiles="mosaic"``
+        would give the tile *images* of series *series* as one image. None when it
+        would not, or when that is not known from what opening read; else the number
+        of resolution levels that image would have, 0 meaning as many as one tile.
+        Backends that place tiles on one canvas override it; it never reads the file."""
+        return None
 
     def _header(self) -> str:
         plates = f" plates={len(self.plates)}" if self.plates else ""

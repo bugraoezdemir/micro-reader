@@ -229,6 +229,8 @@ class _TilingFile(File):
         px = like.metadata.pixel_sizes
         if tiles == "mosaic" and not ("x" in px and "y" in px):
             raise UnsupportedFormatError(f"{path!r}: tiles='mosaic': its tiles have no pixel size")
+        #: tiles="mosaic" would place the tiles (the summary's hint, File._mosaic_levels)
+        self._can_mosaic = "x" in px and "y" in px
 
         images = []
         for g, (areas, info) in enumerate(groups):
@@ -252,6 +254,9 @@ class _TilingFile(File):
                     len(images), [(t, round(yi * step_y), round(xi * step_x)) for t, xi, yi, _c in placed],
                     f"{where} group {g}", {"series": g}, corner))
         super().__init__(path, images)
+
+    def _mosaic_levels(self, series: int, images: list):
+        return 0 if getattr(self, "_can_mosaic", False) else None
 
     def _declare_coordinate_systems(self):
         # one stage for the whole protocol (plan 4.10): every group's grid is

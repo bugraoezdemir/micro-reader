@@ -1149,6 +1149,17 @@ class _CziFile(File):
             per_series.setdefault(e.series, set()).add(e.mosaic)
         #: some series has several mosaic tiles
         self._tiled = any(len(m) > 1 for m in per_series.values())
+        #: read as separate tiles: series of several tiles -> the resolution levels its
+        #: mosaic has (1 + the stored zooms of its pyramid subblocks; not trusted in a
+        #: repaired directory), for the summary's hint (File._mosaic_levels, MR28)
+        self._mosaic_series = {}
+        if self._tiled and tiles == "separate":
+            for s, marks in per_series.items():
+                if len(marks) > 1:
+                    zooms = set() if self.damage else {
+                        round(e.stored_width / e.width, 6) for e in pyramid
+                        if e.series == s and e.width}
+                    self._mosaic_series[s] = 1 + len(zooms)
         #: indices this file has, besides "series"
         self._levels = (["tile"] if self._tiled and tiles == "separate" else []) + \
             [level for level, d in KEY_DIMS.items() if self._dim_sizes.get(d, 1) > 1]
@@ -1358,6 +1369,10 @@ class _CziFile(File):
                 d = KEY_DIMS[level]
                 values.append(e.plane.get(d, self._dim_starts[d]))
         return tuple(values)
+
+    def _mosaic_levels(self, series: int, images: list):
+        # a CZI places any series' tiles by their stored positions
+        return getattr(self, "_mosaic_series", {}).get(series)
 
     def canvas(self, **key) -> _CziImage:
         """All series composed on one canvas: the box around every level-0

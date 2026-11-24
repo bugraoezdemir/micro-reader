@@ -493,6 +493,42 @@ class _PlacedViews:
         return self._placement
 
 
+def _groups_of_tiles(pyramids: list) -> dict:
+    """Tile pyramids grouped by their index without the tile (one mosaic each)."""
+    groups: dict = {}
+    for pyramid in pyramids:
+        key = tuple((k, v) for k, v in pyramid[0].index.items() if k != "tile")
+        groups.setdefault(key, []).append(pyramid)
+    return groups
+
+
+def _mosaic_refusal(members: list, what: str) -> Optional[str]:
+    """Why the tile pyramids *members* cannot be one mosaic (``_mosaics``), or None.
+    From the XML alone: the summary's hint asks it too (File._mosaic_levels, MR28)."""
+    placed = [pyramid[0]._views.placement().position for pyramid in members]
+    if any(not {"x", "y"} <= set(position) for position in placed):
+        return (f"{what}: a tile has no position on the acquisition grid (its views turn, "
+                f"shear or mirror, or disagree): read the tiles with tiles='separate'")
+    for axis in sorted(set().union(*placed) - {"x", "y"}):
+        values = {round(position[axis].to(placed[0][axis].unit).value, 9)
+                  for position in placed if axis in position}
+        if len(values) > 1 or any(axis not in position for position in placed):
+            return (f"{what}: the tiles lie apart along {axis} ({sorted(values)}); a mosaic "
+                    f"places tiles in y and x only: read them with tiles='separate'")
+    sizes = [pyramid[0].metadata.pixel_sizes for pyramid in members]
+    unit = placed[0]["x"].unit
+    for axis in "yx":
+        if any(axis not in size for size in sizes):
+            return f"{what}: a tile has no pixel size along {axis}"
+        values = {round(size[axis].to(unit).value, 12) for size in sizes}
+        if len(values) != 1:
+            return f"{what}: the tiles' pixel sizes along {axis} differ ({sorted(values)})"
+    if len({len(pyramid) for pyramid in members}) != 1:
+        return (f"{what}: the tiles store different numbers of levels "
+                f"{sorted({len(p) for p in members})}")
+    return None
+
+
 def _mosaics(pyramids: list, where: str) -> list:
     """Each angle / illumination's tile pyramids as one pyramid of mosaics: every
     level's tiles at their nominal positions (``_place``), in pixels of that level
@@ -500,41 +536,19 @@ def _mosaics(pyramids: list, where: str) -> list:
     tile order, the later on top.  Refused (UnsupportedFormatError, naming why) when a
     tile has no position along y and x, the tiles lie apart along another axis (the
     canvas is a y / x plane), or their pixel sizes or numbers of levels differ."""
-    groups: dict = {}
-    for pyramid in pyramids:
-        key = tuple((k, v) for k, v in pyramid[0].index.items() if k != "tile")
-        groups.setdefault(key, []).append(pyramid)
+    groups = _groups_of_tiles(pyramids)
     out = []
     for key, members in groups.items():
         members.sort(key=lambda pyramid: pyramid[0].index["tile"])
         label = " ".join(f"{k} {v}" for k, v in key if k != "series")
         what = f"{where}: tiles='mosaic'{f' ({label})' if label else ''}"
+        refused = _mosaic_refusal(members, what)
+        if refused is not None:
+            raise UnsupportedFormatError(refused)
         placed = [pyramid[0]._views.placement().position for pyramid in members]
-        if any(not {"x", "y"} <= set(position) for position in placed):
-            raise UnsupportedFormatError(
-                f"{what}: a tile has no position on the acquisition grid (its views turn, "
-                f"shear or mirror, or disagree): read the tiles with tiles='separate'")
-        for axis in sorted(set().union(*placed) - {"x", "y"}):
-            values = {round(position[axis].to(placed[0][axis].unit).value, 9)
-                      for position in placed if axis in position}
-            if len(values) > 1 or any(axis not in position for position in placed):
-                raise UnsupportedFormatError(
-                    f"{what}: the tiles lie apart along {axis} ({sorted(values)}); a mosaic "
-                    f"places tiles in y and x only: read them with tiles='separate'")
         sizes = [pyramid[0].metadata.pixel_sizes for pyramid in members]
         unit = placed[0]["x"].unit
-        steps = []
-        for axis in "yx":
-            if any(axis not in size for size in sizes):
-                raise UnsupportedFormatError(f"{what}: a tile has no pixel size along {axis}")
-            values = {round(size[axis].to(unit).value, 12) for size in sizes}
-            if len(values) != 1:
-                raise UnsupportedFormatError(f"{what}: the tiles' pixel sizes along {axis} "
-                                             f"differ ({sorted(values)})")
-            steps.append(values.pop())
-        if len({len(pyramid) for pyramid in members}) != 1:
-            raise UnsupportedFormatError(f"{what}: the tiles store different numbers of "
-                                         f"levels {sorted({len(p) for p in members})}")
+        steps = [{round(size[axis].to(unit).value, 12) for size in sizes}.pop() for axis in "yx"]
         y0 = min(position["y"].to(unit).value for position in placed)
         x0 = min(position["x"].to(unit).value for position in placed)
         offsets = [((position["y"].to(unit).value - y0) / steps[0],
@@ -967,6 +981,14 @@ class _BdvFile(File):
         self._views = {}
         for image in images:
             self._views.setdefault(image_key(image), image._views)
+
+    def _mosaic_levels(self, series: int, images: list):
+        # the same checks as tiles="mosaic" (_mosaic_refusal), on the native images
+        pyramids = [list(getattr(image, "source", image).resolutions) for image in images]
+        for members in _groups_of_tiles(pyramids).values():
+            if len(members) > 1 and _mosaic_refusal(members, "") is not None:
+                return None
+        return 0
 
     def _declare_coordinate_systems(self):
         # BigDataViewer's global space (plan 4.8), when an image is placed in

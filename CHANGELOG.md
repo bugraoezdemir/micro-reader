@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### New
+
+- The file summary (`print(f)`) points to `tiles="mosaic"` on every series that is read
+  as separate tiles and whose tiles `tiles="mosaic"` can place on one canvas: Zeiss CZI,
+  Leica LIF and XLEF tile scans with stage positions, FluoView tiling sets and
+  BigDataViewer tiles that are not turned or apart along z. Where the mosaic has more
+  resolution levels than a tile, as on a Zeiss slide scan, the hint names them, for
+  example `(tiles="mosaic": its tiles as one image, with its 8 stored levels)`. Separate
+  tiles stay the default, because they are what the file stores. The hint uses only what
+  opening read, and it never points at an option that would then raise.
+
 ### Changed
 
 - A stepped read with a step of 4 or more (`image[::64]`, `image[:, ::8]`) reads only the
@@ -26,6 +37,18 @@
   (`("B", "G", "R")` for Nikon colour cameras). An RGB ND2 file that does not state its
   order is read as stored, with a warning: this includes every legacy ND2 file (versions 1
   and 2).
+- A one-file OME-TIFF plate whose `TiffData` elements name no file, as tifffile writes
+  them, opened as plain series with `plates=True`. Such planes are the file's own, as the
+  OME-TIFF specification says, and the file now opens as a plate. A companion file
+  (`.companion.ome`) still has to name the file of every plane.
+
+### Deprecated
+
+- `Image.pyramid` is deprecated and warns. Its name reads as "the whole pyramid", but it
+  returns one image, the level-0 image of the pyramid. Use `image.resolutions[0]`
+  instead, or `image.level == 0` to check for level 0. `Image.is_pyramid` (deprecated
+  since 0.4.0) now gives one warning instead of two. Both will be removed in a later
+  minor release.
 
 ## 0.5.0 (2026-11-17)
 

@@ -215,8 +215,9 @@ def test_the_outline_of_a_plate(tmp_path):
         ]
         assert repr(f) == f.outline()                 # short enough to show whole
     with micro_reader.open(path, plates=False) as f:   # not read as a plate: scenes
-        assert f.outline().splitlines()[1:] == [
-            f"  series {s}: tiles 0-1, tczyx (1, 1, 1, {H}, {W}) uint16" for s in range(3)]
+        assert f.outline().splitlines()[1:] == [        # (MR28: the tiles="mosaic" hint)
+            f"  series {s}: tiles 0-1, tczyx (1, 1, 1, {H}, {W}) uint16 "
+            '(tiles="mosaic": its tiles as one image)' for s in range(3)]
 
 
 def test_repr_shows_the_start_of_a_long_outline(tmp_path):
@@ -253,14 +254,14 @@ def test_an_image_is_a_pyramid_or_a_level(tmp_path):
     _pyramid_tiff(path, data)
     with micro_reader.open(path) as f:
         (image,) = f.images
-        assert image.level == 0 and image.pyramid is image
+        assert image.level == 0 and image.resolutions[0] is image
         for k, lv in enumerate(image.resolutions):
-            assert lv.level == k and lv.pyramid is image
+            assert lv.level == k and lv.resolutions[0] is image
             assert (lv.level == 0) == (k == 0)
     with micro_reader.open(path, resolutions="all") as f:
         assert [im.level for im in f.images] == [0, 1, 2]
         assert [im.level == 0 for im in f.images] == [True, False, False]
-        assert all(im.pyramid is f.images[0] for im in f.images)
+        assert all(im.resolutions[0] is f.images[0] for im in f.images)
 
 
 def test_an_image_without_levels_is_its_own_pyramid(tmp_path):
@@ -269,7 +270,7 @@ def test_an_image_without_levels_is_its_own_pyramid(tmp_path):
     tifffile.imwrite(path, np.zeros((8, 9), "u1"))
     with micro_reader.open(path) as f:
         (image,) = f.images
-        assert image.level == 0 and image.pyramid is image
+        assert image.level == 0 and image.resolutions[0] is image
         assert not image.is_pyramidal
 
 

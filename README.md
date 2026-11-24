@@ -112,7 +112,7 @@ len(image.resolutions)
 overview = image.resolutions[-1].read()
 ```
 
-With `tiles="mosaic"`, tiles are placed at their recorded positions on a common canvas. They are not registered or blended. By default, tiles remain separate images with their own stage positions, which is useful when you want to perform registration or stitching yourself.
+With `tiles="mosaic"`, tiles are placed at their recorded positions on a common canvas. They are not registered or blended. By default, tiles remain separate images with their own stage positions, which is useful when you want to perform registration or stitching yourself. Separate tiles are the default because they are what the file stores, for every format. Slide scans usually want `tiles="mosaic"`, and `print(f)` points to it on every series whose tiles it can place.
 
 ### Example: a high-content screening plate
 
