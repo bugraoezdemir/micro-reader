@@ -295,6 +295,11 @@ class AxesImage(Image):
         return AxesImage(self.source, self.axes, samples=self._samples_policy,
                          squeeze=axes or True, _select=dict(self._select))
 
+    @property
+    def exact_reads(self) -> bool:
+        """The native image's: presenting other axes reads the same bytes."""
+        return self.source.exact_reads
+
     def close(self) -> None:
         self.source.close()
 

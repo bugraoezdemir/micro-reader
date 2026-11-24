@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- A stepped read with a step of 4 or more (`image[::64]`, `image[:, ::8]`) reads only the
+  positions it keeps, one at a time, from images whose pixels are stored uncompressed (MRC,
+  DeltaVision, LIF, uncompressed ICS and TIFF), and from compressed images when the step is at
+  least twice their tile or strip, so that whole tiles are skipped. Before, it read runs of positions and thinned
+  them, so `[::64]` of a 6.9 GB MRC read the whole file (4.7 s); now it reads the 1/64 it
+  keeps (0.15 s). Smaller steps, and compressed images whose tiles are not declared (CZI,
+  VSI), keep the runs, which measured faster there.
+
 ## 0.5.0 (2026-11-17)
 
 Requires micro-reader-core 0.0.1 (new, `>=0.0.1,<0.1`), the native read engine, and
