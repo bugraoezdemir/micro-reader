@@ -651,6 +651,14 @@ class _LifFile(File):
             raise
         super().__init__(path, images)
 
+    def _mosaic_levels(self, series: int, images: list):
+        # tiles="mosaic" needs the tiles' stage positions and pixel sizes (``_mosaic``),
+        # which come from the XML opening parsed; a scan's flags are the same for all its
+        # tiles, so the first tells
+        md = getattr(images[0], "source", images[0]).metadata
+        placed = all(a in md.position and a in md.pixel_sizes for a in "xy")
+        return 0 if placed else None
+
     def _declare_coordinate_systems(self):
         # the systems the series' positions are in (plan 4.4, K1-2): one "stage",
         # or one "stage-r<k>" per session ("stage-s<series>" for a series that

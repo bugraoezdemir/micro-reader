@@ -41,7 +41,7 @@ The end of the printout shows the read unit, which is `any rectangle` or a unit 
 | `resolutions` | `list[Image]` | The pyramid, with full resolution first. It is `[self]` when the file stores no lower levels. |
 | `is_pyramidal` | `bool` | `len(resolutions) > 1`. |
 | `level` | `int` | The level of this image. Level 0 is full resolution. |
-| `pyramid` | `Image` | The level-0 image of this pyramid. At level 0 it is the image itself. |
+| `pyramid` | `Image` | Deprecated since 0.5.1. Use `image.resolutions[0]` for the level-0 image, or `image.level == 0` to check for level 0. |
 | `is_pyramid` | `bool` | Deprecated since 0.4.0. Use `image.level == 0` instead. |
 
 ### Ragged-image attributes

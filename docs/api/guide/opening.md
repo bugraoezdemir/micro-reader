@@ -125,7 +125,9 @@ To organise a folder containing many images into groups, use [`group_files`](mul
 
 ### `tiles`: separate tiles or combine them into a mosaic
 
-By default, every tile is exposed as a separate image with a `tile` index. Pass `tiles="mosaic"` to combine the tiles into one image per series, placed on a shared canvas.
+By default, every tile is exposed as a separate image with a `tile` index. Separate tiles are the default because they are what the file stores: a mosaic places them by their recorded positions, without registration, and registration or stitching downstream needs the tiles themselves. The default is also the same for every format, since only some formats can place their tiles.
+
+Pass `tiles="mosaic"` to combine the tiles into one image per series, placed on a shared canvas. Slide scans usually want this: a Zeiss slide scan opens as thousands of camera tiles, and its stored pyramid is reached only through the mosaic. The file summary (`print(f)`) says so on every series whose tiles `tiles="mosaic"` can place, and names the stored levels when the mosaic has more of them than a tile.
 
 **Separate tiles (default):**
 
@@ -136,7 +138,7 @@ print(f)
 
 ```text
 <micro_reader.File 'mosaic.czi' backend='czi' format='czi' images=8>
-  series 0: tiles 0-3, x illumination 2, tczyx (1, 3, 41, 1000, 1500) uint16
+  series 0: tiles 0-3, x illumination 2, tczyx (1, 3, 41, 1000, 1500) uint16 (tiles="mosaic": its tiles as one image)
 ```
 
 **Mosaic:**

@@ -178,8 +178,13 @@ class Core:
     """A companion file, parsed: its images (``series``), the UUID it lists
     for each member and the IFDs it uses of it, the path notes."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, own_planes: bool = False):
         self.path = path
+        #: an OME-TIFF holding its own OME-XML: a TiffData that names no file refers to
+        #: this file, as the OME-TIFF specification has it (tifffile writes them so;
+        #: Workplan MR33). Off for companion files, which hold no pixels, and for every
+        #: route but plates=True on such a TIFF (backends/tiff.py _ome_plate)
+        self.own_planes = own_planes
         try:
             self.root = _ome_root(path)
         except ET.ParseError as exc:
@@ -246,11 +251,17 @@ class Core:
     def _tiffdata(self, series: _Series, data, where: str) -> None:
         uuid = _children(data, "UUID")
         name = uuid[0].get("FileName") if uuid else None
-        if not name:
+        if not name and self.own_planes:
+            # this file's own planes: its path, and the UUID the XML gives this file
+            name = os.path.basename(self.path)
+            listed = ((uuid[0].text or "").strip() if uuid else "") or self.uuid
+            member = os.path.normpath(os.path.abspath(self.path))
+        elif not name:
             raise CorruptFileError(f"{where}: a TiffData names no file (a companion holds no "
                                    "pixels of its own)")
-        listed = (uuid[0].text or "").strip() or None
-        member = self._resolve(name)
+        else:
+            listed = (uuid[0].text or "").strip() or None
+            member = self._resolve(name)
         try:
             first = series.flat(int(data.get("FirstT", 0)), int(data.get("FirstC", 0)),
                                  int(data.get("FirstZ", 0)))
@@ -488,22 +499,22 @@ _cores: "OrderedDict[tuple, Core]" = OrderedDict()
 _cores_lock = threading.Lock()
 
 
-def load(path: str) -> Core:
+def load(path: str, own_planes: bool = False) -> Core:
     """The parsed companion at *path*, parsed once per process while it does not
     change (by path, modification time and size); the CORE_CACHE most recently
-    used are kept."""
+    used are kept. *own_planes*: see ``Core``."""
     path = os.path.abspath(path)
     try:
         stat = os.stat(path)
     except OSError as exc:
         raise CorruptFileError(f"{path!r}: {exc}") from None
-    key = (os.path.normcase(path), stat.st_mtime_ns, stat.st_size)
+    key = (os.path.normcase(path), stat.st_mtime_ns, stat.st_size, own_planes)
     with _cores_lock:
         core = _cores.get(key)
         if core is not None:
             _cores.move_to_end(key)
             return core
-    core = Core(path)
+    core = Core(path, own_planes)
     with _cores_lock:
         _cores[key] = core
         while len(_cores) > CORE_CACHE:
@@ -645,11 +656,12 @@ class _CompanionFile(File):
         return (CoordinateSystem(STAGE),)        # every Plane position (plan 4.6)
 
     def __init__(self, path: str, plates: bool = False, *, companion: str = None,
-                 plan: list = None):
+                 plan: list = None, own_planes: bool = False):
         """*path* (``File.path``) reads the companion file *companion* (default:
         *path*); *plan*: the plates as ``Core.plates`` gives them, from a backend
-        that knows them from elsewhere (ScanR: backends/scanr.py)."""
-        core = load(companion or path)
+        that knows them from elsewhere (ScanR: backends/scanr.py); *own_planes*: an
+        OME-TIFF whose TiffData without a file name are its own planes (``Core``)."""
+        core = load(companion or path, own_planes)
         if core.moved:
             written, used = core.moved[0]
             warnings.warn(CompanionWarning(

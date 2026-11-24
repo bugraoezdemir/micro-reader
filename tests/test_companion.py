@@ -357,7 +357,7 @@ def test_a_companion_is_parsed_once_while_it_does_not_change(tmp_path, monkeypat
     path, _data = _write(str(tmp_path))
     parsed = []
     real = companion.Core
-    monkeypatch.setattr(companion, "Core", lambda p: parsed.append(p) or real(p))
+    monkeypatch.setattr(companion, "Core", lambda p, *a: parsed.append(p) or real(p, *a))
     companion._cores.clear()
     for _ in range(3):
         _native(path).close()
@@ -1077,19 +1077,67 @@ def test_an_ome_tiff_plate_opens_as_a_plate_from_the_master_or_a_member(tmp_path
             assert [im.index for im in f.images][-1] == {"series": 0}   # the title image beside
 
 
-def test_a_single_file_ome_tiff_plate_the_companion_route_cannot_read_opens_as_before(tmp_path):
-    """Planes that name no file: no plate from plates=True, and no error (eubi
-    always asks for plates)."""
-    path = str(tmp_path / "single.ome.tif")
-    xml = (f'<OME xmlns="{NS}"><Plate ID="Plate:0" Rows="8" Columns="12"><Well ID="Well:0" Row="0" '
-           f'Column="0"><WellSample ID="WellSample:0" Index="0"><ImageRef ID="Image:0"/>'
-           f'</WellSample></Well></Plate><Image ID="Image:0"><Pixels ID="Pixels:0" '
-           f'DimensionOrder="XYZCT" Type="uint16" SizeX="{X}" SizeY="{Y}" SizeZ="1" SizeC="1" '
-           f'SizeT="1"><Channel ID="Channel:0:0" SamplesPerPixel="1"/><TiffData IFD="0" '
-           f'PlaneCount="1"/></Pixels></Image></OME>')
-    tifffile.imwrite(path, np.ones((Y, X), "u2"), description=xml.encode("utf-8"), metadata=None)
+def _one_file_plate(path, fields=2, uuid_child=False):
+    """A one-file OME-TIFF plate as tifffile writes one: each Image's TiffData gives
+    IFD and PlaneCount and names no file (*uuid_child*: a UUID without FileName);
+    two fields of well B3 on a 96-well plate, one field per IFD."""
+    data = [np.full((Y, X), 100 * (f + 1), "u2") + np.arange(X, dtype="u2") for f in range(fields)]
+    own = "urn:uuid:one-file-plate"
+    tiffdata = (lambda f: f'<TiffData IFD="{f}" PlaneCount="1"><UUID>{own}</UUID></TiffData>'
+                if uuid_child else f'<TiffData IFD="{f}" PlaneCount="1"/>')
+    images = "".join(
+        f'<Image ID="Image:{f}" Name="B3 field {f}"><Pixels ID="Pixels:{f}" '
+        f'DimensionOrder="XYZCT" Type="uint16" SizeX="{X}" SizeY="{Y}" SizeZ="1" SizeC="1" '
+        f'SizeT="1"><Channel ID="Channel:{f}:0" SamplesPerPixel="1"/>{tiffdata(f)}'
+        f'</Pixels></Image>' for f in range(fields))
+    samples = "".join(f'<WellSample ID="WellSample:{f}" Index="{f}"><ImageRef ID="Image:{f}"/>'
+                      f'</WellSample>' for f in range(fields))
+    xml = (f'<OME xmlns="{NS}" UUID="{own}"><Plate ID="Plate:0" Name="one file" Rows="8" '
+           f'Columns="12"><Well ID="Well:0" Row="1" Column="2">{samples}</Well></Plate>'
+           f'{images}</OME>')
+    with tifffile.TiffWriter(path) as tw:
+        for f, plane in enumerate(data):
+            tw.write(plane, description=xml.encode("utf-8") if f == 0 else None, metadata=None)
+    return data
+
+
+@pytest.mark.parametrize("uuid_child", [False, True], ids=["no-uuid", "uuid-without-name"])
+def test_a_one_file_ome_tiff_plate_whose_planes_name_no_file_is_a_plate(tmp_path, uuid_child):
+    """Planes that name no file are the file's own (OME-TIFF specification; tifffile
+    writes them so): plates=True reads the plate (Workplan MR33). Before, the file read
+    as plain series."""
+    path = str(tmp_path / "plate.ome.tif")
+    data = _one_file_plate(path, uuid_child=uuid_child)
     with micro_reader.open(path, plates=True) as f:
-        assert f.backend == "tiff" and f.plates == [] and len(f.images) == 1
+        assert (f.backend, f.format) == ("tiff", "ome-tiff")
+        (plate,) = f.plates
+        assert plate.name == "one file"
+        assert (len(plate.row_names), len(plate.column_names)) == (8, 12)
+        (well,) = plate.wells
+        assert well.name == "B3" and [x.index for x in well.fields] == [0, 1]
+        for field, want in zip(well.fields, data):
+            np.testing.assert_array_equal(np.asarray(field.image[0, 0, 0]), want)
+
+
+def test_a_one_file_ome_tiff_plate_without_plates_reads_as_series(tmp_path):
+    path = str(tmp_path / "plate.ome.tif")
+    data = _one_file_plate(path)
+    with micro_reader.open(path, plates=False) as f:
+        assert f.plates == [] and len(f.images) == 2
+        np.testing.assert_array_equal(np.asarray(f.images[1][...]).reshape(Y, X), data[1])
+
+
+def test_a_companion_file_whose_planes_name_no_file_is_still_refused(tmp_path):
+    """A companion file holds no pixels: a TiffData there must name its file."""
+    path = str(tmp_path / "set.companion.ome")
+    xml = (f'<OME xmlns="{NS}"><Image ID="Image:0"><Pixels ID="Pixels:0" DimensionOrder="XYZCT" '
+           f'Type="uint16" SizeX="{X}" SizeY="{Y}" SizeZ="1" SizeC="1" SizeT="1">'
+           f'<Channel ID="Channel:0:0" SamplesPerPixel="1"/><TiffData IFD="0" PlaneCount="1"/>'
+           f'</Pixels></Image></OME>')
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    with pytest.raises(micro_reader.MicroReaderError, match="names no file"):
+        micro_reader.open(path)
 
 
 def test_cq1_measurement_result_is_a_plate():

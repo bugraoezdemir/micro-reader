@@ -89,3 +89,26 @@ def test_is_pyramid_is_deprecated_for_level(tmp_path):
         with pytest.warns(DeprecationWarning, match="image.level == 0"):
             assert image.is_pyramid
         assert image.level == 0 and not image.is_pyramidal
+
+
+def test_pyramid_is_deprecated_for_resolutions_0(tmp_path):
+    """Image.pyramid reads as "the whole pyramid" but is one image, the level-0 image
+    (Workplan MR29): it warns, names the way out, and still returns resolutions[0]."""
+    path = tmp_path / "a.tif"
+    tifffile.imwrite(path, np.zeros((6, 8), np.uint8))
+    with micro_reader.open(str(path)) as f:
+        image = f.images[0]
+        with pytest.warns(DeprecationWarning, match=r"image\.resolutions\[0\]"):
+            assert image.pyramid is image.resolutions[0]
+
+
+def test_is_pyramid_warns_once(tmp_path):
+    """is_pyramid no longer goes through pyramid, so it gives its own warning only."""
+    import warnings
+    path = tmp_path / "a.tif"
+    tifffile.imwrite(path, np.zeros((6, 8), np.uint8))
+    with micro_reader.open(str(path)) as f:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            f.images[0].is_pyramid
+    assert [str(w.message).split(":")[0] for w in caught] == ["Image.is_pyramid is deprecated"]

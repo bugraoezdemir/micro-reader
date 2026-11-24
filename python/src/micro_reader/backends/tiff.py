@@ -1595,19 +1595,20 @@ def _ome_plate(tif, path: str):
     """``plates=True`` on an OME-TIFF holding its own OME-XML with a ``Plate``
     (CQ1's ``MeasurementResult.ome.tif``): the file read as the companion it is
     (backends/companion.py: plates, wells, fields), when that reader can read
-    it -- every plane names its file; else None, and it reads as before, without
-    a plate.  Takes over *tif* (closed) when it returns the file."""
+    it; else None, and it reads as before, without a plate.  A plane that names no
+    file is one of this file's own (as tifffile writes a one-file OME-TIFF; Workplan
+    MR33).  Takes over *tif* (closed) when it returns the file."""
     if tif.is_micromanager or "<Plate" not in (tif.ome_metadata or ""):
         return None
     from . import companion as ome_set
     try:
-        core = ome_set.load(path)
+        core = ome_set.load(path, own_planes=True)
     except (CorruptFileError, UnsupportedFormatError):
-        return None                     # planes without file names: no companion route
+        return None                     # XML the companion route cannot read
     if not any(plate["places"] for plate in core.plates()):
         return None
     try:
-        found = ome_set._CompanionFile(path, plates=True)
+        found = ome_set._CompanionFile(path, plates=True, own_planes=True)
     except ome_set.NotInItsSet:
         return None                     # a file its own OME-XML does not list (CQ1's MIP)
     tif.close()
