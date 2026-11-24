@@ -12,7 +12,9 @@ experiment loops, outermost first.  Structure parsing is ported from nd2
 - "Lossless" frames are one zlib stream each: decoded whole, cached.
 
 Images are the XY positions, indexed by ``series`` (bioio-nd2 calls them scenes); axes ``tczyx``, plus ``s``
-for RGB components.  With ``plates=True``, a file whose every XY point is
+for RGB components, read in R, G, B(, A) order from the order the camera block declares
+(``stored_sample_order``: Nikon colour cameras store B, G, R; a file that does not state it
+is read as stored, with a warning).  With ``plates=True``, a file whose every XY point is
 named after a well as NIS-Elements names them (``A10_0000``, ``B02_0003``,
 ``E8.1``: JOBS and ND acquisitions over a well plate; a counter after the well
 or a zero-padded column, ``NIS_WELL_POINT``, so that ``P1``, ``S2`` stay
@@ -35,6 +37,7 @@ import os
 import re
 import struct
 import threading
+import warnings
 import zlib
 
 import numpy as np
@@ -64,6 +67,60 @@ RAW_TASK_BYTES = 8 << 20          # uncompressed frames are read in row pieces o
 SEPARATE_READ_BYTES = 32 << 10    # bytes worth skipping rather than issuing one more read
 STREAM_PIECE_BYTES = 8 << 20      # rows of a streamed "lossless" frame decoded at a time
 TIMESTAMP_BYTES = 8               # each frame chunk starts with a float64 timestamp
+#: a camera component's name -> (the sample it holds, its colour as NIS writes it,
+#: 0x00BBGGRR; None: not checked)
+SAMPLE_NAMES = {"red": ("R", 0x0000FF), "green": ("G", 0x00FF00), "blue": ("B", 0xFF0000),
+                "alpha": ("A", None)}
+#: the order samples are read in, by their count
+READ_ORDER = {3: ("R", "G", "B"), 4: ("R", "G", "B", "A")}
+
+
+def stored_sample_order(picture: dict, samples: int):
+    """The order the file stores each pixel's RGB samples in, as letters (Nikon
+    colour cameras: ``("B", "G", "R")``), or None when the file does not settle it.
+
+    The order comes from the camera block of each channel's sample setting
+    (``sPicturePlanes/sSampleSetting/a<k>/pCameraSetting/Metadata/Channels/Channel_<i>``):
+    each component's ``Name`` (Blue, Green, Red) gives its sample, and its ``Color``
+    must agree. Not settled: no such block, a name or colour that does not fit, not
+    one of each sample, a count other than 3 or 4, or channels that disagree."""
+    if samples not in READ_ORDER:
+        return None
+    settings = ((picture.get("sPicturePlanes") or {}).get("sSampleSetting") or {})
+    orders = set()
+    for setting in (settings.values() if isinstance(settings, dict) else ()):
+        meta = ((setting or {}).get("pCameraSetting") or {}).get("Metadata") or {}
+        components = meta.get("Channels") or {}
+        if not isinstance(components, dict) or len(components) != samples:
+            return None
+        order = []
+        for i in range(samples):
+            component = components.get(f"Channel_{i}") or {}
+            known = SAMPLE_NAMES.get(str(component.get("Name", "")).strip().lower())
+            if known is None:
+                return None
+            letter, colour = known
+            if colour is not None and component.get("Color") != colour:
+                return None
+            order.append(letter)
+        if sorted(order) != sorted(READ_ORDER[samples]):
+            return None
+        orders.add(tuple(order))
+    return orders.pop() if len(orders) == 1 else None
+
+
+def _sample_index(stored: np.ndarray):
+    """Stored sample positions as a slice when they are evenly spaced (a view, no
+    copy: B, G, R reversed is ``slice(2, None, -1)``), else as the array itself."""
+    if len(stored) == 0:
+        return slice(0, 0)
+    if len(stored) == 1:
+        return slice(int(stored[0]), int(stored[0]) + 1)
+    steps = np.diff(stored)
+    if steps[0] != 0 and (steps == steps[0]).all():
+        stop = int(stored[-1] + steps[0])
+        return slice(int(stored[0]), None if stop < 0 else stop, int(steps[0]))
+    return stored
 
 
 def sniff(head: bytes, path: str) -> bool:
@@ -114,6 +171,21 @@ class Nd2Parser:
             raise UnsupportedFormatError(f"{path!r}: {a.components} components "
                                          f"for {a.channels} channels")
         self.samples = a.components // a.channels
+        #: the order the file stores RGB samples in, e.g. ("B", "G", "R"); None when
+        #: the file does not state it (or for one sample). Reads give R, G, B(, A).
+        self.sample_order = None
+        #: read sample i -> its stored position, or None: read as stored
+        self._stored = None
+        if self.samples > 1:
+            self.sample_order = stored_sample_order(self.picture, self.samples)
+            if self.sample_order is None:
+                warnings.warn(f"{path!r}: the file does not state the order of its "
+                              f"{self.samples} colour samples; they are read as stored and "
+                              "named R, G, B", stacklevel=4)
+            else:
+                stored = [self.sample_order.index(s) for s in READ_ORDER[self.samples]]
+                if stored != list(range(self.samples)):
+                    self._stored = np.array(stored)
         self.dtype = np.dtype(a.dtype)
         self.pixel_bytes = a.components * self.dtype.itemsize
         if a.width_bytes < a.width * self.pixel_bytes:
@@ -131,6 +203,14 @@ class Nd2Parser:
 
     def size(self, kind: str) -> int:
         return next((loop.count for loop in self.loops if loop.kind == kind), 1)
+
+    def stored_samples(self, ss: slice):
+        """The stored positions of read samples *ss* (R, G, B order): *ss* itself
+        when the file stores them in that order, else a slice or index array into
+        the stored samples."""
+        if self._stored is None:
+            return ss
+        return _sample_index(self._stored[ss])
 
     def frame_number(self, t: int, p: int, z: int) -> int:
         index = {"T": t, "P": p, "Z": z}
@@ -195,13 +275,22 @@ class _Nd2Image(Image):
                          name=f"{os.path.basename(nd2.path)} position {position}",
                          read_unit=unit, index=index)
 
+    @property
+    def sample_order(self):
+        """The order the file stores the RGB samples in, e.g. ``("B", "G", "R")``
+        (Nikon colour cameras); None when the file does not state it or the image
+        has one sample. Reads always give R, G, B(, A) on the ``s`` axis."""
+        return self._f.sample_order
+
     def _read_block(self, block):
         if self._closed:
             raise ValueError("this ND2 image has been closed: its file was closed "
                              "(File.close() or the end of a with block)")
         ts, cs, zs, ys, xs = block[:5]
         ss = block[5] if self._rgb else slice(0, 1)
-        out = np.empty(tuple(s.stop - s.start for s in block), dtype=self.dtype)
+        out_shape = tuple(s.stop - s.start for s in block)
+        ss = self._f.stored_samples(ss)                      # read R, G, B from the stored order
+        out = np.empty(out_shape, dtype=self.dtype)
         view = out if self._rgb else out[..., None]          # always (..., s)
         tasks = []
         for t, z in itertools.product(range(ts.start, ts.stop), range(zs.start, zs.stop)):
