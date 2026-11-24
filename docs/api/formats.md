@@ -210,6 +210,7 @@ Subblocks that cannot be located raise an error when read. Other readers may fai
 
 - ND2 version 3 and later are supported. Legacy JPEG 2000 ND2 files (versions 1 and 2) are also supported with `format="nd2-legacy"`.
 - Each XY position is represented as a `series` and exposed as one image with `t c z y x` axes. RGB images are returned as three channels.
+- RGB samples are returned in red, green, blue order. Nikon colour cameras store them as blue, green, red, and the file says so in its camera metadata. `image.sample_order` gives the order the file stores. A file that does not state the order, such as a legacy ND2 file, is read as stored, with a warning.
 - An ND2 file whose XY points are named after wells (for example, `A10_0000` and `B02_0003`) is opened as a plate.
 - A folder containing ND2 files from one NIS-Elements well-plate run is also opened as a plate, whether there is one file per well or one per point. Opening any file in the folder opens the plate. Pass `multifile=False` to read only the specified file.
 

@@ -343,6 +343,11 @@ class _IcsImage(Image):
         #: gzip: the deflate stream (offset, length) inside the gzip member
         self._deflate = _deflate_span(data, offset, layout) if layout.compression == "gzip" else None
 
+    @property
+    def exact_reads(self) -> bool:
+        """Uncompressed pixels are read exactly; a gzip stream is inflated in order."""
+        return self._deflate is None
+
     def _open(self):
         if self._deflate is not None:
             reader = _Inflated(self._data, *self._deflate, self._layout.nbytes)

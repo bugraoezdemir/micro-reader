@@ -640,6 +640,11 @@ class _TiffImage(Image):
 
     # -- reading --------------------------------------------------------------
 
+    @property
+    def exact_reads(self) -> bool:
+        """Uncompressed pages (no ``read_unit``) are read exactly."""
+        return self._raw
+
     def _read_block(self, block):
         if self._closed:
             raise ValueError("this TIFF image has been closed: its file was closed "

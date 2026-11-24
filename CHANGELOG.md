@@ -13,8 +13,30 @@
   tiles stay the default, because they are what the file stores. The hint uses only what
   opening read, and it never points at an option that would then raise.
 
+### Changed
+
+- A stepped read with a step of 4 or more (`image[::64]`, `image[:, ::8]`) reads only the
+  positions it keeps, one at a time, from images whose pixels are stored uncompressed (MRC,
+  DeltaVision, LIF, uncompressed ICS and TIFF), and from compressed images when the step is at
+  least twice their tile or strip, so that whole tiles are skipped. Before, it read runs of positions and thinned
+  them, so `[::64]` of a 6.9 GB MRC read the whole file (4.7 s); now it reads the 1/64 it
+  keeps (0.15 s). Smaller steps, and compressed images whose tiles are not declared (CZI,
+  VSI), keep the runs, which measured faster there.
+
 ### Fixed
 
+- RGB ND2 files had red and blue swapped. Nikon colour cameras store each pixel's samples as
+  blue, green, red, and the file says so in its camera metadata. micro-reader passed the
+  samples on as stored but named them red, green, blue, so `"<name> R"` held the blue
+  sample. The ND2 reader now reads the order the file declares and returns the samples as
+  red, green, blue on every read path, as it already did for CZI and VSI. This is a visible
+  change for every RGB ND2 file: outputs written with earlier releases keep red and blue
+  swapped, and a channel-colour override set to work around it now swaps them again. The
+  nd2 package and Bio-Formats pass the samples on as stored, so their pixels differ from
+  micro-reader's by the order of the samples. `image.sample_order` gives the stored order
+  (`("B", "G", "R")` for Nikon colour cameras). An RGB ND2 file that does not state its
+  order is read as stored, with a warning: this includes every legacy ND2 file (versions 1
+  and 2).
 - A one-file OME-TIFF plate whose `TiffData` elements name no file, as tifffile writes
   them, opened as plain series with `plates=True`. Such planes are the file's own, as the
   OME-TIFF specification says, and the file now opens as a plate. A companion file

@@ -95,7 +95,8 @@ def _loop(kind: str, count: int, inner: dict | None, valid=None, ne_periods=None
 def write_nd2(path, frames: np.ndarray, loops: list, *, compression: str | None = None,
               pad_bytes: int = 0, missing=(), valid_positions=None, ne_periods=None,
               picture: dict | None = None, plane_fields: dict | None = None,
-              point_names=None, wellplate=None, stamps=None) -> None:
+              point_names=None, wellplate=None, stamps=None,
+              sample_names=None) -> None:
     """*frames*: (n_frames, height, width, channels, samples) in frame order.
     *stamps*: each frame's timestamp (ms); default 100 ms per step of the time loop.
     *loops*: [(kind, count)] outermost first, kind in T / NE / P / Z; the
@@ -105,7 +106,11 @@ def write_nd2(path, frames: np.ndarray, loops: list, *, compression: str | None 
     *plane_fields*: {channel: fields} for that channel's picture plane.
     *point_names*: the XY points' names (``dPosName``; default ``p0``, ``p1``, ...).
     *wellplate*: (rows, columns, model name) of the well plate of a NIS-Elements job
-    (a ``CustomData|JobDefinitionV1_0!`` chunk: "LV0Z", the length, zlib of the job)."""
+    (a ``CustomData|JobDefinitionV1_0!`` chunk: "LV0Z", the length, zlib of the job).
+    *sample_names*: the colour camera's components in stored order, as (Name, Color)
+    pairs, e.g. [("Blue", 0xFF0000), ("Green", 0x00FF00), ("Red", 0x0000FF)] as Nikon
+    colour cameras write them (Color 0x00BBGGRR); written into every channel's
+    sample setting (``sPicturePlanes/sSampleSetting/a<c>/pCameraSetting/Metadata``)."""
     n, height, width, channels, samples = frames.shape
     dtype = frames.dtype
     bpc = dtype.itemsize * 8
@@ -141,6 +146,12 @@ def write_nd2(path, frames: np.ndarray, loops: list, *, compression: str | None 
     meta = {"bCalibrated": True, "dCalibration": 0.5,
             "sPicturePlanes": {"uiCount": channels, "sPlaneNew": planes,
                                "uiSampleCount": channels}}
+    if sample_names is not None:
+        camera = {"Metadata": {"ChannelCount": len(sample_names), "Channels": {
+            f"Channel_{i}": {"Color": color, "Name": name, "ChannelIsActive": 1}
+            for i, (name, color) in enumerate(sample_names)}}}
+        meta["sPicturePlanes"]["sSampleSetting"] = {
+            f"a{c}": {"pCameraSetting": camera} for c in range(channels)}
     meta.update(picture or {})
 
     out = bytearray(_chunk(FILE_SIGNATURE, b"Ver3.0".ljust(64, b"\x00")))
