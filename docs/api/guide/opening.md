@@ -211,10 +211,20 @@ f.images[0].shape    # (1, 1, 80, 256, 300)
                      # with axes=None: (80, 256, 300)
 ```
 
+A file can have more than one unnamed dimension. For example, tifffile writes a 4-D array without axis names as `QQYX`, two unnamed dimensions before y and x. They could be t and z, c and z, t and c, or the other way round, and the file does not say which. Give one letter per dimension, in the order the file stores them (the outer one first):
+
+```python
+f = micro_reader.open("unnamed.tif", rename={"sequence": "tz"})
+
+f.images[0].shape    # with axes=None: (2, 3, 32, 48), t then z
+```
+
+A single letter for two unnamed dimensions is refused, since reading them as one axis would be a guess. The error message lists the dimensions and their sizes.
+
 The following rules apply:
 
 - **Keys:** Only indices sampled at the same points can be renamed: `illumination`, `phase`, `block`, `emission`, `excitation`, `lifetime` and `sequence`.
-- **Values:** Each key must map to `"t"`, `"c"` or `"z"`. Two keys cannot map to the same axis.
+- **Values:** Each key maps to `"t"`, `"c"` or `"z"`, or to one of these letters per dimension of that index (`"tz"`), outer first. A dimension of size 1 needs no letter. No axis can be given twice, within one key or across keys.
 - **Backend support:** Currently, only the TIFF backend supports `rename`. For other backends, it raises `UnsupportedFormatError` if the file contains the specified index. If the index is absent, the option has no effect.
 
 You can pass the same `rename` mapping to a batch of files. Files without the specified index are left unchanged:

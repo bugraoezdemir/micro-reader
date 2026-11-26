@@ -190,6 +190,82 @@ def test_bad_renames_are_errors(tmp_path, rename, match):
         micro_reader.open(path, rename=rename)
 
 
+def _unnamed_tiff(tmp_path, shape):
+    """tifffile writes an array without axes as Q...QYX: each Q a 'sequence' axis."""
+    tifffile = pytest.importorskip("tifffile")
+    data = RNG.integers(0, 255, shape).astype("u1")
+    path = str(tmp_path / "unnamed.tif")
+    tifffile.imwrite(path, data, photometric="minisblack")   # 3 is no RGB sample axis
+    return path, data
+
+
+@pytest.mark.parametrize("letters", ["tz", "cz", "zt", "tc"])
+def test_rename_names_each_unnamed_axis(tmp_path, letters):
+    """Two unnamed axes (QQYX) can be anything: rename gives one letter per axis, in
+    file order, and nothing is assumed (Workplan MR36)."""
+    path, data = _unnamed_tiff(tmp_path, (2, 3, 8, 12))
+    with micro_reader.open(path) as f:                  # without rename: one image a plane
+        assert len(f.images) == 6 and all(i.axes == "yx" for i in f.images)
+    with micro_reader.open(path, rename={"sequence": letters}, axes=None) as f:
+        (image,) = f.images                             # the file's own order
+        assert "sequence" not in image.index
+        assert image.axes == letters + "yx"
+        np.testing.assert_array_equal(image[...], data)
+    with micro_reader.open(path, rename={"sequence": letters}, axes="tczyx") as f:
+        (image,) = f.images                             # t c z y x
+        assert image.axes == "tczyx"
+        view = data
+        if "tczyx".index(letters[0]) > "tczyx".index(letters[1]):
+            view = data.transpose(1, 0, 2, 3)           # 'zt': t is the second Q
+        absent = next(a for a in "tcz" if a not in letters)
+        np.testing.assert_array_equal(image[...],
+                                      np.expand_dims(view, "tcz".index(absent)))
+
+
+def test_rename_names_three_unnamed_axes(tmp_path):
+    path, data = _unnamed_tiff(tmp_path, (2, 2, 3, 8, 12))
+    with micro_reader.open(path, rename={"sequence": "tcz"}) as f:
+        (image,) = f.images
+        assert image.axes == "tczyx" and image.shape == (2, 2, 3, 8, 12)
+        np.testing.assert_array_equal(image[...], data)
+
+
+@pytest.mark.parametrize("letters", ["z", "tcz"])
+def test_rename_with_the_wrong_number_of_letters_is_refused(tmp_path, letters):
+    """One letter for two unnamed axes would be a guess (z of 6? t of 2 and z of 3?):
+    refused, with a message that starts with "rename:" as the registry's refusals of a
+    rename do, so a caller can open the file without it and keep the index."""
+    path, _ = _unnamed_tiff(tmp_path, (2, 3, 8, 12))
+    with pytest.raises(micro_reader.UnsupportedFormatError,
+                       match=r"^rename: .*2 sequence axes \(sizes 2, 3\).*'tc'"):
+        micro_reader.open(path, rename={"sequence": letters})
+
+
+def test_rename_letters_are_checked():
+    with pytest.raises(ValueError, match="not 't', 'c' or 'z'"):
+        micro_reader.open("any.tif", rename={"sequence": "tx"})
+    with pytest.raises(ValueError, match="two indices onto one axis"):
+        micro_reader.open("any.tif", rename={"sequence": "zz"})
+    with pytest.raises(ValueError, match="two indices onto one axis"):
+        micro_reader.open("any.tif", rename={"sequence": "tz", "phase": "z"})
+
+
+def test_translate_axes_rename_rules():
+    from micro_reader.backends.tiff import translate_axes
+    where = "'f.tif' series 0"
+    # an axis of size 1 needs no letter: it stays a fixed index
+    letters, levels = translate_axes("QQYX", where=where, rename={"sequence": "z"},
+                                     shape=(1, 3, 8, 12))
+    assert letters == [None, "z", "y", "x"] and levels == ["sequence", None, None, None]
+    # a file that names an axis twice itself: not the rename's doing
+    with pytest.raises(micro_reader.UnsupportedFormatError) as info:
+        translate_axes("ZZYX", where=where)
+    assert not str(info.value).startswith("rename:")
+    # a rename onto an axis the file names itself is the rename's doing
+    with pytest.raises(micro_reader.UnsupportedFormatError, match="^rename: .*'z' twice"):
+        translate_axes("QZYX", where=where, rename={"sequence": "z"}, shape=(4, 5, 8, 12))
+
+
 def test_rename_of_an_index_the_file_lacks_is_harmless(tmp_path):
     tifffile = pytest.importorskip("tifffile")
     path = str(tmp_path / "plain.tif")
