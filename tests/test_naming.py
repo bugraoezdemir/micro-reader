@@ -81,6 +81,19 @@ def test_a_set_is_named_by_its_index_file_whichever_file_is_opened(tmp_path):
         assert [im.name for im in g.images] == [im.name for im in f.images]
 
 
+def test_an_unnamed_companion_image_is_named_by_the_companion_stem(tmp_path):
+    # rule 4 with an OME companion: 'set.companion.ome' -> 'set', never 'set.companion'
+    companion, _ = test_companion._write(str(tmp_path), images=1)
+    with open(companion, encoding="utf-8") as fh:
+        text = fh.read()
+    assert ' Name="series 0"' in text
+    with open(companion, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(' Name="series 0"', "", 1))
+    with micro_reader.open(companion) as f:
+        assert [im.name for im in f.images] == ["set"]
+        assert f.collection.name == "set"
+
+
 def test_is_pyramid_is_deprecated_for_level(tmp_path):
     path = tmp_path / "a.tif"
     tifffile.imwrite(path, np.zeros((6, 8), np.uint8))

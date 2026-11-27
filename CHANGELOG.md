@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- An OME companion's image without a `Name` is named after the companion without its whole
+  suffix: `set.companion.ome` gives `set`, not `set.companion`. The same holds for the
+  file's collection root (`File.collection.name`). ome_zarr_pyramid's `file_stem` follows
+  the same rule.
+
 ## 0.5.1 (2026-11-27)
 
 Requires the same micro-reader-core (`>=0.0.1,<0.1`) and micro-reader-codecs (`>=0.0.4,<0.1`)
