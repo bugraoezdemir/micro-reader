@@ -233,12 +233,12 @@ def file_stem(path) -> str:
     """A file's name without its extension, the root name of ``File.collection``
     (3.17; the rule ozp's ``tree_from_file`` uses, decided 2026-10-21, M1-2):
     ``xyz.czi`` -> ``xyz``, ``cells.ome.tif`` / ``cells.ome.zarr`` -> ``cells``,
-    ``Index.idx.xml`` -> ``Index.idx``; a folder keeps its whole name, except
-    ``.zarr``."""
+    ``Index.idx.xml`` -> ``Index.idx``, an OME companion ``set.companion.ome`` ->
+    ``set``; a folder keeps its whole name, except ``.zarr``."""
     import os
     path = str(path).rstrip("/\\")
     base = os.path.basename(path)
-    for pattern in (r"\.ome\.[A-Za-z0-9]+$", r"\.zarr$"):
+    for pattern in (r"\.companion\.ome$", r"\.ome\.[A-Za-z0-9]+$", r"\.zarr$"):
         stem = re.sub(pattern, "", base, flags=re.IGNORECASE)
         if stem != base:
             return stem or base
