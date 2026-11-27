@@ -260,12 +260,18 @@ POSITION_KINDS = ("mmstack", "ndtiff")
 
 
 def translate_axes(axes: str, *, lsm: bool = False, eer: bool = False, where: str = "",
-                   rename: dict = None, positions: bool = False):
+                   rename: dict = None, positions: bool = False, shape=None):
     """tifffile series axes -> (array axis letter or None per axis, image
     index or None per axis); *rename* makes an index an axis instead;
-    *positions*: ``R`` is a stage position (``POSITION_KINDS``)."""
+    *positions*: ``R`` is a stage position (``POSITION_KINDS``).
+
+    A renamed index gives one letter per axis of that index, in file order (outer
+    first): QQYX with ``rename={'sequence': 'tz'}`` reads the first Q as t, the
+    second as z. Nothing is assumed about what unnamed axes are, so the number of
+    letters must match; an axis of size 1 (*shape*) needs none and stays a fixed
+    index. Workplan MR36."""
     rename = rename or {}
-    letters, levels = [], []
+    letters, levels, renamed = [], [], set()
     for a in axes.upper():
         if a in AXIS_LETTERS:
             level, letter = None, AXIS_LETTERS[a]
@@ -275,15 +281,39 @@ def translate_axes(axes: str, *, lsm: bool = False, eer: bool = False, where: st
             position = (a == "P" and lsm) or (a == "R" and positions)
             level = "series" if position else INDEX_LETTERS.get(a, "sequence")
             letter = None
-            if level in rename:
-                level, letter = None, rename[level]
         levels.append(level)
         letters.append(letter)
+    for name, wanted in rename.items():
+        found = [p for p, level in enumerate(levels) if level == name]
+        varying = [p for p in found if shape is None or int(shape[p]) > 1]
+        if not varying:
+            continue                         # the index is absent here: nothing to do
+        if len(wanted) != len(varying):
+            n = len(varying)
+            sizes = (" (sizes " + ", ".join(str(int(shape[p])) for p in varying) + ")"
+                     if shape is not None else "")
+            how = (f"give one letter (t, c or z) per axis, outer first, as in "
+                   f"rename={{{name!r}: {'tcz'[:n]!r}}}, or open"
+                   if n <= 3 else "only t, c and z can be given, so open")
+            raise UnsupportedFormatError(
+                f"rename: {where}: series axes {axes!r} have {n} {name} axes{sizes}, "
+                f"and rename={{{name!r}: {wanted!r}}} gives {len(wanted)} "
+                f"letter{'s' if len(wanted) != 1 else ''}. The file does not say what "
+                f"these axes are: {how} the file without rename to keep {name!r} as an "
+                f"index")
+        for p, letter in zip(varying, wanted):
+            levels[p], letters[p] = None, letter
+            renamed.add(letter)
     used = [x for x in letters if x]
     doubled = sorted({x for x in used if used.count(x) > 1})
     if doubled:
+        # Doubled BY the rename (QZYX with rename={'sequence': 'z'}: the unnamed axis
+        # would be a second z): the message starts with "rename:", as the registry's
+        # refusals of a rename do, so a caller can open the file again without the
+        # rename and keep the index (eubi's open_renamed does). Workplan MR36.
+        prefix = "rename: " if doubled[0] in renamed else ""
         raise UnsupportedFormatError(
-            f"{where}: series axes {axes!r} give axis {doubled[0]!r} twice"
+            f"{prefix}{where}: series axes {axes!r} give axis {doubled[0]!r} twice"
             + (f" (with rename={rename})" if rename else ""))
     return letters, levels
 
@@ -1263,7 +1293,7 @@ def _images(tif, series: list, path: str, tiles: str, resolutions: str = "base",
         where = f"{os.path.basename(path)!r} series {i}"
         letters, frame = translate_axes(s.axes, lsm=bool(tif.is_lsm),
                                         eer=bool(getattr(s.keyframe, "is_eer", False)),
-                                        where=where, rename=rename,
+                                        where=where, rename=rename, shape=s.shape,
                                         positions=s.kind in POSITION_KINDS)
         # frame axes of more than one index make images; size 1 is just fixed
         by_level: dict = {}

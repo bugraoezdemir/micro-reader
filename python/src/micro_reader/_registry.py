@@ -72,8 +72,10 @@ def open(path, backend: Optional[str] = None, *, tiles: str = "separate",  # noq
 
     *rename* makes an index an array axis, for files that do not say what a
     dimension is: ``rename={"sequence": "z"}`` reads a plain multi-page TIFF
-    as one z-stack.  The target is ``t``, ``c`` or ``z``; a format that
-    cannot do it for that index raises.
+    as one z-stack.  The target is ``t``, ``c`` or ``z``, or one of them per
+    dimension of that index, outer first (``{"sequence": "tz"}`` for a TIFF whose
+    two dimensions are unnamed: one letter for two is refused, never guessed); a
+    format that cannot do it for that index raises.
 
     *plates* (docs/HCS.md): ``True``, the default, reads a file that is a plate
     as one: ``File.plates`` describes it, and its images are indexed by well and
@@ -201,10 +203,14 @@ def _check_rename(rename: Optional[dict]) -> dict:
         if name not in SAMPLED_INDICES:
             raise ValueError(f"rename: {name!r} is not an index that can become an axis "
                              f"(those are {SAMPLED_INDICES})")
-        if axis not in ("t", "c", "z"):
-            raise ValueError(f"rename {name!r}: {axis!r} is not 't', 'c' or 'z'")
-    if len(set(rename.values())) != len(rename):
-        raise ValueError(f"rename {rename}: two indices onto one axis")
+        # one letter per axis of the index: 'tz' for a file with two unnamed axes
+        if not axis or any(letter not in "tcz" for letter in axis):
+            raise ValueError(f"rename {name!r}: {axis!r} is not 't', 'c' or 'z' (or one "
+                             "of them per axis of the index, such as 'tz')")
+    letters = "".join(rename.values())
+    if len(set(letters)) != len(letters):
+        raise ValueError(f"rename {rename}: two indices onto one axis (each axis is "
+                         "given once)")
     return rename
 
 

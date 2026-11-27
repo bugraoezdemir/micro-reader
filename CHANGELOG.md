@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 (2026-11-27)
+
+Requires the same micro-reader-core (`>=0.0.1,<0.1`) and micro-reader-codecs (`>=0.0.4,<0.1`)
+as 0.5.0; neither is released again.
 
 ### New
 
@@ -41,6 +44,16 @@
   them, opened as plain series with `plates=True`. Such planes are the file's own, as the
   OME-TIFF specification says, and the file now opens as a plate. A companion file
   (`.companion.ome`) still has to name the file of every plane.
+- A TIFF with two or more axes that it does not name (a 4-D array written by tifffile
+  without axes reads as `QQYX`) can now be read with its axes: `rename` takes one letter
+  per unnamed axis, outer first, so `rename={"sequence": "tz"}` reads the first as t and
+  the second as z. The file does not say what these axes are, so micro-reader does not
+  guess: a single letter, as in `rename={"sequence": "z"}`, is refused, and the message
+  lists the axes with their sizes. Before, that refusal did not say the rename caused
+  it, so a caller could not tell that opening the file without the rename would work,
+  and eubi-bridge sent such files to its older readers. The refusal now starts with
+  `rename:`, as the other refusals of a rename do. Opened without `rename`, the file
+  gives one image per plane, as before.
 
 ### Deprecated
 
