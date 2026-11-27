@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 (2026-11-27)
+
+Requires the same micro-reader-core (`>=0.0.1,<0.1`) and micro-reader-codecs (`>=0.0.4,<0.1`)
+as 0.5.0; neither is released again.
 
 ### New
 
